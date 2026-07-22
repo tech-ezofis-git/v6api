@@ -16,6 +16,7 @@ using SaaSApp.Users.Application.Users.Commands.CreateUser;
 using SaaSApp.Users.Application.Users.Commands.DeleteUser;
 using SaaSApp.Users.Application.Users.Commands.UpdateUser;
 using SaaSApp.Users.Application.Roles.Commands.CreateRole;
+using SaaSApp.Users.Application.Roles.Commands.DeleteRole;
 using SaaSApp.Users.Application.Roles.Commands.UpdateRole;
 using SaaSApp.Users.Application.Roles.Queries.ListPermissionCatalog;
 using SaaSApp.Users.Application.Roles.Queries.ListRoles;
@@ -222,6 +223,22 @@ public sealed class UsersController : ControllerBase
             request.Permissions);
         var result = await _mediator.Send(command, cancellationToken);
         if (!result.Success)
+            return StatusCode(result.StatusCode, new { error = result.Error });
+        return NoContent();
+    }
+
+    /// <summary>Soft-delete a custom role. Fails if the role is assigned to any user. Admin only.</summary>
+    [HttpDelete("roles/{roleId:guid}")]
+    [Authorize(Policy = AuthorizationPolicies.Admin)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> DeleteRole(Guid roleId, CancellationToken cancellationToken)
+    {
+        var result = await _mediator.Send(new DeleteRoleCommand(roleId), cancellationToken);
+        if (!result.Found)
+            return NotFound();
+        if (!string.IsNullOrWhiteSpace(result.Error))
             return StatusCode(result.StatusCode, new { error = result.Error });
         return NoContent();
     }

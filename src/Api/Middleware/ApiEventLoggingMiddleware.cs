@@ -95,6 +95,9 @@ public sealed class ApiEventLoggingMiddleware
                     if (!shouldLog)
                         return Task.CompletedTask;
 
+                    if (!EventLogRouteMapper.ShouldLog(method, path))
+                        return Task.CompletedTask;
+
                     context.Items.TryGetValue(LoginAccessTokenItemKey, out var tokenObj);
                     var loginAccessToken = tokenObj as string;
 
@@ -226,7 +229,7 @@ public sealed class ApiEventLoggingMiddleware
         if (!value.StartsWith("/api/", StringComparison.OrdinalIgnoreCase))
             return false;
 
-        if (HttpMethods.IsOptions(method))
+        if (HttpMethods.IsOptions(method) || HttpMethods.IsGet(method) || HttpMethods.IsHead(method))
             return false;
 
         if (value.StartsWith("/health", StringComparison.OrdinalIgnoreCase)

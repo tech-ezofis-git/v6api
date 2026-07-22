@@ -67,3 +67,20 @@ public sealed record FormControlsResult(
     string FormId,
     int ControlCount,
     IReadOnlyList<FormControlItem> Controls);
+
+public enum FormControlDistinctValuesStatus
+{
+    Found,
+    FormNotFound,
+    ControlNotFound,
+    TableNotFound,
+    ColumnNotFound
+}
+
+public sealed record FormControlDistinctValuesResult(
+    FormControlDistinctValuesStatus Status,
+    string? WFormId,
+    string? WFormControlName,
+    string? JsonId,
+    string? ColumnName,
+    IReadOnlyList<string>? Values);

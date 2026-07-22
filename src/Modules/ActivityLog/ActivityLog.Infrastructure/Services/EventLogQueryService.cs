@@ -25,7 +25,14 @@ public sealed class EventLogQueryService : IEventLogQueryService
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
         var offset = (page - 1) * pageSize;
 
-        var where = new List<string> { "TenantId = @TenantId" };
+        var where = new List<string>
+        {
+            "TenantId = @TenantId",
+            "(HttpMethod IS NULL OR UPPER(HttpMethod) NOT IN (N'GET', N'HEAD'))",
+            "EventType NOT LIKE N'%Viewed'",
+            "EventType NOT LIKE N'%Listed'",
+            "(Path IS NULL OR Path NOT LIKE N'%/search%')"
+        };
         var parameters = new List<SqlParameter> { new("@TenantId", tenantId) };
 
         if (!string.IsNullOrWhiteSpace(query.Category))

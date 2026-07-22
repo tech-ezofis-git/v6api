@@ -34,4 +34,10 @@ public interface IFormEntryService
         string formId,
         FormEntryAllRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Get distinct non-empty values for a form control from ezfb_{form}_items.</summary>
+    Task<FormControlDistinctValuesResult> GetDistinctControlValuesAsync(
+        string wFormId,
+        string wFormControlName,
+        CancellationToken cancellationToken = default);
 }

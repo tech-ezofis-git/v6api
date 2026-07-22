@@ -63,6 +63,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IFormJsonStorageService, FormJsonStorageService>();
         services.AddScoped<IFormService, FormService>();
         services.AddScoped<IFormEntryService, FormEntryService>();
+        services.AddScoped<IWorkflowTicketSearchService, WorkflowTicketSearchService>();
         services.AddScoped<IFormMasterFileUploadService, FormMasterFileUploadService>();
         services.AddScoped<IConnectorService, ConnectorService>();
         services.Configure<ConnectorOAuthOptions>(configuration.GetSection(ConnectorOAuthOptions.SectionName));
