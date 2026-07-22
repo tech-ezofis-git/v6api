@@ -16,7 +16,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
     private static readonly string[] NumberDateOperators =
     [
-        "eq", "neq", "gt", "gte", "lt", "lte", "in", "isNull", "isNotNull"
+        "eq", "neq", "gt", "gte", "lt", "lte", "between", "in", "isNull", "isNotNull"
     ];
 
     private static readonly string[] BoolOperators = ["eq", "neq", "isNull", "isNotNull"];
@@ -182,7 +182,16 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             if (!TryResolveColumn(filter.Criteria, controls, ezfbColumns, out var column))
                 throw new ArgumentException($"Unknown filter field '{filter.Criteria}'.");
 
-            if (!TryBuildOperatorCondition(column, filter.Condition, filter.Value, index++, out var sqlPart, out var filterParams, tableAlias: "e"))
+            if (!TryBuildOperatorCondition(
+                    column,
+                    filter.Condition,
+                    filter.Value,
+                    filter.ValueTo,
+                    filter.DataType,
+                    index++,
+                    out var sqlPart,
+                    out var filterParams,
+                    tableAlias: "e"))
                 throw new ArgumentException($"Unsupported filter condition '{filter.Condition}' for field '{filter.Criteria}'.");
 
             ezfbWhereParts.Add(sqlPart);
@@ -811,7 +820,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     private static bool TryBuildOperatorCondition(
         string column,
         string condition,
-        string? value,
+        JsonElement value,
+        string? valueTo,
+        string? dataType,
         int index,
         out string sql,
         out List<SqlParameter> parameters,
@@ -824,42 +835,52 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var columnExpr = $"{prefix}[{escaped}]";
         var cond = (condition ?? string.Empty).Trim().ToLowerInvariant();
         var paramBase = $"@p{index}";
+        var typeHint = (dataType ?? string.Empty).Trim().ToLowerInvariant();
+        var isDate = typeHint is "date" or "datetime" or "time";
+
+        if (isDate && value.ValueKind == JsonValueKind.Array)
+            throw new ArgumentException("For dataType 'date', value must be a string (use valueTo for the range end).");
+
+        var scalar = GetScalarValue(value);
+        var listValues = GetValueList(value);
 
         switch (cond)
         {
             case "eq" or "=" or "equal":
                 sql = $"{columnExpr} = {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, value ?? string.Empty));
+                parameters.Add(new SqlParameter(paramBase, scalar ?? string.Empty));
                 return true;
             case "neq" or "!=" or "notequal":
                 sql = $"{columnExpr} <> {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, value ?? string.Empty));
+                parameters.Add(new SqlParameter(paramBase, scalar ?? string.Empty));
                 return true;
             case "contains" or "like":
                 sql = $"{columnExpr} LIKE {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, $"%{value ?? string.Empty}%"));
+                parameters.Add(new SqlParameter(paramBase, $"%{scalar ?? string.Empty}%"));
                 return true;
             case "startswith":
                 sql = $"{columnExpr} LIKE {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, $"{value ?? string.Empty}%"));
+                parameters.Add(new SqlParameter(paramBase, $"{scalar ?? string.Empty}%"));
                 return true;
             case "endswith":
                 sql = $"{columnExpr} LIKE {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, $"%{value ?? string.Empty}"));
+                parameters.Add(new SqlParameter(paramBase, $"%{scalar ?? string.Empty}"));
                 return true;
             case "gt":
-                return BuildComparison(columnExpr, ">", paramBase, value, out sql, out parameters);
+                return BuildComparison(columnExpr, ">", paramBase, scalar, out sql, out parameters);
             case "gte":
-                return BuildComparison(columnExpr, ">=", paramBase, value, out sql, out parameters);
+                return BuildComparison(columnExpr, ">=", paramBase, scalar, out sql, out parameters);
             case "lt":
-                return BuildComparison(columnExpr, "<", paramBase, value, out sql, out parameters);
+                return BuildComparison(columnExpr, "<", paramBase, scalar, out sql, out parameters);
             case "lte":
-                return BuildComparison(columnExpr, "<=", paramBase, value, out sql, out parameters);
+                return BuildComparison(columnExpr, "<=", paramBase, scalar, out sql, out parameters);
+            case "between":
+                return BuildBetween(columnExpr, paramBase, scalar, valueTo, typeHint, out sql, out parameters);
             case "in":
             {
-                var values = ParseInValues(value);
+                var values = listValues.Count > 0 ? listValues : ParseInValues(scalar);
                 if (values.Count == 0)
-                    return false;
+                    throw new ArgumentException("Filter condition 'in' requires a non-empty value array or comma-separated string.");
                 var names = new List<string>();
                 for (var i = 0; i < values.Count; i++)
                 {
@@ -879,6 +900,73 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             default:
                 return false;
         }
+    }
+
+    private static string? GetScalarValue(JsonElement value) => value.ValueKind switch
+    {
+        JsonValueKind.Undefined or JsonValueKind.Null => null,
+        JsonValueKind.String => value.GetString(),
+        JsonValueKind.Number => value.GetRawText(),
+        JsonValueKind.True => "true",
+        JsonValueKind.False => "false",
+        JsonValueKind.Array => value.GetArrayLength() > 0 ? GetScalarValue(value[0]) : null,
+        _ => value.GetRawText()
+    };
+
+    private static List<string> GetValueList(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Array)
+            return new List<string>();
+
+        return value.EnumerateArray()
+            .Select(GetScalarValue)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => s!.Trim())
+            .ToList();
+    }
+
+    private static bool BuildBetween(
+        string columnExpr,
+        string paramBase,
+        string? valueFrom,
+        string? valueTo,
+        string typeHint,
+        out string sql,
+        out List<SqlParameter> parameters)
+    {
+        parameters = new List<SqlParameter>();
+        if (string.IsNullOrWhiteSpace(valueFrom) || string.IsNullOrWhiteSpace(valueTo))
+            throw new ArgumentException("Filter condition 'between' requires value and valueTo.");
+
+        var fromName = $"{paramBase}_from";
+        var toName = $"{paramBase}_to";
+        var isDate = typeHint is "date" or "datetime" or "time"
+            || (DateTime.TryParse(valueFrom, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out _)
+                && !decimal.TryParse(valueFrom, NumberStyles.Number, CultureInfo.InvariantCulture, out _));
+
+        if (isDate
+            && DateTime.TryParse(valueFrom, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var fromDt)
+            && DateTime.TryParse(valueTo, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var toDt))
+        {
+            sql = $"TRY_CONVERT(datetime2, {columnExpr}) >= {fromName} AND TRY_CONVERT(datetime2, {columnExpr}) <= {toName}";
+            parameters.Add(new SqlParameter(fromName, fromDt));
+            parameters.Add(new SqlParameter(toName, toDt));
+            return true;
+        }
+
+        if (decimal.TryParse(valueFrom, NumberStyles.Any, CultureInfo.InvariantCulture, out var fromNum)
+            && decimal.TryParse(valueTo, NumberStyles.Any, CultureInfo.InvariantCulture, out var toNum))
+        {
+            sql = $"TRY_CONVERT(float, {columnExpr}) >= {fromName} AND TRY_CONVERT(float, {columnExpr}) <= {toName}";
+            parameters.Add(new SqlParameter(fromName, fromNum));
+            parameters.Add(new SqlParameter(toName, toNum));
+            return true;
+        }
+
+        sql = $"{columnExpr} >= {fromName} AND {columnExpr} <= {toName}";
+        parameters.Add(new SqlParameter(fromName, valueFrom));
+        parameters.Add(new SqlParameter(toName, valueTo));
+        return true;
     }
 
     private static SqlParameter[] CloneParameters(IEnumerable<SqlParameter> source) =>

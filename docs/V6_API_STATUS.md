@@ -124,6 +124,11 @@ Use **`move-next`** and **`actions`** for workflow progression instead.
 | `POST` | `/api/workflow/all` | TenantUser | Filter/sort/group/paginate workflows |
 | `GET` | `/api/workflow/listByUserId/{wId?}` | TenantUser | Workflows for user with inbox/sent/completed counts |
 | `POST` | `/api/workflow/inboxList/{id}` | TenantUser | Inbox transactions with filter/sort/group |
+| `GET` | `/api/workflows/{workflowId}/filter-fields` | TenantUser | Form filter schema (`dataType` + operators; date/number include `between`) |
+| `GET` | `/api/workflows/{workflowId}/control-values/{controlName}` | TenantUser | Distinct values for a form control |
+| `POST` | `/api/workflows/{workflowId}/filter/search` | TenantUser | Form-field filtered ticket search (see filterBy notes below) |
+
+**`filter/search` `filterBy`:** each clause is `{ criteria, condition, value, valueTo?, dataType? }`. For `dataType: "date"`, `value` is a string and ranges use `condition: "between"` with `valueTo`. For other types, `value` may be a string/number or a JSON array (e.g. `in`). Legacy string-only `value` without `dataType`/`valueTo` still works.
 
 #### Instance lifecycle
 

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace SaaSApp.Workflow.Application.Contracts;
 
 public sealed record WorkflowTicketFilterFieldDto(
@@ -11,10 +13,20 @@ public sealed record WorkflowTicketFilterSchemaDto(
     string? FormId,
     IReadOnlyList<WorkflowTicketFilterFieldDto> Fields);
 
+/// <summary>
+/// One filter clause for POST .../filter/search.
+/// <list type="bullet">
+/// <item><description><c>dataType</c> date: <c>value</c> is a string; use <c>valueTo</c> with condition <c>between</c> for ranges.</description></item>
+/// <item><description>Other dataTypes: <c>value</c> may be a string/number or a JSON array (e.g. for <c>in</c>).</description></item>
+/// <item><description>Legacy clients may still send <c>value</c> as a plain string without <c>dataType</c>/<c>valueTo</c>.</description></item>
+/// </list>
+/// </summary>
 public sealed record WorkflowTicketSearchFilter(
     string Criteria,
     string Condition,
-    string? Value);
+    JsonElement Value = default,
+    string? ValueTo = null,
+    string? DataType = null);
 
 public sealed record WorkflowTicketSearchSortBy(
     string Criteria = "raisedAt",
