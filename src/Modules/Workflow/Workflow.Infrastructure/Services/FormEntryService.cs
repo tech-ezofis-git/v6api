@@ -879,4 +879,81 @@ public sealed class FormEntryService : IFormEntryService
 
         return false;
     }
+
+    public async Task<FormControlDistinctValuesResult> GetDistinctControlValuesAsync(
+        string wFormId,
+        string wFormControlName,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(wFormId) || string.IsNullOrWhiteSpace(wFormControlName))
+            return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.FormNotFound, wFormId, wFormControlName, null, null, null);
+
+        var normalizedFormId = FormIdNaming.NormalizeFormId(wFormId);
+        var connectionString = _tenantContext.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var formMeta = await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken);
+        if (formMeta == null)
+            return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.FormNotFound, normalizedFormId, wFormControlName, null, null, null);
+
+        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
+        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+
+        var control = controls.FirstOrDefault(c =>
+            !string.IsNullOrWhiteSpace(c.Name) &&
+            string.Equals(c.Name.Trim(), wFormControlName.Trim(), StringComparison.OrdinalIgnoreCase));
+
+        if (control == null)
+            return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.ControlNotFound, normalizedFormId, wFormControlName, null, null, null);
+
+        var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
+        var tableName = $"ezfb_{tableSuffix}_items";
+        if (!await EzfbTableExistsAsync(connection, tableName, cancellationToken))
+            return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.TableNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
+
+        var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
+        if (!TryResolveEzfbColumn(control.JsonId, ezfbColumns, out var resolvedColumn))
+            return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.ColumnNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
+
+        var values = await LoadDistinctColumnValuesAsync(connection, tableName, resolvedColumn, cancellationToken);
+        return new FormControlDistinctValuesResult(
+            FormControlDistinctValuesStatus.Found,
+            normalizedFormId,
+            wFormControlName.Trim(),
+            control.JsonId,
+            resolvedColumn,
+            values);
+    }
+
+    private static async Task<List<string>> LoadDistinctColumnValuesAsync(
+        SqlConnection connection,
+        string tableName,
+        string column,
+        CancellationToken cancellationToken)
+    {
+        var escaped = EscapeColumn(column);
+        var sql = $"""
+            SELECT DISTINCT [{escaped}]
+            FROM dbo.[{tableName}]
+            WHERE (isDeleted = 0 OR isDeleted IS NULL)
+              AND [{escaped}] IS NOT NULL
+              AND LTRIM(RTRIM(CAST([{escaped}] AS NVARCHAR(MAX)))) <> ''
+            ORDER BY [{escaped}]
+            """;
+
+        var values = new List<string>();
+        await using var cmd = new SqlCommand(sql, connection);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var val = reader.IsDBNull(0) ? null : reader.GetValue(0)?.ToString();
+            if (!string.IsNullOrWhiteSpace(val))
+                values.Add(val);
+        }
+
+        return values;
+    }
 }

@@ -26,6 +26,7 @@ using SaaSApp.Workflow.Application.Workflows.Queries.ListSlaBreaches;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetWorkflowCounts;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetWorkflowWiseInboxCounts;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Forms;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetLegacyMailboxInstanceCount;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetLegacyMailboxList;
 using SaaSApp.Workflow.Application.Workflows.Commands.AddComment;
@@ -66,6 +67,7 @@ public sealed class WorkflowsController : ControllerBase
     private readonly IRepositoryItemShareService _itemShares;
     private readonly IShareGuestUserProvisioningService _guestProvisioning;
     private readonly IWorkflowInboxShareAssignmentService _inboxShareAssignment;
+    private readonly IWorkflowTicketSearchService _ticketSearch;
 
     public WorkflowsController(
         IMediator mediator,
@@ -83,7 +85,8 @@ public sealed class WorkflowsController : ControllerBase
         IWorkflowAttachmentArchiveService attachmentArchive,
         IRepositoryItemShareService itemShares,
         IShareGuestUserProvisioningService guestProvisioning,
-        IWorkflowInboxShareAssignmentService inboxShareAssignment)
+        IWorkflowInboxShareAssignmentService inboxShareAssignment,
+        IWorkflowTicketSearchService ticketSearch)
     {
         _mediator = mediator;
         _workflowSchemaService = workflowSchemaService;
@@ -101,6 +104,7 @@ public sealed class WorkflowsController : ControllerBase
         _itemShares = itemShares;
         _guestProvisioning = guestProvisioning;
         _inboxShareAssignment = inboxShareAssignment;
+        _ticketSearch = ticketSearch;
     }
 
     /// <summary>Apply workflow schema to current tenant database. Call this if workflow.Workflows is missing. Requires X-Tenant-Id. In Development, no auth required.</summary>
@@ -486,6 +490,115 @@ public sealed class WorkflowsController : ControllerBase
         }
 
         return Ok(result);
+    }
+
+    /// <summary>
+    /// Filter-field schema for form-filtered search (from wFormControl for the workflow's FormId).
+    /// </summary>
+    [HttpGet("{workflowId:guid}/filter-fields")]
+    [ProducesResponseType(typeof(WorkflowTicketFilterSchemaDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetFilterFields(Guid workflowId, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var schema = await _ticketSearch.GetFilterFieldsAsync(workflowId, cancellationToken);
+            if (schema == null)
+                return NotFound(new { error = "Workflow not found." });
+            return Ok(schema);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Distinct non-empty values for a form control on this workflow's FormId (ezfb_{suffix}_items).
+    /// </summary>
+    [HttpGet("{workflowId:guid}/control-values/{controlName}")]
+    [ProducesResponseType(typeof(FormControlDistinctValuesResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetDistinctControlValues(
+        Guid workflowId,
+        string controlName,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(controlName))
+            return BadRequest(new { error = "controlName is required." });
+
+        try
+        {
+            var result = await _ticketSearch.GetDistinctControlValuesAsync(
+                workflowId,
+                controlName,
+                cancellationToken);
+
+            if (result == null)
+                return NotFound(new { error = "Workflow not found." });
+
+            return result.Status switch
+            {
+                FormControlDistinctValuesStatus.Found => Ok(result),
+                FormControlDistinctValuesStatus.FormNotFound => BadRequest(new { error = "Workflow FormId is not configured." }),
+                FormControlDistinctValuesStatus.ControlNotFound => NotFound(new { error = $"Form control '{controlName}' not found." }),
+                FormControlDistinctValuesStatus.TableNotFound => NotFound(new { error = "Form entry table not found." }),
+                FormControlDistinctValuesStatus.ColumnNotFound => BadRequest(new { error = $"Column for control '{controlName}' not found in entry table." }),
+                _ => NotFound()
+            };
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Search workflow tickets by form-field operator DSL (ezfb → processForm).
+    /// Returns grouped legacy mailbox rows (data[].key / data[].value) for all matching instances.
+    /// </summary>
+    [HttpPost("{workflowId:guid}/filter/search")]
+    [ProducesResponseType(typeof(WorkflowFilterSearchResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> FilterSearch(
+        Guid workflowId,
+        [FromBody] WorkflowTicketSearchRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var body = request ?? new WorkflowTicketSearchRequest();
+        var page = body.CurrentPage <= 0 ? 1 : body.CurrentPage;
+        var pageSize = body.ItemsPerPage <= 0 ? 20 : body.ItemsPerPage;
+
+        try
+        {
+            var outcome = await _ticketSearch.SearchAsync(workflowId, body, cancellationToken);
+
+            return outcome.Status switch
+            {
+                WorkflowTicketSearchStatus.WorkflowNotFound => NotFound(new { error = "Workflow not found." }),
+                WorkflowTicketSearchStatus.FormNotConfigured => BadRequest(new { error = "Workflow FormId is not configured." }),
+                WorkflowTicketSearchStatus.TablesMissing => Ok(new WorkflowFilterSearchResult(
+                    Array.Empty<WorkflowFilterSearchGroup>(),
+                    new WorkflowFilterSearchMeta(page, pageSize, 0),
+                    TableExists: false)),
+                WorkflowTicketSearchStatus.Found when outcome.Result != null => Ok(outcome.Result),
+                _ => Ok(new WorkflowFilterSearchResult(
+                    Array.Empty<WorkflowFilterSearchGroup>(),
+                    new WorkflowFilterSearchMeta(page, pageSize, 0),
+                    TableExists: true))
+            };
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     /// <summary>Gets inbox transactions for a workflow, with filter/sort/group/pagination for the current user.</summary>

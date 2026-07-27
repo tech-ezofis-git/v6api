@@ -48,6 +48,37 @@ public static partial class EventLogRouteMapper
         return MapGeneric(normalizedPath, statusCode);
     }
 
+    /// <summary>
+    /// Whether this request should be written to Event Log.
+    /// Skips GET/HEAD, known view/list-only routes, and search endpoints; keeps mutations and meaningful actions.
+    /// </summary>
+    public static bool ShouldLog(string method, string path)
+    {
+        if (HttpMethodsEqual(method, "GET") || HttpMethodsEqual(method, "HEAD"))
+            return false;
+
+        var normalizedPath = NormalizePath(path);
+        if (IsViewOnlyRoute(method, normalizedPath))
+            return false;
+
+        return true;
+    }
+
+    private static bool IsViewOnlyRoute(string method, string path)
+    {
+        // Forms list is exposed as GET or POST /api/form/all - treat both as view-only.
+        if (path.Equals("/api/form/all", StringComparison.OrdinalIgnoreCase)
+            && (HttpMethodsEqual(method, "GET") || HttpMethodsEqual(method, "POST")))
+            return true;
+
+        // Search / filter-search style endpoints (e.g. POST .../filter/search).
+        if (path.Contains("/search", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return false;
+    }
+
+
     public static bool IsAuthLoginRoute(string path)
     {
         var p = NormalizePath(path);

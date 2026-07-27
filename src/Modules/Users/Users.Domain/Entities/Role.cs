@@ -87,4 +87,6 @@ public sealed class Role : Entity<Guid>, ITenantEntity
         _menus.Clear();
         AssignMenus(menus);
     }
+
+    public void SoftDelete() => IsDeleted = true;
 }
