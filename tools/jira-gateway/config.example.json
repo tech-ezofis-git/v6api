@@ -1,0 +1,9 @@
+{
+  "ListenHost": "127.0.0.1",
+  "ListenPort": 5055,
+  "BaseUrl": "https://ezofis.atlassian.net",
+  "Email": "support@ezofis.com",
+  "ApiToken": "PASTE_JIRA_API_TOKEN_HERE",
+  "ProjectKey": "VP",
+  "IssueType": "Task"
+}

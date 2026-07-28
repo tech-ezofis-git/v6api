@@ -134,7 +134,7 @@ public sealed class SupportTicketEmailService
             <ul>
               <li><strong>Category:</strong> {EncodeOrDash(ctx.SupportCategory)}</li>
               <li><strong>Priority:</strong> {EncodeOrDash(ctx.Priorty)}</li>
-              <li><strong>Preferred contact:</strong> {EncodeOrDash(ctx.PreferredContact)}</li>
+              <li><strong>Email:</strong> {EncodeOrDash(ctx.CallerEmail)}</li>
               <li><strong>Phone:</strong> {EncodeOrDash(ctx.PhoneNO)}</li>
             </ul>
             <p><strong>Description:</strong><br/>{EncodeOrDash(ctx.RequestDescription)?.Replace("\n", "<br/>", StringComparison.Ordinal)}</p>
@@ -159,7 +159,7 @@ public sealed class SupportTicketEmailService
               <li><strong>Caller email:</strong> {EncodeOrDash(ctx.CallerEmail)}</li>
               <li><strong>Category:</strong> {EncodeOrDash(ctx.SupportCategory)}</li>
               <li><strong>Priority:</strong> {EncodeOrDash(ctx.Priorty)}</li>
-              <li><strong>Preferred contact:</strong> {EncodeOrDash(ctx.PreferredContact)}</li>
+              <li><strong>Email:</strong> {EncodeOrDash(ctx.CallerEmail)}</li>
               <li><strong>Phone:</strong> {EncodeOrDash(ctx.PhoneNO)}</li>
               <li><strong>Submitted (UTC):</strong> {ctx.CreatedAtUtc:yyyy-MM-dd HH:mm:ss}</li>
               {jiraLine}

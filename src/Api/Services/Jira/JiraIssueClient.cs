@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using Microsoft.Extensions.Options;
 
 namespace SaaSApp.Api.Services.Jira;
@@ -25,9 +26,18 @@ public sealed class JiraCreateIssueResult
     public string? RawResponse { get; init; }
 }
 
-/// <summary>Creates Jira Cloud issues via REST API v3.</summary>
+/// <summary>
+/// Creates Jira Cloud issues via REST API v3, or via a local Python gateway when
+/// <see cref="JiraOptions.UseProxy"/> is true (workaround for Windows Schannel TLS limits).
+/// </summary>
 public sealed class JiraIssueClient
 {
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
+    };
+
     private readonly HttpClient _httpClient;
     private readonly JiraOptions _options;
     private readonly ILogger<JiraIssueClient> _logger;
@@ -55,6 +65,113 @@ public sealed class JiraIssueClient
             };
         }
 
+        if (_options.UseProxy)
+            return await CreateIssueViaProxyAsync(request, cancellationToken);
+
+        return await CreateIssueDirectAsync(request, cancellationToken);
+    }
+
+    private async Task<JiraCreateIssueResult> CreateIssueViaProxyAsync(
+        JiraCreateIssueRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(_options.ProxyBaseUrl))
+        {
+            return new JiraCreateIssueResult
+            {
+                Success = false,
+                RawResponse = "Jira:UseProxy is true but ProxyBaseUrl is not configured."
+            };
+        }
+
+        var proxyUrl = $"{_options.ProxyBaseUrl.TrimEnd('/')}/jira/create-issue";
+        var payload = new
+        {
+            supportCategory = request.SupportCategory,
+            priority = request.Priority,
+            preferredContact = request.PreferredContact,
+            phoneNO = request.PhoneNO,
+            requestDescription = request.RequestDescription,
+            isEmailSend = request.IsEmailSend,
+            callerEmail = request.CallerEmail,
+            // Optional overrides; gateway config is the source of truth when omitted.
+            projectKey = _options.ProjectKey,
+            issueType = _options.IssueType,
+            baseUrl = _options.BaseUrl
+        };
+
+        var json = JsonSerializer.Serialize(payload, JsonOptions);
+
+        try
+        {
+            using var httpRequest = new HttpRequestMessage(HttpMethod.Post, proxyUrl);
+            httpRequest.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
+            httpRequest.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+            using var response = await _httpClient.SendAsync(httpRequest, cancellationToken);
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
+
+            if (!response.IsSuccessStatusCode)
+            {
+                _logger.LogWarning(
+                    "Jira proxy create issue failed with {StatusCode}: {Body}",
+                    (int)response.StatusCode,
+                    body);
+
+                return ParseProxyResult(body, fallbackSuccess: false)
+                    ?? new JiraCreateIssueResult { Success = false, RawResponse = body };
+            }
+
+            return ParseProxyResult(body, fallbackSuccess: true)
+                ?? new JiraCreateIssueResult { Success = false, RawResponse = body };
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Jira proxy create issue threw an exception");
+            return new JiraCreateIssueResult
+            {
+                Success = false,
+                RawResponse = ex.Message
+            };
+        }
+    }
+
+    private static JiraCreateIssueResult? ParseProxyResult(string body, bool fallbackSuccess)
+    {
+        if (string.IsNullOrWhiteSpace(body))
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            var root = doc.RootElement;
+            bool success;
+            if (root.TryGetProperty("success", out var s))
+                success = s.ValueKind == JsonValueKind.True;
+            else
+                success = fallbackSuccess && root.TryGetProperty("issueKey", out _);
+
+            return new JiraCreateIssueResult
+            {
+                Success = success,
+                IssueId = root.TryGetProperty("issueId", out var idEl) ? idEl.GetString() : null,
+                IssueKey = root.TryGetProperty("issueKey", out var keyEl) ? keyEl.GetString() : null,
+                IssueUrl = root.TryGetProperty("issueUrl", out var urlEl) ? urlEl.GetString() : null,
+                RawResponse = root.TryGetProperty("rawResponse", out var rawEl)
+                    ? rawEl.GetString()
+                    : body
+            };
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private async Task<JiraCreateIssueResult> CreateIssueDirectAsync(
+        JiraCreateIssueRequest request,
+        CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(_options.BaseUrl)
             || string.IsNullOrWhiteSpace(_options.Email)
             || string.IsNullOrWhiteSpace(_options.ApiToken))
