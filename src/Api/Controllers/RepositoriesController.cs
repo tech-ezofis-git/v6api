@@ -1,11 +1,16 @@
 using System.Security.Claims;
 using System.Text.Json;
+using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using SaaSApp.Api.Middleware;
+using SaaSApp.Billing.Application.Contracts;
+using SaaSApp.Billing.Application.Credits.Commands.UpdateCredit;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
+using SaaSApp.Repository.Infrastructure.Options;
 using SaaSApp.Security;
 
 namespace SaaSApp.Api.Controllers;
@@ -26,6 +31,10 @@ public sealed class RepositoriesController : ControllerBase
     private readonly IRepositoryItemShareService _itemShares;
     private readonly ITenantConnectionStringResolver _connectionResolver;
     private readonly ITenantConnectionProvider _connectionProvider;
+    private readonly IRepositoryAiSummaryService _aiSummary;
+    private readonly RepositoryAiSummaryOptions _aiSummaryOptions;
+    private readonly IMediator _mediator;
+    private readonly ILogger<RepositoriesController> _logger;
 
     public RepositoriesController(
         ITenantProvider tenantProvider,
@@ -38,7 +47,11 @@ public sealed class RepositoriesController : ControllerBase
         IRepositoryItemActivityService itemActivity,
         IRepositoryItemShareService itemShares,
         ITenantConnectionStringResolver connectionResolver,
-        ITenantConnectionProvider connectionProvider)
+        ITenantConnectionProvider connectionProvider,
+        IRepositoryAiSummaryService aiSummary,
+        IOptions<RepositoryAiSummaryOptions> aiSummaryOptions,
+        IMediator mediator,
+        ILogger<RepositoriesController> logger)
     {
         _tenantProvider = tenantProvider;
         _provisioner = provisioner;
@@ -51,6 +64,10 @@ public sealed class RepositoriesController : ControllerBase
         _itemShares = itemShares;
         _connectionResolver = connectionResolver;
         _connectionProvider = connectionProvider;
+        _aiSummary = aiSummary;
+        _aiSummaryOptions = aiSummaryOptions.Value;
+        _mediator = mediator;
+        _logger = logger;
     }
 
     /// <summary>Seed default storage providers (EZOFIS, GCP, ONEDRIVE) for current tenant.</summary>
@@ -318,6 +335,74 @@ public sealed class RepositoriesController : ControllerBase
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
         {
             return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Return the cached AI summary, or generate and cache it before consuming Document Summary credit.</summary>
+    [HttpPost("/api/repositories/{repositoryId:guid}/items/{itemId:guid}/ai-summary")]
+    public async Task<IActionResult> GetAiSummary(
+        Guid repositoryId,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var summary = await _aiSummary.GetOrGenerateAsync(
+                repositoryId,
+                tenantId,
+                itemId,
+                cancellationToken);
+
+            var creditConsumed = false;
+            if (summary.WasGenerated)
+            {
+                try
+                {
+                    var creditResult = await _mediator.Send(
+                        new UpdateCreditCommand(
+                            tenantId,
+                            GetUserId(),
+                            new CreditUpdateRequest(
+                                "Document Summary",
+                                "DocumentSummary",
+                                "repository.items",
+                                0,
+                                $"AI summary for item {itemId}",
+                                _aiSummaryOptions.Credit)),
+                        cancellationToken);
+                    creditConsumed = creditResult.Status == CreditUpdateStatus.Success;
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "AI summary was saved for item {ItemId}, but Document Summary credit could not be consumed",
+                        itemId);
+                }
+            }
+
+            return Ok(new { output = summary.Output, creditConsumed });
+        }
+        catch (KeyNotFoundException ex)
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (TaskCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return StatusCode(
+                StatusCodes.Status502BadGateway,
+                new { error = "AI summary service timed out." });
+        }
+        catch (HttpRequestException ex)
+        {
+            return StatusCode(
+                StatusCodes.Status502BadGateway,
+                new { error = ex.Message });
         }
     }
 

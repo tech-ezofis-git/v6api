@@ -190,6 +190,7 @@ Use **`move-next`** and **`actions`** for workflow progression instead.
 | `GET` | `/api/repositories/{id}/items` | TenantUser | Paged item list (cursor support) |
 | `GET` | `/api/repositories/{id}/items/facets/{fieldName}` | TenantUser | Facet values for filtering |
 | `GET` | `/api/repositories/{id}/items/{itemId}` | TenantUser | Get item |
+| `POST` | `/api/repositories/{repositoryId}/items/{itemId}/ai-summary` | TenantUser | Return cached AI summary or generate, cache, and consume Document Summary credit |
 | `GET` | `/api/repositories/{id}/items/{itemId}/workspace` | TenantUser | Document workspace (panels + line items) |
 | `GET` | `/api/repositories/{id}/items/{itemId}/timeline` | TenantUser | Item activity timeline |
 | `POST` | `/api/repositories/{id}/items/{itemId}/timeline` | TenantUser | Add timeline event |
