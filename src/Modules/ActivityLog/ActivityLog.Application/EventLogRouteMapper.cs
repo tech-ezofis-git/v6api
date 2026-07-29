@@ -49,13 +49,98 @@ public static partial class EventLogRouteMapper
     }
 
     /// <summary>
+    /// Mutation endpoints that are operational, view-like, or otherwise intentionally omitted from Event Log.
+    /// Route parameters are normalized to <c>{}</c> so names and constraints do not affect matching.
+    /// </summary>
+    private static readonly HashSet<string> ExcludedRoutes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "POST api/reports/ap-dashboard",
+        "POST api/billing/credits/update",
+        "POST api/billing/credits/usage",
+
+        "POST api/connector",
+        "PUT api/connector/{}",
+        "POST api/connector/all",
+        "POST api/connector/{}/oauth/refresh",
+        "POST api/connector/{}/disconnect",
+        "POST api/connector/{}/files/upload",
+        "POST api/connector/{}/mail/messages/{}/read",
+        "POST api/connector/{}/gmail/messages/{}/read",
+
+        "POST api/email-ingest/mailboxes",
+        "PUT api/email-ingest/mailboxes/{}",
+        "DELETE api/email-ingest/mailboxes/{}",
+        "POST api/email-ingest/mailboxes/{}/poll",
+
+        "POST api/form/all",
+        "POST api/form",
+        "PUT api/form/{}",
+        "DELETE api/form/{}",
+        "POST api/form/{}/entry/{}",
+        "POST api/form/{}/entry/all",
+
+        "POST api/playground/api-keys",
+        "POST api/playground/api-usage",
+
+        "POST api/repositories/storage-providers/seed",
+        "POST api/repositories/{}/provision-tables",
+        "POST api/repositories/{}/items",
+        "POST api/repositories/{}/items/query",
+        "POST api/repositories/{}/items/{}/ai-summary",
+        "POST api/repositories/{}/items/{}/share",
+        "DELETE api/repositories/share/{}",
+        "POST api/repositories/{}/items/{}/timeline",
+        "PATCH api/repositories/{}/items/{}/metadata",
+        "POST api/repositories/{}/items/upload-archive",
+        "POST api/repositories/{}/items/upload",
+
+        "POST api/tenant/checkauthenticate",
+        "POST api/tenant/validateotp",
+        "POST api/admin/tenants",
+
+        "POST api/uploadandindex/upload",
+        "POST api/uploadandindex/uploadforocr",
+        "POST api/uploadandindex/load/{}",
+        "PUT api/uploadandindex/index/{}",
+        "POST api/uploadandindex/index/all",
+
+        "POST api/users/{}/configuration",
+
+        "POST api/workflows/{}/filter/search",
+        "POST api/workflow/inboxlist/{}",
+        "POST api/workflows/instances/{}/share-file",
+        "POST api/workflows/{}/sync-steps",
+        "POST api/workflows/{}/steps",
+        "POST api/workflows/{}/publish",
+        "POST api/workflows/{}/start",
+        "POST api/workflows/{}/start/json",
+        "POST api/workflows/{}/sla",
+        "POST api/workflows/{}/instances/{}/comments",
+        "POST api/workflows/{}/instances/{}/attachments",
+        "POST api/workflows/{}/instances/{}/attachments/link",
+        "POST api/workflows/instances/{}/steps/{}/reject",
+        "PATCH api/workflows/{}/instances/{}/ap-agent/metadata",
+        "PATCH api/workflows/ap-agent/jobs/{}/progress",
+        "POST api/workflows/{}/instances/{}/ap-agent/run",
+        "POST api/workflows/instances/bulk-move-next",
+        "POST api/workflows/instances/{}/actions"
+    };
+
+    /// <summary>
     /// Whether this request should be written to Event Log.
     /// Skips GET/HEAD, known view/list-only routes, and search endpoints; keeps mutations and meaningful actions.
     /// </summary>
-    public static bool ShouldLog(string method, string path)
+    public static bool ShouldLog(string method, string path, string? routeTemplate = null)
     {
         if (HttpMethodsEqual(method, "GET") || HttpMethodsEqual(method, "HEAD"))
             return false;
+
+        if (!string.IsNullOrWhiteSpace(routeTemplate))
+        {
+            var routeKey = $"{method.Trim().ToUpperInvariant()} {NormalizeRouteTemplate(routeTemplate)}";
+            if (ExcludedRoutes.Contains(routeKey))
+                return false;
+        }
 
         var normalizedPath = NormalizePath(path);
         if (IsViewOnlyRoute(method, normalizedPath))
@@ -603,6 +688,25 @@ public static partial class EventLogRouteMapper
         if (value.Length > 1 && value.EndsWith('/'))
             value = value.TrimEnd('/');
         return value;
+    }
+
+    private static string NormalizeRouteTemplate(string routeTemplate)
+    {
+        var value = routeTemplate.Trim();
+        if (value.StartsWith("~/", StringComparison.Ordinal))
+            value = value[2..];
+        else
+            value = value.TrimStart('/');
+
+        value = value.TrimEnd('/');
+        var segments = value.Split('/', StringSplitOptions.RemoveEmptyEntries);
+        for (var i = 0; i < segments.Length; i++)
+        {
+            if (segments[i].StartsWith('{') && segments[i].EndsWith('}'))
+                segments[i] = "{}";
+        }
+
+        return string.Join('/', segments);
     }
 
     private static bool IsWorkflowPath(string path) =>
