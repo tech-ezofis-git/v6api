@@ -14,8 +14,10 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
     {
         services.Configure<RepositoryFileStorageOptions>(configuration.GetSection(RepositoryFileStorageOptions.SectionName));
         services.Configure<RepositoryOcrOptions>(configuration.GetSection(RepositoryOcrOptions.SectionName));
+        services.Configure<RepositoryAiSummaryOptions>(configuration.GetSection(RepositoryAiSummaryOptions.SectionName));
         services.Configure<RepositoryShareOptions>(configuration.GetSection(RepositoryShareOptions.SectionName));
         services.AddHttpClient<IOcrExtractionService, OcrExtractionService>();
+        services.AddHttpClient<IRepositoryAiSummaryService, RepositoryAiSummaryService>();
         services.AddScoped<IRepositorySchemaService, RepositorySchemaService>();
         services.AddScoped<IRepositoryStorageSeedService, RepositoryStorageSeedService>();
         services.AddScoped<IStaticRepositoryProvisioner, StaticRepositoryProvisioner>();
