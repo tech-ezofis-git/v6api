@@ -95,7 +95,8 @@ public sealed class ApiEventLoggingMiddleware
                     if (!shouldLog)
                         return Task.CompletedTask;
 
-                    if (!EventLogRouteMapper.ShouldLog(method, path))
+                    var routeTemplate = (context.GetEndpoint() as RouteEndpoint)?.RoutePattern.RawText;
+                    if (!EventLogRouteMapper.ShouldLog(method, path, routeTemplate))
                         return Task.CompletedTask;
 
                     context.Items.TryGetValue(LoginAccessTokenItemKey, out var tokenObj);
