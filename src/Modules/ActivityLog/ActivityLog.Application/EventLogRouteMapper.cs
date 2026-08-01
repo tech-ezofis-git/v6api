@@ -107,6 +107,7 @@ public static partial class EventLogRouteMapper
         "POST api/users/{}/configuration",
 
         "POST api/workflows/{}/filter/search",
+        "POST api/workflow/all",
         "POST api/workflow/inboxlist/{}",
         "POST api/workflows/instances/{}/share-file",
         "POST api/workflows/{}/sync-steps",
