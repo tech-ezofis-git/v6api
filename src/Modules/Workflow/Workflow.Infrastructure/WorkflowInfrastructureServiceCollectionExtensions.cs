@@ -100,6 +100,8 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IApAgentJobProgressService, ApAgentJobProgressService>();
         services.AddScoped<IApAgentJobStatusService, ApAgentJobStatusService>();
         services.Configure<FormMasterFileImportOptions>(configuration.GetSection(FormMasterFileImportOptions.SectionName));
+        services.Configure<WorkflowMoveNotificationOptions>(configuration.GetSection(WorkflowMoveNotificationOptions.SectionName));
+        services.AddScoped<IWorkflowMoveNotificationService, WorkflowMoveNotificationService>();
         services.AddHttpClient(nameof(MasterFileImportPythonPipelineService), client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;

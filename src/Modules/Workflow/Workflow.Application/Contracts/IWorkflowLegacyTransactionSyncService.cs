@@ -46,4 +46,6 @@ public sealed record WorkflowLegacyTransactionSyncResult(
     Guid? NextTransactionGuid,
     bool WorkflowCompleted = false,
     /// <summary>Assignee of the newly opened next step (when returned to share owner after guest move-next).</summary>
-    Guid? NextActivityUserId = null);
+    Guid? NextActivityUserId = null,
+    /// <summary>CreatedBy of the newly opened next transaction row.</summary>
+    Guid? NextCreatedByUserId = null);

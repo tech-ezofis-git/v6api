@@ -253,7 +253,8 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                         nextTransactionId,
                         nextTransactionGuid,
                         workflowCompleted,
-                        nextActivityUserId);
+                        nextActivityUserId,
+                        nextCreatedByUserId);
                 }
             }
             else
