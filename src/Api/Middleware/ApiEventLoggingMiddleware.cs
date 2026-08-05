@@ -109,6 +109,10 @@ public sealed class ApiEventLoggingMiddleware
                         statusCode,
                         subjectForLog.With(email: actor.Email));
 
+                    // Skip generic unmapped routes (titles like "All completed", "Chatbot completed").
+                    if (string.Equals(mapped.EventType, "Api Request", StringComparison.OrdinalIgnoreCase))
+                        return Task.CompletedTask;
+
                     context.Items.TryGetValue(CorrelationIdMiddleware.CorrelationIdItemKey, out var correlationObj);
 
                     var entry = new EventLogEntry(
