@@ -1,6 +1,7 @@
 using Microsoft.Data.SqlClient;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
+using SaaSApp.Repository.Infrastructure.Storage;
 
 namespace SaaSApp.Repository.Infrastructure.Services;
 
@@ -156,6 +157,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         }
 
         await RepositoryItemWorkflowStatusEnricher.EnrichListAsync(connection, list, cancellationToken);
+        await RepositoryItemListReader.ResolveCreatedByEmailsAsync(connection, list, cancellationToken);
 
         string? nextCursor = null;
         if (list.Count == pageSize)
@@ -285,11 +287,19 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
                 fields["Status"] = workflowStatus;
         }
 
+        var filePath = fields.TryGetValue("FilePath", out var fpRaw) ? fpRaw as string ?? fpRaw?.ToString() : null;
+        var fileType = fields.TryGetValue("FileType", out var ftRaw) ? ftRaw as string ?? ftRaw?.ToString() : null;
+        var fileName = RepositoryFilePathHelper.EnsureFileNameHasExtension(
+            fields.TryGetValue("FileName", out var fnRaw) ? fnRaw as string ?? fnRaw?.ToString() : null,
+            fileType,
+            filePath);
+        fields["FileName"] = fileName;
+
         return new RepositoryItemDetailDto(
             Guid.Parse(fields["Id"]!.ToString()!),
-            fields.TryGetValue("FileName", out var fn) ? fn as string : null,
-            fields.TryGetValue("FilePath", out var fp) ? fp as string : null,
-            fields.TryGetValue("FileType", out var ft) ? ft as string : null,
+            fileName,
+            filePath,
+            fileType,
             fields.TryGetValue("FileSize", out var fs) && fs is int fileSize ? fileSize : fs is long fileSizeL ? (int)fileSizeL : null,
             (Guid)fields["StorageProviderId"]!,
             providerCode,
@@ -346,7 +356,13 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
             cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(email))
-            fields["CreatedBy"] = email;
+        {
+            fields["CreatedById"] = createdById;
+            fields["CreatedByEmail"] = email;
+            // Keep GUID on CreatedBy so document-security share grants (CreatedBy equals userId) still match.
+            fields["CreatedBy"] = createdById;
+            fields["CreatedByName"] = email;
+        }
     }
 
     public async Task<Guid> CreateItemAsync(
@@ -397,19 +413,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         if (updatedFieldCount < 0)
             return null;
 
-        await _activity.RecordTimelineEventAsync(
-            repositoryId,
-            tenantId,
-            itemId,
-            "user",
-            "Metadata updated",
-            $"{updatedFieldCount} field(s) changed",
-            "User",
-            userId?.ToString("D"),
-            userId,
-            userId,
-            cancellationToken);
-
+        // Do not write noisy "Metadata updated" timeline rows — ingest/OCR/workflow history are shown instead.
         return new UpdateRepositoryItemMetadataResult(itemId, updatedFieldCount);
     }
 
@@ -429,7 +433,10 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
 
         var stream = await _fileStorage.OpenReadAsync(tenantId, item.FilePath, providerCode, cancellationToken);
         var contentType = string.IsNullOrWhiteSpace(item.FileType) ? "application/octet-stream" : item.FileType;
-        var fileName = string.IsNullOrWhiteSpace(item.FileName) ? "file" : item.FileName;
+        var fileName = RepositoryFilePathHelper.EnsureFileNameHasExtension(
+            item.FileName,
+            item.FileType,
+            item.FilePath);
         return new RepositoryItemFileContent(stream, fileName, contentType, item.FileSize);
     }
 

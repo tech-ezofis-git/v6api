@@ -14,6 +14,7 @@ internal static class RepositoryFilePathHelper
         var safe = SanitizePathSegment(Path.GetFileName(fileName));
         if (string.IsNullOrWhiteSpace(safe))
             safe = "document.pdf";
+        safe = EnsureFileNameHasExtension(safe, filePath: fileName);
         return $"{MonitorRoot}/{repositoryId:N}/{ts}/{safe}";
     }
 
@@ -73,13 +74,61 @@ internal static class RepositoryFilePathHelper
         return string.IsNullOrEmpty(ext) ? stem : stem + ext;
     }
 
+    /// <summary>
+    /// Ensures <paramref name="fileName"/> has an extension (e.g. <c>.pdf</c>).
+    /// Prefers existing extension, then <paramref name="filePath"/>, then content-type, then <c>.pdf</c>.
+    /// </summary>
+    public static string EnsureFileNameHasExtension(
+        string? fileName,
+        string? contentType = null,
+        string? filePath = null)
+    {
+        var name = string.IsNullOrWhiteSpace(fileName)
+            ? string.Empty
+            : Path.GetFileName(fileName.Trim());
+
+        if (string.IsNullOrWhiteSpace(name))
+            name = "document";
+
+        var existingExt = Path.GetExtension(name);
+        // Real file extensions are short alphabetic (pdf, tiff, …). Reject numeric "extensions"
+        // like ".6001" from invoice-style names using dots (INV.2026.6001).
+        if (IsRealFileExtension(existingExt))
+            return name;
+
+        // Strip a fake numeric extension before appending the real one.
+        if (!string.IsNullOrEmpty(existingExt) && existingExt != ".")
+            name = Path.GetFileNameWithoutExtension(name);
+
+        var fromPath = !string.IsNullOrWhiteSpace(filePath)
+            ? Path.GetExtension(filePath.Trim().Replace('\\', '/'))
+            : null;
+        if (IsRealFileExtension(fromPath))
+            return name + fromPath!.ToLowerInvariant();
+
+        var fromMime = ExtensionFromContentType(contentType);
+        if (!string.IsNullOrEmpty(fromMime))
+            return name + fromMime;
+
+        return name + ".pdf";
+    }
+
+    private static bool IsRealFileExtension(string? ext)
+    {
+        if (string.IsNullOrEmpty(ext) || ext == ".")
+            return false;
+        // ".pdf", ".tiff", ".docx" — not ".6001" or ".2026"
+        var body = ext.TrimStart('.');
+        return body.Length is >= 2 and <= 8 && body.All(char.IsLetter);
+    }
+
     /// <summary>Display/storage name: <c>invoice.pdf</c> (v1), <c>invoice_v2.pdf</c> (v2+).</summary>
     public static string ApplyVersionToFileName(string fileName, int fileVersion)
     {
         if (fileVersion < 1)
             fileVersion = 1;
 
-        var baseName = GetBaseFileName(fileName);
+        var baseName = EnsureFileNameHasExtension(GetBaseFileName(fileName));
         var ext = Path.GetExtension(baseName);
         var stem = Path.GetFileNameWithoutExtension(baseName);
         if (string.IsNullOrWhiteSpace(stem))
@@ -141,16 +190,41 @@ internal static class RepositoryFilePathHelper
             .Select(c => invalid.Contains(c) || c is '/' or '\\' or ':' ? '_' : c)
             .ToArray();
 
-        var cleaned = new string(chars).Trim().Trim('.');
+        // Do NOT Trim('.') — that strips a trailing extension when callers sanitize a full file name.
+        var cleaned = new string(chars).Trim();
         cleaned = Regex.Replace(cleaned, @"\s+", " ");
+        // Strip only trailing dots that are not the extension separator (e.g. "invoice.pdf..." → "invoice.pdf").
+        cleaned = Regex.Replace(cleaned, @"\.+$", string.Empty);
         return cleaned.Length > 200 ? cleaned[..200] : cleaned;
     }
 
     private static string GetExtension(string fileName)
     {
         var ext = Path.GetExtension(fileName);
-        if (string.IsNullOrEmpty(ext))
+        if (string.IsNullOrEmpty(ext) || ext == ".")
             return ".pdf";
         return ext.ToLowerInvariant();
+    }
+
+    private static string? ExtensionFromContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+            return null;
+
+        var mime = contentType.Trim().Split(';')[0].Trim().ToLowerInvariant();
+        return mime switch
+        {
+            "application/pdf" => ".pdf",
+            "image/tiff" => ".tiff",
+            "image/tif" => ".tif",
+            "image/jpeg" or "image/jpg" => ".jpg",
+            "image/png" => ".png",
+            "application/msword" => ".doc",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
+            "application/vnd.ms-excel" => ".xls",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" => ".xlsx",
+            _ when mime.StartsWith("image/", StringComparison.Ordinal) => ".img",
+            _ => null
+        };
     }
 }

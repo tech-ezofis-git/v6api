@@ -42,6 +42,11 @@ public sealed class ApDashboardController : ControllerBase
   /// <item><c>header</c> — AP Command Center (TOTAL AP, OVERDUE, OPEN INVOICES, DPO)</item>
   /// <item><c>supplierRiskRadar</c> — Low / Medium / High risk donut + top risk suppliers</item>
   /// <item><c>filterOptions</c> / <c>activeFilters</c> — dropdown values and applied chips</item>
+  /// <item><c>profitabilityCashPosition</c> — Profit Margin, Next 4 Weeks, Peak Week</item>
+  /// <item><c>supplierConcentrationRisk</c> — Active Suppliers, High Risk, Top-3 Concentration</item>
+  /// <item><c>agingProcessOversight</c> — 90+ Days, Critical Exceptions, Approval Rate</item>
+  /// <item><c>invoiceAgingAnalysis</c> — aging buckets for the Invoice aging analysis chart</item>
+  /// <item><c>insights</c> — AI insight strings from Python <c>/api/v1/insights</c></item>
   /// </list>
   /// </remarks>
   [HttpPost]

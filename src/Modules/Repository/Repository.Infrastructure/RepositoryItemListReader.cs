@@ -2,6 +2,7 @@ using System.Globalization;
 using Microsoft.Data.SqlClient;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
+using SaaSApp.Repository.Infrastructure.Storage;
 
 namespace SaaSApp.Repository.Infrastructure;
 
@@ -12,7 +13,7 @@ internal static class RepositoryItemListReader
         "DocumentType", "Supplier", "InvoiceNumber", "PoNumber", "DocumentDate",
         "Amount", "Currency", "RiskLevel", "Source", "Department", "Status", "OcrScore", "AiStatus",
         "FileVersion", "InvoiceDate", "InvoiceAmount", "InvoiceTaxAmount", "PODate", "POAmount",
-        "Buyer", "Terms", "SupplierAddress", "ShipToAddress", "PayToAddress"
+        "Buyer", "Terms", "SupplierAddress", "ShipToAddress", "PayToAddress", "FileType"
     ];
 
     private static readonly string[] JsonListColumns = ["OcrJson", "SummaryJson"];
@@ -21,7 +22,7 @@ internal static class RepositoryItemListReader
     [
         ["Supplier", "VendorName", "Vendor"],
         ["InvoiceNumber", "InvoiceNo"],
-        ["DocumentDate", "InvoiceDate", "PODate"],
+        ["DocumentDate", "InvoiceDate", "PODate", "Date"],
         ["Amount", "InvoiceAmount", "POAmount"],
         ["AiStatus", "MatchedStatus"],
         ["Status", "StageStatus"],
@@ -40,6 +41,7 @@ internal static class RepositoryItemListReader
             ["DocumentDate"] = "DocumentDate",
             ["InvoiceDate"] = "DocumentDate",
             ["PODate"] = "DocumentDate",
+            ["Date"] = "DocumentDate",
             ["Amount"] = "Amount",
             ["InvoiceAmount"] = "Amount",
             ["POAmount"] = "Amount",
@@ -88,22 +90,16 @@ internal static class RepositoryItemListReader
 
         if (repository != null)
         {
+            // Always select this repository's configured fields (HR, custom, AP, …).
             foreach (var field in repository.Fields)
-            {
-                if (!SqlColumnToListProperty.ContainsKey(field.SqlColumnName)
-                    && !SqlColumnToListProperty.ContainsKey(field.Name))
-                {
-                    continue;
-                }
-
                 AddColumn(field.SqlColumnName);
-            }
         }
 
         parts.Add("i.StorageProviderId");
         parts.Add("sp.Code");
         AddColumn("FilePath");
         AddColumn("WorkflowInstanceId");
+        AddColumn("CreatedBy");
 
         return string.Join(", ", parts);
     }
@@ -114,7 +110,10 @@ internal static class RepositoryItemListReader
         RepositoryDetailDto? repository = null)
     {
         var id = reader.GetGuid(reader.GetOrdinal("Id"));
-        var fileName = GetString(reader, "FileName");
+        var rawFileName = GetString(reader, "FileName");
+        var filePath = GetString(reader, tableColumns, "FilePath");
+        var fileType = GetString(reader, tableColumns, "FileType");
+        var fileName = RepositoryFilePathHelper.EnsureFileNameHasExtension(rawFileName, fileType, filePath);
         var ocrJson = GetString(reader, tableColumns, "OcrJson");
         var summaryJson = GetString(reader, tableColumns, "SummaryJson");
         Guid? workflowInstanceId = null;
@@ -122,6 +121,17 @@ internal static class RepositoryItemListReader
             && !reader.IsDBNull(reader.GetOrdinal("WorkflowInstanceId")))
         {
             workflowInstanceId = reader.GetGuid(reader.GetOrdinal("WorkflowInstanceId"));
+        }
+
+        Guid? createdByUserId = null;
+        if (RepositoryItemTableColumns.Has(tableColumns, "CreatedBy")
+            && !reader.IsDBNull(reader.GetOrdinal("CreatedBy")))
+        {
+            var ordinal = reader.GetOrdinal("CreatedBy");
+            if (reader.GetFieldType(ordinal) == typeof(Guid))
+                createdByUserId = reader.GetGuid(ordinal);
+            else if (Guid.TryParse(reader.GetValue(ordinal)?.ToString(), out var parsedCreatedBy))
+                createdByUserId = parsedCreatedBy;
         }
 
         var row = new RepositoryItemListDto(
@@ -132,7 +142,7 @@ internal static class RepositoryItemListReader
             CoalesceString(reader, tableColumns, "Supplier", "VendorName", "Vendor"),
             CoalesceString(reader, tableColumns, "InvoiceNumber", "InvoiceNo"),
             CoalesceString(reader, tableColumns, "PoNumber", "PONumber"),
-            CoalesceDateTime(reader, tableColumns, "DocumentDate", "InvoiceDate", "PODate"),
+            CoalesceDateTime(reader, tableColumns, "DocumentDate", "InvoiceDate", "PODate", "Date"),
             CoalesceDecimal(reader, tableColumns, "Amount", "InvoiceAmount", "POAmount"),
             CoalesceString(reader, tableColumns, "Currency"),
             CoalesceString(reader, tableColumns, "Status", "StageStatus"),
@@ -141,7 +151,7 @@ internal static class RepositoryItemListReader
             CoalesceString(reader, tableColumns, "RiskLevel"),
             CoalesceString(reader, tableColumns, "Source"),
             CoalesceString(reader, tableColumns, "Department"),
-            CoalesceDateTime(reader, tableColumns, "InvoiceDate", "DocumentDate"),
+            CoalesceDateTime(reader, tableColumns, "InvoiceDate", "DocumentDate", "Date"),
             CoalesceDecimal(reader, tableColumns, "InvoiceAmount", "Amount"),
             CoalesceDecimal(reader, tableColumns, "InvoiceTaxAmount"),
             CoalesceDateTime(reader, tableColumns, "PODate"),
@@ -153,12 +163,104 @@ internal static class RepositoryItemListReader
             CoalesceString(reader, tableColumns, "PayToAddress"),
             reader.GetGuid(reader.GetOrdinal("StorageProviderId")),
             reader.GetString(reader.GetOrdinal("Code")),
-            RepositoryItemTableColumns.Has(tableColumns, "FilePath")
-                && !reader.IsDBNull(reader.GetOrdinal("FilePath"))
-                && !string.IsNullOrWhiteSpace(reader.GetString(reader.GetOrdinal("FilePath"))),
-            workflowInstanceId);
+            !string.IsNullOrWhiteSpace(filePath),
+            workflowInstanceId,
+            CreatedBy: createdByUserId?.ToString("D"), // resolved to email after list load
+            CreatedByUserId: createdByUserId,
+            BuildRepositoryFields(reader, tableColumns, repository));
 
         return RepositoryItemListMetadataEnricher.Enrich(row, ocrJson, summaryJson, repository, reader, tableColumns);
+    }
+
+    /// <summary>Repository-configured field values for list grid — camelCase sqlColumnName keys only.</summary>
+    public static IReadOnlyDictionary<string, object?> BuildRepositoryFields(
+        SqlDataReader reader,
+        HashSet<string> tableColumns,
+        RepositoryDetailDto? repository)
+    {
+        var fields = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        if (repository == null)
+            return fields;
+
+        foreach (var field in repository.Fields)
+        {
+            var column = field.SqlColumnName;
+            if (string.IsNullOrWhiteSpace(column))
+                continue;
+            if (!RepositoryItemTableColumns.Has(tableColumns, column) || !HasColumn(reader, column))
+                continue;
+
+            var ordinal = reader.GetOrdinal(column);
+            object? value = reader.IsDBNull(ordinal) ? null : NormalizeFieldValue(reader.GetValue(ordinal));
+            fields[ToCamelCase(column)] = value;
+        }
+
+        return fields;
+    }
+
+    /// <summary>
+    /// Set top-level <c>createdBy</c> (and fields.createdBy) to user email for FE grid display.
+    /// Keeps <c>createdByUserId</c> for ACL.
+    /// </summary>
+    public static async Task ResolveCreatedByEmailsAsync(
+        SqlConnection connection,
+        IList<RepositoryItemListDto> items,
+        CancellationToken cancellationToken = default)
+    {
+        if (items.Count == 0)
+            return;
+
+        var userIds = items
+            .Select(i => i.CreatedByUserId)
+            .Where(id => id is Guid g && g != Guid.Empty)
+            .Select(id => id!.Value)
+            .Distinct()
+            .ToList();
+
+        if (userIds.Count == 0)
+            return;
+
+        var emails = await RepositoryUserNameResolver.ResolveDisplayNamesAsync(
+            connection, userIds, cancellationToken);
+
+        for (var i = 0; i < items.Count; i++)
+        {
+            var item = items[i];
+            if (item.CreatedByUserId is not Guid uid || uid == Guid.Empty)
+                continue;
+            if (!emails.TryGetValue(uid, out var email) || string.IsNullOrWhiteSpace(email))
+                continue;
+
+            IReadOnlyDictionary<string, object?>? fields = item.Fields;
+            if (fields != null && fields.Count > 0)
+            {
+                var updated = new Dictionary<string, object?>(fields, StringComparer.OrdinalIgnoreCase)
+                {
+                    ["createdBy"] = email
+                };
+                fields = updated;
+            }
+
+            items[i] = item with { CreatedBy = email, Fields = fields };
+        }
+    }
+
+    private static object? NormalizeFieldValue(object value) => value switch
+    {
+        DateTime dt => dt,
+        DateOnly d => d.ToDateTime(TimeOnly.MinValue),
+        decimal or double or float or int or long or short or byte or bool or string => value,
+        _ => Convert.ToString(value, CultureInfo.InvariantCulture)
+    };
+
+    private static string ToCamelCase(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name))
+            return name;
+        var trimmed = name.Trim();
+        if (trimmed.Length == 1)
+            return trimmed.ToLowerInvariant();
+        return char.ToLowerInvariant(trimmed[0]) + trimmed[1..];
     }
 
     public static string? ResolveDateFilterColumn(HashSet<string> tableColumns, RepositoryDetailDto repo)
@@ -171,6 +273,9 @@ internal static class RepositoryItemListReader
 
         if (RepositoryItemTableColumns.Has(tableColumns, "PODate"))
             return "PODate";
+
+        if (RepositoryItemTableColumns.Has(tableColumns, "Date"))
+            return "Date";
 
         var dateField = repo.Fields.FirstOrDefault(f =>
             string.Equals(f.DataType, "date", StringComparison.OrdinalIgnoreCase)

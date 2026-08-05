@@ -2,24 +2,25 @@ using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure;
 
-/// <summary>Read-only timeline entries inferred from item columns when no stored events exist.</summary>
+/// <summary>Read-only timeline entries inferred from item columns (ingest source, OCR, AI validation).</summary>
 internal static class RepositoryItemTimelineDeriver
 {
-    public static IReadOnlyList<RepositoryItemTimelineEventDto> Derive(IReadOnlyDictionary<string, object?> fields)
+    public static IReadOnlyList<RepositoryItemTimelineEventDto> Derive(
+        IReadOnlyDictionary<string, object?> fields,
+        string? createdByDisplayName = null)
     {
         var events = new List<RepositoryItemTimelineEventDto>();
 
         if (TryGetDate(fields, "CreatedAtUtc", out var createdAt))
         {
-            var source = GetString(fields, "Source");
-            var channel = string.IsNullOrWhiteSpace(source) ? "upload" : source.Trim();
+            var (title, actorType, actorName) = DescribeIngest(fields, createdByDisplayName);
             events.Add(new RepositoryItemTimelineEventDto(
                 Guid.Empty,
                 "system",
-                $"Document ingested via {channel.ToLowerInvariant()}",
+                title,
                 null,
-                "System",
-                "System",
+                actorType,
+                actorName,
                 createdAt,
                 IsDerived: true));
         }
@@ -55,8 +56,42 @@ internal static class RepositoryItemTimelineDeriver
                 IsDerived: true));
         }
 
+        if (TryGetGuid(fields, "WorkflowInstanceId", out var instanceId)
+            && TryGetDate(fields, "CreatedAtUtc", out var linkedAt))
+        {
+            events.Add(new RepositoryItemTimelineEventDto(
+                Guid.Empty,
+                "system",
+                "File linked to workflow instance",
+                instanceId.ToString("D"),
+                "System",
+                "System",
+                linkedAt.AddSeconds(30),
+                IsDerived: true));
+        }
+
         return events.OrderBy(e => e.CreatedAtUtc).ToList();
     }
+
+    private static (string Title, string ActorType, string ActorName) DescribeIngest(
+        IReadOnlyDictionary<string, object?> fields,
+        string? createdByDisplayName)
+    {
+        var source = (GetString(fields, "Source") ?? string.Empty).Trim();
+        if (IsEmailSource(source))
+        {
+            return ("Document ingested via email", "System", "System (Email)");
+        }
+
+        var actor = string.IsNullOrWhiteSpace(createdByDisplayName) ? "System" : createdByDisplayName.Trim();
+        return ("Document uploaded manually", "User", actor);
+    }
+
+    private static bool IsEmailSource(string source) =>
+        source.Contains("mail", StringComparison.OrdinalIgnoreCase)
+        || source.Contains("email", StringComparison.OrdinalIgnoreCase)
+        || source.Contains("ingest", StringComparison.OrdinalIgnoreCase)
+        || source.Equals("smtp", StringComparison.OrdinalIgnoreCase);
 
     private static bool HasAiValidation(IReadOnlyDictionary<string, object?> fields) =>
         fields.ContainsKey("AiStatus") && fields["AiStatus"] != null ||
@@ -93,5 +128,20 @@ internal static class RepositoryItemTimelineDeriver
         }
 
         return byte.TryParse(raw.ToString(), out value);
+    }
+
+    private static bool TryGetGuid(IReadOnlyDictionary<string, object?> fields, string key, out Guid value)
+    {
+        value = default;
+        if (!fields.TryGetValue(key, out var raw) || raw == null)
+            return false;
+
+        if (raw is Guid g)
+        {
+            value = g;
+            return g != Guid.Empty;
+        }
+
+        return Guid.TryParse(raw.ToString(), out value) && value != Guid.Empty;
     }
 }

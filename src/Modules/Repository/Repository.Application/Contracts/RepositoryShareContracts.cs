@@ -3,9 +3,16 @@ namespace SaaSApp.Repository.Application.Contracts;
 public sealed record CreateRepositoryItemShareRequest(
     string Email,
     string? Message = null,
-    /// <summary>When true, creates a guest user in the tenant (no password) — used for workflow inbox shares.</summary>
-    bool ProvisionGuestUser = false,
-    Guid? WorkflowInstanceId = null);
+    /// <summary>
+    /// When true (default), creates a guest <c>TenantUser</c> and document-security grants
+    /// so the recipient can open this repository and see only the shared file (+ their uploads).
+    /// </summary>
+    bool ProvisionGuestUser = true,
+    Guid? WorkflowInstanceId = null,
+    /// <summary>
+    /// Invite permission (same UX as workflow share): <c>0</c> = Can View, <c>1</c> = Can Edit (upload).
+    /// </summary>
+    int Action = 0);
 
 public sealed record CreateWorkflowInboxShareRequest(
     string Email,
@@ -25,7 +32,23 @@ public sealed record CreateRepositoryItemShareResult(
     Guid SourceItemId,
     string RecipientEmail,
     DateTime ExpiresAtUtc,
-    string ShareUrl);
+    /// <summary>
+    /// Invite link (same as workflow share): <c>/sign-in?shareToken=...&amp;email=...&amp;isnew=true|false</c>.
+    /// Email is also sent with this URL.
+    /// </summary>
+    string ShareUrl,
+    /// <summary>Guest tenant user id when auto-provisioned; otherwise null.</summary>
+    Guid? GuestUserId = null,
+    /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
+    int Action = 0,
+    /// <summary>True when recipient still needs first-time password / social setup (<c>isnew=true</c> in ShareUrl).</summary>
+    bool IsNew = false,
+    /// <summary>Same as preview — what the sign-in page should show for this email.</summary>
+    bool RequiresPasswordSetup = false,
+    IReadOnlyList<string>? AllowedAuthMethods = null,
+    Guid? SourceTenantId = null,
+    /// <summary>UI label: <c>Can View</c> or <c>Can Edit</c>.</summary>
+    string Permission = "Can View");
 
 /// <summary>How a share invite recipient should authenticate.</summary>
 public sealed record ShareInviteAuthInfo(
@@ -58,7 +81,11 @@ public sealed record RepositoryItemSharePreviewDto(
     IReadOnlyList<string> AllowedAuthMethods,
     string? LoginType,
     bool AutoProvisionGuest,
-    Guid? WorkflowInstanceId);
+    Guid? WorkflowInstanceId,
+    /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
+    int Action = 0,
+    /// <summary>UI label: <c>Can View</c> or <c>Can Edit</c>.</summary>
+    string Permission = "Can View");
 
 /// <summary>A file that was shared with the logged-in user (for the "Shared with me" list).</summary>
 public sealed record SharedWithMeItemDto(
@@ -69,7 +96,11 @@ public sealed record SharedWithMeItemDto(
     string? FileName,
     string? SourceOrganizationName,
     DateTime SharedAtUtc,
-    DateTime ExpiresAtUtc);
+    DateTime ExpiresAtUtc,
+    /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
+    int Action = 0,
+    /// <summary>UI label: <c>Can View</c> or <c>Can Edit</c>.</summary>
+    string Permission = "Can View");
 
 public interface IRepositoryItemShareService
 {

@@ -28,8 +28,9 @@ public sealed class CreditService : ICreditService
         CancellationToken cancellationToken = default)
     {
         var nowUtc = DateTime.UtcNow;
-        var allocationMonth = nowUtc.Month;
-        var allocationYear = nowUtc.Year;
+        var nowIst = TimeZoneInfo.ConvertTimeFromUtc(nowUtc, IndiaTimeZone());
+        var allocationMonth = nowIst.Month;
+        var allocationYear = nowIst.Year;
         var creditToConsume = request.Credit <= 0 ? 1 : request.Credit;
 
         await using var db = await _catalogFactory.CreateDbContextAsync(cancellationToken);
@@ -91,9 +92,9 @@ public sealed class CreditService : ICreditService
         string? creditType = null,
         CancellationToken cancellationToken = default)
     {
-        var nowUtc = DateTime.UtcNow;
-        var month = allocationMonth ?? nowUtc.Month;
-        var year = allocationYear ?? nowUtc.Year;
+        var nowIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IndiaTimeZone());
+        var month = allocationMonth ?? nowIst.Month;
+        var year = allocationYear ?? nowIst.Year;
 
         await using var db = await _catalogFactory.CreateDbContextAsync(cancellationToken);
         var query = db.CreditMasters.AsNoTracking()
@@ -107,6 +108,38 @@ public sealed class CreditService : ICreditService
 
         var row = await query.OrderByDescending(c => c.Id).FirstOrDefaultAsync(cancellationToken);
         return row is null ? null : MapMaster(row);
+    }
+
+    public async Task<IReadOnlyList<CreditMonthlyBalanceDto>> GetCreditMonthlyBalancesAsync(
+        Guid tenantId,
+        int? year = null,
+        string? creditType = null,
+        CancellationToken cancellationToken = default)
+    {
+        var nowIst = TimeZoneInfo.ConvertTimeFromUtc(DateTime.UtcNow, IndiaTimeZone());
+        var allocationYear = year ?? nowIst.Year;
+
+        await using var db = await _catalogFactory.CreateDbContextAsync(cancellationToken);
+        var query = db.CreditMasters.AsNoTracking()
+            .Where(c => c.TenantId == tenantId
+                        && c.AllocationYear == allocationYear
+                        && !c.IsDeleted);
+
+        if (!string.IsNullOrWhiteSpace(creditType))
+            query = query.Where(c => c.CreditType == creditType);
+
+        var rows = await query
+            .OrderBy(c => c.AllocationMonth)
+            .ThenByDescending(c => c.Id)
+            .ToListAsync(cancellationToken);
+
+        // One row per month (+ creditType): keep latest id when duplicates exist.
+        return rows
+            .GroupBy(r => new { r.AllocationMonth, CreditType = r.CreditType ?? string.Empty })
+            .Select(g => g.First())
+            .OrderBy(r => r.AllocationMonth)
+            .Select(MapMonthlyBalance)
+            .ToList();
     }
 
     public async Task<CreditUsageResult> GetCreditUsageAsync(
@@ -165,8 +198,15 @@ public sealed class CreditService : ICreditService
         return transactions;
     }
 
-    private static CreditMasterDto MapMaster(CreditMaster row) =>
-        new(
+    private static CreditMasterDto MapMaster(CreditMaster row)
+    {
+        var monthlyBalance = CreditBalanceCalculator.CalculateMonthlyBalance(
+            row.InitialCredit,
+            row.CarryForwardCredit,
+            row.TopUpBalanceCredit,
+            row.OverallConsumedCredit);
+
+        return new CreditMasterDto(
             row.Id,
             row.TenantId,
             row.AllocationMonth,
@@ -178,7 +218,39 @@ public sealed class CreditService : ICreditService
             row.Status,
             row.OverallConsumedCredit,
             row.ValidFromDate,
-            row.ValidToDate);
+            row.ValidToDate,
+            row.CarryForwardCredit,
+            row.TopUpBalanceCredit,
+            row.ExtraConsumedCredit,
+            monthlyBalance);
+    }
+
+    private static CreditMonthlyBalanceDto MapMonthlyBalance(CreditMaster row)
+    {
+        var monthlyBalance = CreditBalanceCalculator.CalculateMonthlyBalance(
+            row.InitialCredit,
+            row.CarryForwardCredit,
+            row.TopUpBalanceCredit,
+            row.OverallConsumedCredit);
+        var label = new DateTime(row.AllocationYear, row.AllocationMonth, 1)
+            .ToString("MMM yyyy", CultureInfo.InvariantCulture);
+
+        return new CreditMonthlyBalanceDto(
+            row.Id,
+            row.TenantId,
+            row.AllocationMonth,
+            row.AllocationYear,
+            label,
+            row.CreditType,
+            row.InitialCredit,
+            row.CarryForwardCredit,
+            row.TopUpBalanceCredit,
+            row.OverallConsumedCredit,
+            row.ExtraConsumedCredit,
+            row.BalanceCredit,
+            monthlyBalance,
+            row.Status);
+    }
 
     private static string GetTransactionTableSuffix(DateTime utcNow)
     {

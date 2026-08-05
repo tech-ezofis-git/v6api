@@ -97,7 +97,7 @@ public sealed class RepositoryFileUploadService : IRepositoryFileUploadService
         var createRequest = new CreateRepositoryItemRequest(
             storageProviderId,
             relativePath,
-            versionedFileName,
+            RepositoryFilePathHelper.EnsureFileNameHasExtension(versionedFileName, request.ContentType, relativePath),
             request.ContentType,
             fileSize,
             null,

@@ -36,6 +36,16 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
 
         if (existing != null)
         {
+            // Prior share/sign guests may have been saved with Configuration=0 and would hit onboard.
+            // Only auto-complete for incomplete guests (no password / social yet), not full onboard users.
+            if (existing.Configuration == 0
+                && string.IsNullOrEmpty(existing.PasswordHash)
+                && ResolveSocialProvider(existing) == null)
+            {
+                existing.MarkConfigurationCompleted();
+                await context.SaveChangesAsync(cancellationToken);
+            }
+
             await _userTenantRegistry.AddOrUpdateAsync(normalizedEmail, tenantId, existing.Role, existing.Id, cancellationToken);
             return existing.Id;
         }
@@ -48,6 +58,8 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
             User.RoleTenantUser,
             authStrategy: User.AuthStrategyEzofis);
         user.SetLoginType("EZOFIS");
+        // Invite guests skip tenant onboarding wizard (Configuration=0 would send them to onboard).
+        user.MarkConfigurationCompleted();
 
         context.Users.Add(user);
         await context.SaveChangesAsync(cancellationToken);
@@ -148,6 +160,8 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
             throw new InvalidOperationException("This account uses password login. Use Ezofis login instead.");
 
         ApplySocialLogin(user, normalizedProvider);
+        if (user.Configuration == 0)
+            user.MarkConfigurationCompleted();
         await context.SaveChangesAsync(cancellationToken);
         await _userTenantRegistry.AddOrUpdateAsync(normalizedEmail, tenantId, user.Role, user.Id, cancellationToken);
         return user.Id;
@@ -178,6 +192,8 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
 
         user.SetPasswordHash(BCrypt.Net.BCrypt.HashPassword(password.Trim()));
         user.SetLoginType("EZOFIS");
+        if (user.Configuration == 0)
+            user.MarkConfigurationCompleted();
         await context.SaveChangesAsync(cancellationToken);
         await _userTenantRegistry.AddOrUpdateAsync(normalizedEmail, tenantId, user.Role, user.Id, cancellationToken);
         return true;

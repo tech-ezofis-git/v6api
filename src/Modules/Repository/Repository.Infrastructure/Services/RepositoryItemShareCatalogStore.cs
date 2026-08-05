@@ -66,6 +66,10 @@ internal static class RepositoryItemShareCatalogStore
 
             IF COL_LENGTH('catalog.RepositoryItemShares', 'WorkflowInstanceId') IS NULL
                 ALTER TABLE catalog.RepositoryItemShares ADD WorkflowInstanceId UNIQUEIDENTIFIER NULL;
+
+            IF COL_LENGTH('catalog.RepositoryItemShares', 'Action') IS NULL
+                ALTER TABLE catalog.RepositoryItemShares ADD [Action] INT NOT NULL
+                    CONSTRAINT DF_RepositoryItemShares_Action DEFAULT (0);
             """;
 
         foreach (var sql in new[] { ensureSchemaSql, createTableSql })

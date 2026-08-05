@@ -4,9 +4,16 @@ namespace SaaSApp.Repository.Infrastructure;
 
 internal static class RepositoryItemTableColumns
 {
+    public static Task<HashSet<string>> LoadAsync(
+        SqlConnection connection,
+        string itemsTableName,
+        CancellationToken cancellationToken = default) =>
+        LoadAsync(connection, itemsTableName, transaction: null, cancellationToken);
+
     public static async Task<HashSet<string>> LoadAsync(
         SqlConnection connection,
         string itemsTableName,
+        SqlTransaction? transaction,
         CancellationToken cancellationToken = default)
     {
         const string sql = """
@@ -18,7 +25,7 @@ internal static class RepositoryItemTableColumns
             """;
 
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new SqlCommand(sql, connection, transaction);
         cmd.Parameters.AddWithValue("@TableName", itemsTableName);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

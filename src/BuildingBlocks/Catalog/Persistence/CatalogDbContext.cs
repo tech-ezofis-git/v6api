@@ -66,6 +66,7 @@ public sealed class CatalogDbContext : DbContext
             entity.HasIndex(e => new { e.SourceTenantId, e.SourceRepositoryId, e.SourceItemId });
             entity.Property(e => e.AutoProvisionGuest);
             entity.Property(e => e.WorkflowInstanceId);
+            entity.Property(e => e.Action);
         });
 
         modelBuilder.Entity<CreditMaster>(entity =>

@@ -74,6 +74,33 @@ public interface IRepositoryItemQueryService
     Task<RepositoryItemFileContent?> OpenItemFileAsync(Guid repositoryId, Guid tenantId, Guid itemId, CancellationToken cancellationToken = default);
 }
 
+public interface IRepositoryRelatedDocumentsService
+{
+    /// <summary>
+    /// Related documents (loose): with 3 folder fields, any 2 matches is enough.
+    /// FE passes only repositoryId + itemId.
+    /// </summary>
+    Task<RepositoryRelatedDocumentsResultDto?> GetRelatedAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        int page = 1,
+        int pageSize = 50,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Related documents (exact): all repository field values on the source file must match
+    /// (skips DYNAMIC_TABLE). Each file includes matchScore / matchCount / matchedFields.
+    /// </summary>
+    Task<RepositoryRelatedDocumentsResultDto?> GetRelatedExactAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        int page = 1,
+        int pageSize = 50,
+        CancellationToken cancellationToken = default);
+}
+
 public interface IRepositoryFileUploadService
 {
     Task<RepositoryUploadItemResult> UploadItemAsync(

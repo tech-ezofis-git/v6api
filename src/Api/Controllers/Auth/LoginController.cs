@@ -197,6 +197,60 @@ public sealed class LoginController : ControllerBase
         }
     }
 
+    /// <summary>Set first-time password for a repository sign-request invite. No X-Tenant-Id — tenant from invite token.</summary>
+    [HttpPost("sign-request/set-password")]
+    [ProducesResponseType(typeof(LoginSuccess), StatusCodes.Status200OK)]
+    public async Task<IActionResult> SetSignInvitePassword(
+        [FromBody] SetSignInvitePasswordRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _authService.SetSignInvitePasswordAsync(
+                request.InviteToken, request.Email, request.Password, cancellationToken);
+            return Ok(result);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Social login for a repository sign-request invite. No X-Tenant-Id — tenant from invite token.</summary>
+    [HttpPost("sign-request/social-login")]
+    [ProducesResponseType(typeof(LoginSuccess), StatusCodes.Status200OK)]
+    public async Task<IActionResult> SetSignInviteSocialLogin(
+        [FromBody] SetSignInviteSocialLoginRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _authService.SetSignInviteSocialLoginAsync(
+                request.InviteToken, request.Email, request.Provider, cancellationToken);
+            return Ok(result);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     private object BuildLoginConfigError(InvalidOperationException ex)
     {
         var showDetails = _environment.IsDevelopment()
@@ -221,3 +275,9 @@ public record SetShareInvitePasswordRequest(string ShareToken, string Email, str
 
 /// <summary>Social login for guest share invite after Google/Microsoft OAuth on the client.</summary>
 public record SetShareInviteSocialLoginRequest(string ShareToken, string Email, string Provider);
+
+/// <summary>First-time password for repository sign-request invite.</summary>
+public record SetSignInvitePasswordRequest(string InviteToken, string Email, string Password);
+
+/// <summary>Social login for repository sign-request invite.</summary>
+public record SetSignInviteSocialLoginRequest(string InviteToken, string Email, string Provider);

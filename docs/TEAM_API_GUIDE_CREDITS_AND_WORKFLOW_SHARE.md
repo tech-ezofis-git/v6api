@@ -117,7 +117,7 @@ X-Tenant-Id: <tenant-guid>
 ```
 
 **Optional query params:** `allocationMonth`, `allocationYear`, `creditType`  
-Defaults to **current UTC month/year** if omitted.
+Defaults to **current IST month/year** if omitted.
 
 **Response `200`:**
 
@@ -134,11 +134,54 @@ Defaults to **current UTC month/year** if omitted.
   "status": "Active",
   "overallConsumedCredit": 258,
   "validFromDate": "2026-07-01T00:00:00Z",
-  "validToDate": null
+  "validToDate": null,
+  "carryForwardCredit": 0,
+  "topUpBalanceCredit": 0,
+  "extraConsumedCredit": null,
+  "monthlyBalance": 742
 }
 ```
 
+`monthlyBalance` is calculated on master as:
+
+`initialCredit + carryForwardCredit + topUpBalanceCredit − overallConsumedCredit`
+
 **Response `404`:** No row for tenant + period (+ optional creditType).
+
+---
+
+### 1.3.1 Monthly balances (year list from credit master)
+
+```http
+GET /api/billing/credits/master/monthly?year=2026
+Authorization: Bearer <jwt>
+X-Tenant-Id: <tenant-guid>
+```
+
+**Optional query params:** `year` (defaults to current IST year), `creditType`
+
+**Response `200`:** array of months with calculated `monthlyBalance`:
+
+```json
+[
+  {
+    "id": 12,
+    "tenantId": "a1b2c3d4-...",
+    "allocationMonth": 7,
+    "allocationYear": 2026,
+    "label": "Jul 2026",
+    "creditType": "Standard",
+    "initialCredit": 1000,
+    "carryForwardCredit": 0,
+    "topUpBalanceCredit": 0,
+    "overallConsumedCredit": 258,
+    "extraConsumedCredit": null,
+    "balanceCredit": 742,
+    "monthlyBalance": 742,
+    "status": "Active"
+  }
+]
+```
 
 ---
 
@@ -230,9 +273,9 @@ Content-Type: application/json
   "transactions": [
     {
       "id": 1,
-      "activityType": "OCR Agent",
+      "agent": "OCR Agent",
       "subActivityType": "AI OCR",
-      "identifyTable": "Document",
+      "fileName": "INV-2026-5004.pdf",
       "identifyId": 101,
       "remarks": "Invoice extraction",
       "credit": 1,
@@ -254,7 +297,7 @@ Content-Type: application/json
 | **Overall Credit Split** (pie chart) | `overallCreditSplit` | Service-level slices for pie chart. **No Total row** — use `totalCreditsConsumed` for center label. |
 | **Credit trend** (line chart) | `timeline` | Buckets vary by period (see below). |
 | **Monthly consumption list** (yearly/quarterly view) | `monthlyConsumption` | `null` for today/yesterday/monthly. |
-| **Transaction drill-down** | `transactions` | Raw ledger rows, newest first. |
+| **Transaction Activity** | `transactions` | Newest first. Columns: `agent` (Agent), `fileName` (Filename), `subActivityType`, `credit`, `createdAt`. |
 
 **Timeline buckets by period:**
 

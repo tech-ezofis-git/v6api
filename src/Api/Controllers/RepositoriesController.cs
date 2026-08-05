@@ -11,6 +11,7 @@ using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Options;
+using SaaSApp.Repository.Infrastructure.Services;
 using SaaSApp.Security;
 
 namespace SaaSApp.Api.Controllers;
@@ -24,11 +25,13 @@ public sealed class RepositoriesController : ControllerBase
     private readonly IStaticRepositoryProvisioner _provisioner;
     private readonly IRepositoryBrowseService _browse;
     private readonly IRepositoryItemQueryService _items;
+    private readonly IRepositoryRelatedDocumentsService _relatedDocuments;
     private readonly IRepositoryFileUploadService _fileUpload;
     private readonly IRepositoryArchiveFileUploadService _archiveUpload;
     private readonly IRepositoryStorageSeedService _storageSeed;
     private readonly IRepositoryItemActivityService _itemActivity;
     private readonly IRepositoryItemShareService _itemShares;
+    private readonly IRepositorySecurityService _security;
     private readonly ITenantConnectionStringResolver _connectionResolver;
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IRepositoryAiSummaryService _aiSummary;
@@ -41,11 +44,13 @@ public sealed class RepositoriesController : ControllerBase
         IStaticRepositoryProvisioner provisioner,
         IRepositoryBrowseService browse,
         IRepositoryItemQueryService items,
+        IRepositoryRelatedDocumentsService relatedDocuments,
         IRepositoryFileUploadService fileUpload,
         IRepositoryArchiveFileUploadService archiveUpload,
         IRepositoryStorageSeedService storageSeed,
         IRepositoryItemActivityService itemActivity,
         IRepositoryItemShareService itemShares,
+        IRepositorySecurityService security,
         ITenantConnectionStringResolver connectionResolver,
         ITenantConnectionProvider connectionProvider,
         IRepositoryAiSummaryService aiSummary,
@@ -57,11 +62,13 @@ public sealed class RepositoriesController : ControllerBase
         _provisioner = provisioner;
         _browse = browse;
         _items = items;
+        _relatedDocuments = relatedDocuments;
         _fileUpload = fileUpload;
         _archiveUpload = archiveUpload;
         _storageSeed = storageSeed;
         _itemActivity = itemActivity;
         _itemShares = itemShares;
+        _security = security;
         _connectionResolver = connectionResolver;
         _connectionProvider = connectionProvider;
         _aiSummary = aiSummary;
@@ -118,7 +125,21 @@ public sealed class RepositoriesController : ControllerBase
     {
         var tenantId = RequireTenantId();
         var list = await _provisioner.ListRepositoriesAsync(tenantId, cancellationToken);
-        return Ok(list);
+        if (IsCurrentUserAdmin())
+            return Ok(list);
+
+        var userId = GetUserId();
+        if (userId is null)
+            return Ok(Array.Empty<RepositorySummaryDto>());
+
+        var allowedIds = await _security.FilterAccessibleRepositoryIdsAsync(
+            list.Select(r => r.Id).ToList(),
+            tenantId,
+            userId.Value,
+            isAdmin: false,
+            cancellationToken);
+        var allowed = allowedIds.ToHashSet();
+        return Ok(list.Where(r => allowed.Contains(r.Id)).ToList());
     }
 
     [HttpGet("/api/repositories/{id:guid}")]
@@ -132,8 +153,86 @@ public sealed class RepositoriesController : ControllerBase
             return shareError;
 
         var (repoId, _, tenantId) = ResolveItemAccess(id, Guid.Empty);
+        if (await EnsureRepositoryAccessAsync(repoId, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
+
         var repo = await _provisioner.GetRepositoryAsync(repoId, tenantId, cancellationToken);
         return repo == null ? NotFound() : Ok(repo);
+    }
+
+    /// <summary>Get folder security policies for a repository (Admin configures; TenantUser may read own effective policies).</summary>
+    [HttpGet("/api/repositories/{id:guid}/security/folder")]
+    public async Task<IActionResult> GetFolderSecurity(
+        Guid id,
+        [FromQuery] Guid? folderId,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var result = await _security.GetFolderSecurityAsync(id, tenantId, folderId, cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Replace folder security policies (Users + Permissions wizard). Admin only.</summary>
+    [HttpPut("/api/repositories/{id:guid}/security/folder")]
+    [Authorize(Policy = AuthorizationPolicies.Admin)]
+    public async Task<IActionResult> SaveFolderSecurity(
+        Guid id,
+        [FromBody] RepositoryFolderSecurityUpsertRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var result = await _security.SaveFolderSecurityAsync(id, tenantId, request, GetUserId(), cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Get document security rules (metadata grant/hide).</summary>
+    [HttpGet("/api/repositories/{id:guid}/security/documents")]
+    public async Task<IActionResult> GetDocumentSecurity(Guid id, CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var result = await _security.GetDocumentSecurityAsync(id, tenantId, cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Replace document security rules. Admin only.</summary>
+    [HttpPut("/api/repositories/{id:guid}/security/documents")]
+    [Authorize(Policy = AuthorizationPolicies.Admin)]
+    public async Task<IActionResult> SaveDocumentSecurity(
+        Guid id,
+        [FromBody] RepositoryDocumentSecurityUpsertRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var result = await _security.SaveDocumentSecurityAsync(id, tenantId, request, GetUserId(), cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
     }
 
     /// <summary>Creates missing per-repo tables (e.g. stage table) for an existing repository.</summary>
@@ -185,6 +284,8 @@ public sealed class RepositoriesController : ControllerBase
     public async Task<IActionResult> BrowseStructure(Guid id, CancellationToken cancellationToken)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         return await Browse(async () => await _browse.GetBrowseStructureAsync(id, tenantId, cancellationToken));
     }
 
@@ -196,6 +297,8 @@ public sealed class RepositoriesController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         var filters = ParseParentFilters(query.ParentFilters);
         return await Browse(async () =>
             await _browse.GetBrowseChildrenAsync(
@@ -211,6 +314,8 @@ public sealed class RepositoriesController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         var filters = ParseParentFilters(query.ParentFilters);
         return await Browse(async () =>
             await _browse.GetBrowseGroupsAsync(
@@ -222,6 +327,8 @@ public sealed class RepositoriesController : ControllerBase
     public async Task<IActionResult> GetItemFilterFields(Guid id, CancellationToken cancellationToken)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var schema = await _items.GetItemListFilterSchemaAsync(id, tenantId, cancellationToken);
@@ -241,10 +348,13 @@ public sealed class RepositoriesController : ControllerBase
     public async Task<IActionResult> ListItems(Guid id, [FromQuery] RepositoryItemListQuery query, CancellationToken cancellationToken)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var normalized = NormalizeItemListQuery(query);
             var result = await _items.ListItemsAsync(id, tenantId, normalized, cancellationToken);
+            result = await ApplyItemListSecurityAsync(id, tenantId, result, cancellationToken);
             return Ok(result);
         }
         catch (ArgumentException ex)
@@ -275,10 +385,13 @@ public sealed class RepositoriesController : ControllerBase
         CancellationToken cancellationToken)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var query = ToItemListQuery(request);
             var result = await _items.ListItemsAsync(id, tenantId, query, cancellationToken);
+            result = await ApplyItemListSecurityAsync(id, tenantId, result, cancellationToken);
             return Ok(result);
         }
         catch (ArgumentException ex)
@@ -300,6 +413,8 @@ public sealed class RepositoriesController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var facets = await _items.GetFacetsAsync(id, tenantId, fieldName, scopeFilters, limit, cancellationToken);
@@ -330,7 +445,88 @@ public sealed class RepositoriesController : ControllerBase
         try
         {
             var item = await _items.GetItemAsync(repoId, tenantId, resolvedItemId, cancellationToken);
-            return item == null ? NotFound() : Ok(item);
+            if (item == null)
+                return NotFound();
+            if (await EnsureItemAccessAsync(repoId, tenantId, RepositorySecurityFieldMap.FromDetail(item), RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+                return denied;
+            return Ok(item);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Related documents across all tenant repositories for the open file.
+    /// FE sends only repositoryId + itemId. Backend matches folder-structure fields
+    /// (<c>IncludeInFolderStructure</c>): with 3 levels, any 2 matching fields is enough.
+    /// </summary>
+    [HttpGet("/api/repositories/{id:guid}/items/{itemId:guid}/related")]
+    [ProducesResponseType(typeof(RepositoryRelatedDocumentsResultDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetRelatedDocuments(
+        Guid id,
+        Guid itemId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } deniedRepo)
+            return deniedRepo;
+
+        try
+        {
+            var source = await _items.GetItemAsync(id, tenantId, itemId, cancellationToken);
+            if (source == null)
+                return NotFound();
+            if (await EnsureItemAccessAsync(id, tenantId, RepositorySecurityFieldMap.FromDetail(source), RepositorySecurityPermissions.View, cancellationToken) is { } deniedItem)
+                return deniedItem;
+
+            var result = await _relatedDocuments.GetRelatedAsync(id, tenantId, itemId, page, pageSize, cancellationToken);
+            if (result == null)
+                return NotFound();
+
+            result = await ApplyRelatedDocumentsSecurityAsync(tenantId, result, cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Exact related documents: scores every file against all repository fields.
+    /// Score = matchedFields / totalFields × 100 (e.g. 10/14 → 71, 14/14 → 100).
+    /// </summary>
+    [HttpGet("/api/repositories/{id:guid}/items/{itemId:guid}/related-exact")]
+    [ProducesResponseType(typeof(RepositoryRelatedDocumentsResultDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetRelatedDocumentsExact(
+        Guid id,
+        Guid itemId,
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } deniedRepo)
+            return deniedRepo;
+
+        try
+        {
+            var source = await _items.GetItemAsync(id, tenantId, itemId, cancellationToken);
+            if (source == null)
+                return NotFound();
+            if (await EnsureItemAccessAsync(id, tenantId, RepositorySecurityFieldMap.FromDetail(source), RepositorySecurityPermissions.View, cancellationToken) is { } deniedItem)
+                return deniedItem;
+
+            var result = await _relatedDocuments.GetRelatedExactAsync(id, tenantId, itemId, page, pageSize, cancellationToken);
+            if (result == null)
+                return NotFound();
+
+            result = await ApplyRelatedDocumentsSecurityAsync(tenantId, result, cancellationToken);
+            return Ok(result);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
         {
@@ -422,7 +618,11 @@ public sealed class RepositoriesController : ControllerBase
         try
         {
             var workspace = await _items.GetItemWorkspaceAsync(repoId, tenantId, resolvedItemId, cancellationToken);
-            return workspace == null ? NotFound() : Ok(workspace);
+            if (workspace == null)
+                return NotFound();
+            if (await EnsureItemAccessAsync(repoId, tenantId, RepositorySecurityFieldMap.FromWorkspace(workspace), RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+                return denied;
+            return Ok(workspace);
         }
         catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
         {
@@ -430,7 +630,12 @@ public sealed class RepositoriesController : ControllerBase
         }
     }
 
-    /// <summary>Share archived file with an external email (read-only cross-tenant link).</summary>
+    /// <summary>
+    /// Invite a person to a repository file — same shareToken flow as workflow share.
+    /// Returns <c>shareUrl</c> (emailed) with <c>shareToken</c>, <c>email</c>, <c>isnew</c>.
+    /// Guest: preview → set-password / social-login / login, then open file with shareToken.
+    /// <c>action</c>: 0 = Can View, 1 = Can Edit (upload).
+    /// </summary>
     [HttpPost("/api/repositories/{id:guid}/items/{itemId:guid}/share")]
     [ProducesResponseType(typeof(CreateRepositoryItemShareResult), StatusCodes.Status201Created)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -585,6 +790,8 @@ public sealed class RepositoriesController : ControllerBase
     public async Task<IActionResult> CreateItem(Guid id, [FromBody] CreateRepositoryItemRequest request, CancellationToken cancellationToken)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.Upload, cancellationToken) is { } denied)
+            return denied;
         var itemId = await _items.CreateItemAsync(id, tenantId, request, GetUserId(), cancellationToken);
         return CreatedAtAction(nameof(GetItem), new { id, itemId }, new { itemId });
     }
@@ -598,6 +805,8 @@ public sealed class RepositoriesController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.EditMetadata, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var metadata = ParseMetadataBody(body);
@@ -649,6 +858,8 @@ public sealed class RepositoriesController : ControllerBase
             return BadRequest(new { error = "file is required." });
 
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.Upload, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var mergedMetadata = RepositoryFormMetadataCollector.ToMetadataJson(
@@ -703,6 +914,8 @@ public sealed class RepositoriesController : ControllerBase
             return BadRequest(new { error = "file is required." });
 
         var tenantId = RequireTenantId();
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.Upload, cancellationToken) is { } denied)
+            return denied;
         try
         {
             var mergedMetadata = RepositoryFormMetadataCollector.ToMetadataJson(
@@ -754,6 +967,17 @@ public sealed class RepositoriesController : ControllerBase
         var (repoId, resolvedItemId, tenantId) = ResolveItemAccess(id, itemId);
         try
         {
+            var item = await _items.GetItemAsync(repoId, tenantId, resolvedItemId, cancellationToken);
+            if (item == null)
+                return NotFound();
+            if (await EnsureItemAccessAsync(
+                    repoId,
+                    tenantId,
+                    RepositorySecurityFieldMap.FromDetail(item),
+                    RepositorySecurityPermissions.Download,
+                    cancellationToken) is { } denied)
+                return denied;
+
             var content = await _items.OpenItemFileAsync(repoId, tenantId, resolvedItemId, cancellationToken);
             if (content == null)
                 return NotFound();
@@ -912,6 +1136,146 @@ public sealed class RepositoriesController : ControllerBase
             return (share.SourceRepositoryId, share.SourceItemId, share.SourceTenantId);
 
         return (repositoryId, itemId, RequireTenantId());
+    }
+
+    private bool IsCurrentUserAdmin() =>
+        User.Claims.Any(c =>
+            (c.Type == ClaimTypes.Role || c.Type == "role") &&
+            (string.Equals(c.Value, "Admin", StringComparison.OrdinalIgnoreCase) ||
+             string.Equals(c.Value, "Administrator", StringComparison.OrdinalIgnoreCase)));
+
+    /// <summary>Share-token viewers skip ACL. Admin skips. TenantUser must pass permission.</summary>
+    private async Task<IActionResult?> EnsureRepositoryAccessAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        string permission,
+        CancellationToken cancellationToken)
+    {
+        if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
+            return null;
+        if (IsCurrentUserAdmin())
+            return null;
+
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "User id is required." });
+
+        var allowed = await _security.CanAccessRepositoryAsync(
+            repositoryId, tenantId, userId.Value, isAdmin: false, permission, cancellationToken);
+        return allowed
+            ? null
+            : StatusCode(StatusCodes.Status403Forbidden, new { error = "You do not have access to this repository." });
+    }
+
+    private async Task<IActionResult?> EnsureItemAccessAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        IReadOnlyDictionary<string, string?> fields,
+        string permission,
+        CancellationToken cancellationToken)
+    {
+        if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
+            return null;
+        if (IsCurrentUserAdmin())
+            return null;
+
+        var userId = GetUserId();
+        if (userId is null)
+            return Unauthorized(new { error = "User id is required." });
+
+        var allowed = await _security.CanAccessItemAsync(
+            repositoryId, tenantId, userId.Value, isAdmin: false, fields, permission, cancellationToken);
+        return allowed
+            ? null
+            : StatusCode(StatusCodes.Status403Forbidden, new { error = "You do not have access to this document." });
+    }
+
+    private async Task<RepositoryRelatedDocumentsResultDto> ApplyRelatedDocumentsSecurityAsync(
+        Guid tenantId,
+        RepositoryRelatedDocumentsResultDto result,
+        CancellationToken cancellationToken)
+    {
+        if (IsCurrentUserAdmin() || result.Data.Count == 0)
+            return result;
+
+        var userId = GetUserId();
+        if (userId is null)
+            return result with { Data = Array.Empty<RepositoryRelatedDocumentDto>(), TotalCount = 0 };
+
+        var allowed = new List<RepositoryRelatedDocumentDto>();
+        foreach (var group in result.Data.GroupBy(x => x.RepositoryId))
+        {
+            var filtered = await _security.FilterAccessibleItemsAsync(
+                group.Key,
+                tenantId,
+                userId.Value,
+                isAdmin: false,
+                group.ToList(),
+                FromRelatedDocument,
+                RepositorySecurityPermissions.View,
+                cancellationToken);
+            allowed.AddRange(filtered);
+        }
+
+        return result with
+        {
+            Data = allowed
+                .OrderByDescending(x => x.MatchScore)
+                .ThenByDescending(x => x.CreatedAtUtc)
+                .ToList(),
+            TotalCount = allowed.Count
+        };
+    }
+
+    private static IReadOnlyDictionary<string, string?> FromRelatedDocument(RepositoryRelatedDocumentDto item) =>
+        new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["ItemId"] = item.Id.ToString("D"),
+            ["Id"] = item.Id.ToString("D"),
+            ["FileName"] = item.FileName,
+            ["FileType"] = item.FileType,
+            ["DocumentType"] = item.DocumentType,
+            ["Supplier"] = item.Supplier,
+            ["PoNumber"] = item.PoNumber,
+            ["PONumber"] = item.PoNumber,
+            ["InvoiceNumber"] = item.InvoiceNumber,
+            ["InvoiceNo"] = item.InvoiceNumber
+        };
+
+    private async Task<PagedResult<RepositoryItemListDto>> ApplyItemListSecurityAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        PagedResult<RepositoryItemListDto> result,
+        CancellationToken cancellationToken)
+    {
+        if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
+        {
+            var sharedOnly = result.Data.Where(i => i.Id == share.SourceItemId).ToList();
+            return result with { Data = sharedOnly, TotalCount = sharedOnly.Count };
+        }
+
+        if (IsCurrentUserAdmin())
+            return result;
+
+        var userId = GetUserId();
+        if (userId is null)
+            return result with { Data = Array.Empty<RepositoryItemListDto>(), TotalCount = 0 };
+
+        var filtered = await _security.FilterAccessibleItemsAsync(
+            repositoryId,
+            tenantId,
+            userId.Value,
+            isAdmin: false,
+            result.Data,
+            RepositorySecurityFieldMap.FromListItem,
+            RepositorySecurityPermissions.View,
+            cancellationToken);
+
+        return result with
+        {
+            Data = filtered,
+            TotalCount = result.TotalSkipped ? result.TotalCount : filtered.Count
+        };
     }
 
     private Guid? GetUserId()
