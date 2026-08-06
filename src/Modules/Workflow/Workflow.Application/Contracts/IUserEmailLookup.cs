@@ -12,4 +12,8 @@ public interface IUserEmailLookup
         CancellationToken cancellationToken = default);
 }
 
-public sealed record UserProfileLookupDto(string Email, string DisplayName);
+public sealed record UserProfileLookupDto(
+    string Email,
+    string DisplayName,
+    string? FirstName = null,
+    string? LastName = null);

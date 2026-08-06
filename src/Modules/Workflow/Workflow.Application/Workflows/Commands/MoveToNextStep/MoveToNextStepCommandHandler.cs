@@ -14,6 +14,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IWorkflowLegacyMailboxSyncService _mailboxSync;
     private readonly IWorkflowApAgentMoveNextService _apAgentMoveNext;
     private readonly IWorkflowEzfbFormDataLoader _ezfbFormDataLoader;
+    private readonly IWorkflowMoveNotificationService _moveNotifications;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
 
@@ -24,6 +25,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IWorkflowLegacyMailboxSyncService mailboxSync,
         IWorkflowApAgentMoveNextService apAgentMoveNext,
         IWorkflowEzfbFormDataLoader ezfbFormDataLoader,
+        IWorkflowMoveNotificationService moveNotifications,
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider)
     {
@@ -33,6 +35,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _mailboxSync = mailboxSync;
         _apAgentMoveNext = apAgentMoveNext;
         _ezfbFormDataLoader = ezfbFormDataLoader;
+        _moveNotifications = moveNotifications;
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
     }
@@ -135,6 +138,16 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                     cancellationToken);
             }
 
+            await NotifyMoveAsync(
+                workflow,
+                instance,
+                request.Review,
+                targetDefinitionStep,
+                nextStep: null,
+                submittedModifiedByUserId: userId,
+                receivedCreatedByUserId: userId,
+                cancellationToken);
+
             return new MoveToNextStepCommandResult(
                 true,
                 "AP agent review recorded; workflow not advanced (review is not Approve).",
@@ -160,6 +173,16 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 var nextInstance = nextAfterAp != null
                     ? WorkflowStepTransitionHelper.FindStepInstance(instance, nextAfterAp.Id)
                     : null;
+
+                await NotifyMoveAsync(
+                    workflow,
+                    instance,
+                    request.Review,
+                    targetDefinitionStep,
+                    nextAfterAp,
+                    submittedModifiedByUserId: userId,
+                    receivedCreatedByUserId: userId,
+                    cancellationToken);
 
                 return new MoveToNextStepCommandResult(
                     true,
@@ -309,6 +332,16 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             preferEzfb: appliedPoRowToEzfb,
             cancellationToken);
 
+        await NotifyMoveAsync(
+            workflow,
+            instance,
+            request.Review,
+            targetDefinitionStep,
+            nextDefinitionStep,
+            submittedModifiedByUserId: userId,
+            receivedCreatedByUserId: legacySync.NextCreatedByUserId ?? userId,
+            cancellationToken);
+
         return new MoveToNextStepCommandResult(
             true,
             message,
@@ -321,6 +354,29 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             legacyNextTransactionId,
             legacyNextTransactionGuid);
     }
+
+    private Task NotifyMoveAsync(
+        Domain.Entities.Workflow workflow,
+        WorkflowInstance instance,
+        string? review,
+        WorkflowStep currentStep,
+        WorkflowStep? nextStep,
+        Guid submittedModifiedByUserId,
+        Guid? receivedCreatedByUserId,
+        CancellationToken cancellationToken)
+        => _moveNotifications.TryInsertMoveNotificationsAsync(
+            new WorkflowMoveNotificationContext(
+                instance.WorkflowId,
+                instance.Id,
+                workflow.Name,
+                review,
+                currentStep.Name,
+                currentStep.StageType,
+                nextStep?.Name,
+                nextStep?.StageType,
+                submittedModifiedByUserId,
+                receivedCreatedByUserId),
+            cancellationToken);
 
     internal static WorkflowStep? ResolveStepByActivityId(IReadOnlyList<WorkflowStep> orderedSteps, string activityId)
     {

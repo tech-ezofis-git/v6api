@@ -40,9 +40,20 @@ internal static class FormMasterFileNotificationStore
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    public static Task<int> InsertAsync(
+        SqlConnection connection,
+        string title,
+        string? remarks,
+        object inputJson,
+        string category,
+        int createdByLegacyId,
+        CancellationToken cancellationToken)
+        => InsertAsync(connection, title, status: null, remarks, inputJson, category, createdByLegacyId, cancellationToken);
+
     public static async Task<int> InsertAsync(
         SqlConnection connection,
         string title,
+        string? status,
         string? remarks,
         object inputJson,
         string category,
@@ -58,12 +69,13 @@ internal static class FormMasterFileNotificationStore
                 createdAt, modifiedAt, createdBy, modifiedBy, isDeleted, lastActionBy, readStatus)
             OUTPUT INSERTED.id
             VALUES (
-                @Title, NULL, @Remarks, @InputJson, @Category,
+                @Title, @Status, @Remarks, @InputJson, @Category,
                 @CreatedAt, NULL, @CreatedBy, 0, 0, NULL, 0);
             """;
 
         await using var cmd = new SqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Title", (object?)title ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@Status", (object?)status ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Remarks", (object?)remarks ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@InputJson", inputJsonText);
         cmd.Parameters.AddWithValue("@Category", category);
