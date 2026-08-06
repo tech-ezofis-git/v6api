@@ -152,9 +152,9 @@ public static partial class EventLogRouteMapper
 
     private static bool IsViewOnlyRoute(string method, string path)
     {
-        // Forms list is exposed as GET or POST /api/form/all - treat both as view-only.
-        if (path.Equals("/api/form/all", StringComparison.OrdinalIgnoreCase)
-            && (HttpMethodsEqual(method, "GET") || HttpMethodsEqual(method, "POST")))
+        // List / filter endpoints ending with /all (e.g. POST /api/workflow/all, /api/form/all).
+        // Match by path so exclusion works even when route template is unavailable in OnCompleted.
+        if (path.EndsWith("/all", StringComparison.OrdinalIgnoreCase))
             return true;
 
         // Search / filter-search style endpoints (e.g. POST .../filter/search).
