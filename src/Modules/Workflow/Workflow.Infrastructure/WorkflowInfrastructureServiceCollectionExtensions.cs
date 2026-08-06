@@ -93,6 +93,14 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IWorkflowLegacyTransactionSyncService, WorkflowLegacyTransactionSyncService>();
         services.AddScoped<IWorkflowInboxShareAssignmentService, WorkflowInboxShareAssignmentService>();
         services.AddScoped<IApDashboardQueryService, ApDashboardQueryService>();
+        services.Configure<ApDashboardInsightsOptions>(configuration.GetSection(ApDashboardInsightsOptions.SectionName));
+        services.AddHttpClient(nameof(ApDashboardInsightsClient), (sp, client) =>
+        {
+            var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ApDashboardInsightsOptions>>().Value;
+            var seconds = Math.Clamp(opts.TimeoutSeconds, 5, 300);
+            client.Timeout = TimeSpan.FromSeconds(seconds);
+        });
+        services.AddScoped<IApDashboardInsightsClient, ApDashboardInsightsClient>();
         services.AddScoped<IWorkflowStepSyncService, WorkflowStepSyncService>();
         services.AddScoped<IWorkflowStartBootstrapService, WorkflowStartBootstrapService>();
         services.AddScoped<IWorkflowApAgentMoveNextService, WorkflowApAgentMoveNextService>();

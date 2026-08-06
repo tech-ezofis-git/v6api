@@ -16,6 +16,7 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
         services.Configure<RepositoryOcrOptions>(configuration.GetSection(RepositoryOcrOptions.SectionName));
         services.Configure<RepositoryAiSummaryOptions>(configuration.GetSection(RepositoryAiSummaryOptions.SectionName));
         services.Configure<RepositoryShareOptions>(configuration.GetSection(RepositoryShareOptions.SectionName));
+        services.Configure<RepositorySignRequestOptions>(configuration.GetSection(RepositorySignRequestOptions.SectionName));
         services.AddHttpClient<IOcrExtractionService, OcrExtractionService>();
         services.AddHttpClient<IRepositoryAiSummaryService, RepositoryAiSummaryService>();
         services.AddScoped<IRepositorySchemaService, RepositorySchemaService>();
@@ -24,6 +25,7 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
         services.AddScoped<IRepositoryBrowseService, RepositoryBrowseService>();
         services.AddScoped<IRepositoryFolderService, RepositoryFolderService>();
         services.AddScoped<IRepositoryItemQueryService, RepositoryItemQueryService>();
+        services.AddScoped<IRepositoryRelatedDocumentsService, RepositoryRelatedDocumentsService>();
         services.AddScoped<IRepositoryItemActivityService, RepositoryItemActivityService>();
         services.AddScoped<LocalRepositoryFileStorage>();
         services.AddScoped<EzofisBlobRepositoryFileStorage>();
@@ -34,6 +36,8 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
         services.AddScoped<IRepositoryUploadIndexService, RepositoryUploadIndexService>();
         services.AddScoped<IRepositoryItemShareService, RepositoryItemShareService>();
         services.AddScoped<IShareGuestUserProvisioningService, ShareGuestUserProvisioningService>();
+        services.AddScoped<IRepositorySecurityService, RepositorySecurityService>();
+        services.AddScoped<IRepositorySignRequestService, RepositorySignRequestService>();
         services.AddScoped<ArchiveStageItemJob>();
         return services;
     }

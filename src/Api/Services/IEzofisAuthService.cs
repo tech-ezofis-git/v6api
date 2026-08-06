@@ -31,6 +31,20 @@ public interface IEzofisAuthService
         string email,
         string provider,
         CancellationToken cancellationToken = default);
+
+    /// <summary>First-time password for a repository sign-request invite. Tenant resolved from invite token.</summary>
+    Task<LoginResult> SetSignInvitePasswordAsync(
+        string inviteToken,
+        string email,
+        string password,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Social login for a repository sign-request invite. Tenant resolved from invite token.</summary>
+    Task<LoginResult> SetSignInviteSocialLoginAsync(
+        string inviteToken,
+        string email,
+        string provider,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of Ezofis login: success, 2FA required, or first-time password setup.</summary>

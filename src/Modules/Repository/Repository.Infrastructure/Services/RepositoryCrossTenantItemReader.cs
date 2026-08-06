@@ -183,7 +183,12 @@ internal static class RepositoryCrossTenantItemReader
             cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(email))
-            fields["CreatedBy"] = email;
+        {
+            fields["CreatedById"] = createdById;
+            fields["CreatedByEmail"] = email;
+            fields["CreatedBy"] = createdById;
+            fields["CreatedByName"] = email;
+        }
     }
 
     private static async Task<IReadOnlyList<RepositoryFieldDto>> LoadFieldsAsync(

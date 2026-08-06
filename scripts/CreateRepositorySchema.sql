@@ -181,3 +181,86 @@ BEGIN
     PRINT 'repository.Repositories.IsDefaultRepository added';
 END
 GO
+
+IF NOT EXISTS (SELECT * FROM sys.tables t INNER JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.name = 'FolderSecurityPolicies' AND s.name = 'repository')
+BEGIN
+    CREATE TABLE repository.FolderSecurityPolicies (
+        Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_FolderSecurityPolicies PRIMARY KEY,
+        RepositoryId UNIQUEIDENTIFIER NOT NULL,
+        FolderId UNIQUEIDENTIFIER NULL,
+        CanView BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanView DEFAULT (1),
+        CanUpload BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanUpload DEFAULT (0),
+        CanDownload BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanDownload DEFAULT (0),
+        CanPrint BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanPrint DEFAULT (0),
+        CanDelete BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanDelete DEFAULT (0),
+        CanEditMetadata BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanEditMetadata DEFAULT (0),
+        CanEditDocument BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanEditDocument DEFAULT (0),
+        CanCheckOut BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanCheckOut DEFAULT (0),
+        CanCheckIn BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanCheckIn DEFAULT (0),
+        CanSendForSignature BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanSendForSignature DEFAULT (0),
+        CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
+        ModifiedAtUtc DATETIME2(3) NULL,
+        CreatedBy UNIQUEIDENTIFIER NULL,
+        ModifiedBy UNIQUEIDENTIFIER NULL,
+        IsDeleted BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_IsDeleted DEFAULT (0)
+    );
+    CREATE INDEX IX_FolderSecurityPolicies_Repo_Folder
+        ON repository.FolderSecurityPolicies (RepositoryId, FolderId, IsDeleted);
+    PRINT 'repository.FolderSecurityPolicies created';
+END
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.tables t INNER JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.name = 'FolderSecurityPrincipals' AND s.name = 'repository')
+BEGIN
+    CREATE TABLE repository.FolderSecurityPrincipals (
+        Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_FolderSecurityPrincipals PRIMARY KEY,
+        PolicyId UNIQUEIDENTIFIER NOT NULL,
+        PrincipalType NVARCHAR(16) NOT NULL,
+        PrincipalId UNIQUEIDENTIFIER NOT NULL,
+        CONSTRAINT FK_FolderSecurityPrincipals_Policy
+            FOREIGN KEY (PolicyId) REFERENCES repository.FolderSecurityPolicies (Id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_FolderSecurityPrincipals_Policy ON repository.FolderSecurityPrincipals (PolicyId);
+    CREATE INDEX IX_FolderSecurityPrincipals_Principal
+        ON repository.FolderSecurityPrincipals (PrincipalType, PrincipalId);
+    PRINT 'repository.FolderSecurityPrincipals created';
+END
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.tables t INNER JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.name = 'DocumentSecurityRules' AND s.name = 'repository')
+BEGIN
+    CREATE TABLE repository.DocumentSecurityRules (
+        Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_DocumentSecurityRules PRIMARY KEY,
+        RepositoryId UNIQUEIDENTIFIER NOT NULL,
+        Action NVARCHAR(16) NOT NULL,
+        MatchMode NVARCHAR(8) NOT NULL CONSTRAINT DF_DocumentSecurityRules_MatchMode DEFAULT (N'all'),
+        ConditionsJson NVARCHAR(MAX) NOT NULL,
+        SortOrder INT NOT NULL CONSTRAINT DF_DocumentSecurityRules_SortOrder DEFAULT (0),
+        CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_DocumentSecurityRules_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
+        ModifiedAtUtc DATETIME2(3) NULL,
+        CreatedBy UNIQUEIDENTIFIER NULL,
+        ModifiedBy UNIQUEIDENTIFIER NULL,
+        IsDeleted BIT NOT NULL CONSTRAINT DF_DocumentSecurityRules_IsDeleted DEFAULT (0)
+    );
+    CREATE INDEX IX_DocumentSecurityRules_Repo
+        ON repository.DocumentSecurityRules (RepositoryId, IsDeleted, SortOrder);
+    PRINT 'repository.DocumentSecurityRules created';
+END
+GO
+
+IF NOT EXISTS (SELECT * FROM sys.tables t INNER JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.name = 'DocumentSecurityPrincipals' AND s.name = 'repository')
+BEGIN
+    CREATE TABLE repository.DocumentSecurityPrincipals (
+        Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_DocumentSecurityPrincipals PRIMARY KEY,
+        RuleId UNIQUEIDENTIFIER NOT NULL,
+        PrincipalType NVARCHAR(16) NOT NULL,
+        PrincipalId UNIQUEIDENTIFIER NOT NULL,
+        CONSTRAINT FK_DocumentSecurityPrincipals_Rule
+            FOREIGN KEY (RuleId) REFERENCES repository.DocumentSecurityRules (Id) ON DELETE CASCADE
+    );
+    CREATE INDEX IX_DocumentSecurityPrincipals_Rule ON repository.DocumentSecurityPrincipals (RuleId);
+    CREATE INDEX IX_DocumentSecurityPrincipals_Principal
+        ON repository.DocumentSecurityPrincipals (PrincipalType, PrincipalId);
+    PRINT 'repository.DocumentSecurityPrincipals created';
+END
+GO

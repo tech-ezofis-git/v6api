@@ -87,7 +87,40 @@ public sealed record ApDashboardResult(
   IReadOnlyList<ApDashboardGeographyDto> SupplierGeography,
   ApDashboardFilterOptionsDto FilterOptions,
   ApDashboardActiveFiltersDto ActiveFilters,
-  IReadOnlyList<ApDashboardInvoiceDto>? Invoices = null);
+  /// <summary>Profitability &amp; Cash Position accordion (profit margin, next 4 weeks, peak week).</summary>
+  ApDashboardPanelSectionDto ProfitabilityCashPosition,
+  /// <summary>Supplier Concentration &amp; Risk accordion (active, high risk, top-3 concentration).</summary>
+  ApDashboardPanelSectionDto SupplierConcentrationRisk,
+  /// <summary>Aging &amp; Process Oversight accordion (90+ days, critical exceptions, approval rate).</summary>
+  ApDashboardPanelSectionDto AgingProcessOversight,
+  /// <summary>Invoice aging analysis chart buckets (current / 1–30 / 31–60 / 61–90 / 90+).</summary>
+  ApDashboardAgingAnalysisDto InvoiceAgingAnalysis,
+  IReadOnlyList<ApDashboardInvoiceDto>? Invoices = null,
+  /// <summary>AI insights from Python <c>/api/v1/insights</c> (attached after dashboard build).</summary>
+  IReadOnlyList<string>? Insights = null);
+
+/// <summary>Collapsible dashboard panel with title, subtitle, and KPI cards.</summary>
+public sealed record ApDashboardPanelSectionDto(
+  string Key,
+  string Title,
+  string Subtitle,
+  IReadOnlyList<ApDashboardKpiDto> Kpis);
+
+/// <summary>Invoice aging analysis chart.</summary>
+public sealed record ApDashboardAgingAnalysisDto(
+  string Title,
+  string? Subtitle,
+  decimal TotalAmount,
+  string TotalAmountDisplay,
+  IReadOnlyList<ApDashboardAgingBucketDto> Buckets);
+
+public sealed record ApDashboardAgingBucketDto(
+  string Key,
+  string Label,
+  decimal Amount,
+  string AmountDisplay,
+  int InvoiceCount,
+  decimal Percent);
 
 /// <summary>AP Command Center header strip.</summary>
 public sealed record ApDashboardHeaderDto(

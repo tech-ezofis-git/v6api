@@ -436,7 +436,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 await SoftDeleteFieldAsync(connection, tx, repositoryId, row.Id, userId, cancellationToken);
         }
 
-        var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, itemsTable, cancellationToken);
+        var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, itemsTable, tx, cancellationToken);
         var newFields = new List<RepositoryFieldDefinitionDto>();
 
         foreach (var field in fields)
@@ -474,13 +474,22 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 await itemsCmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            var stageColumns = await RepositoryItemTableColumns.LoadAsync(connection, stageTable, cancellationToken);
+            var stageColumns = await RepositoryItemTableColumns.LoadAsync(connection, stageTable, tx, cancellationToken);
             var alterStage = BuildAddCustomColumnsScript(stageTable, newFields, stageColumns);
             if (alterStage.Length > 0)
             {
                 await using var stageCmd = new SqlCommand(alterStage, connection, tx) { CommandTimeout = 300 };
                 await stageCmd.ExecuteNonQueryAsync(cancellationToken);
             }
+        }
+
+        // Keep related/browse indexes in sync when folder-structure fields are added or toggled.
+        var folderIndexSql = new StringBuilder();
+        AppendFolderStructureIndexScripts(folderIndexSql, itemsTable, fields);
+        if (folderIndexSql.Length > 0)
+        {
+            await using var idxCmd = new SqlCommand(folderIndexSql.ToString(), connection, tx) { CommandTimeout = 300 };
+            await idxCmd.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
@@ -499,7 +508,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 continue;
 
             sb.AppendLine($"IF COL_LENGTH('{tableQualified}', '{col}') IS NULL");
-            sb.AppendLine($"    ALTER TABLE repository.[{tableName}] ADD [{col}] {RepositorySqlHelper.MapDataTypeToSql(field.DataType)};");
+            sb.AppendLine($"    ALTER TABLE repository.[{tableName}] ADD [{col}] {MapItemFieldColumnSql(field)};");
         }
 
         return sb.ToString();
@@ -682,7 +691,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             var col = RepositoryFieldAliases.Canonicalize(field.Name);
             if (RepositorySqlHelper.ReservedItemColumns.Contains(col) || !customCols.Add(col))
                 continue;
-            sb.AppendLine($"    [{col}] {RepositorySqlHelper.MapDataTypeToSql(field.DataType)},");
+            sb.AppendLine($"    [{col}] {MapItemFieldColumnSql(field)},");
         }
 
         sb.AppendLine("    ValidFrom DATETIME2(7) GENERATED ALWAYS AS ROW START HIDDEN NOT NULL,");
@@ -701,8 +710,91 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         sb.AppendLine($"IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = 'IX_{idx}_FileName')");
         sb.AppendLine($"CREATE INDEX IX_{idx}_FileName ON repository.[{itemsTable}] (RepositoryId, IsDeleted, FileName);");
 
+        AppendFolderStructureIndexScripts(sb, itemsTable, fields);
+
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Folder-structure columns use indexable types (NVARCHAR(450) etc.) so related-doc
+    /// lookups on Vendor/PO/Invoice can seek efficiently.
+    /// </summary>
+    private static string MapItemFieldColumnSql(RepositoryFieldDefinitionDto field)
+    {
+        if (!field.IncludeInFolderStructure)
+            return RepositorySqlHelper.MapDataTypeToSql(field.DataType);
+
+        var dt = (field.DataType ?? string.Empty).Trim().ToUpperInvariant();
+        return dt switch
+        {
+            "DATE" or "DATETIME" => "DATE NULL",
+            "CURRENCY_AMOUNT" or "AMOUNT" or "NUMBER" or "DECIMAL" => "DECIMAL(18,2) NULL",
+            "INT" or "INTEGER" => "INT NULL",
+            "BIT" or "BOOL" or "BOOLEAN" => "BIT NULL",
+            "LONG_TEXT" or "DYNAMIC_TABLE" or "TABLE" or "JSON" or "FILE" or "ATTACHMENT"
+                => RepositorySqlHelper.MapDataTypeToSql(field.DataType),
+            _ => "NVARCHAR(450) NULL"
+        };
+    }
+
+    private static bool IsFolderStructureIndexable(RepositoryFieldDefinitionDto field)
+    {
+        if (!field.IncludeInFolderStructure)
+            return false;
+
+        var dt = (field.DataType ?? string.Empty).Trim().ToUpperInvariant();
+        return dt is not ("LONG_TEXT" or "DYNAMIC_TABLE" or "TABLE" or "JSON" or "FILE" or "ATTACHMENT");
+    }
+
+    /// <summary>
+    /// Per folder-structure column: (RepositoryId, IsDeleted, FolderCol) for related/browse filters.
+    /// </summary>
+    private static void AppendFolderStructureIndexScripts(
+        StringBuilder sb,
+        string itemsTable,
+        IReadOnlyList<RepositoryFieldDefinitionDto> fields)
+    {
+        var idx = itemsTable.Replace("-", "_");
+        var folderCols = fields
+            .Where(IsFolderStructureIndexable)
+            .OrderBy(f => f.Level)
+            .ThenBy(f => f.OrderId ?? int.MaxValue)
+            .Select(f => RepositoryFieldAliases.Canonicalize(f.Name))
+            .Where(col => !RepositorySqlHelper.ReservedItemColumns.Contains(col))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        foreach (var col in folderCols)
+        {
+            var indexName = $"IX_{idx}_Folder_{col}";
+            if (indexName.Length > 128)
+                indexName = indexName[..128];
+
+            var safeIndex = EscapeSqlLiteral(indexName);
+            var safeCol = EscapeSqlLiteral(col);
+
+            // Skip NVARCHAR(MAX)/VARCHAR(MAX)/VARBINARY(MAX) — not valid index keys.
+            sb.AppendLine($"""
+                IF COL_LENGTH(N'repository.[{itemsTable}]', N'{safeCol}') IS NOT NULL
+                   AND NOT EXISTS (
+                        SELECT 1
+                        FROM sys.columns c
+                        INNER JOIN sys.types t ON t.user_type_id = c.user_type_id
+                        WHERE c.object_id = OBJECT_ID(N'repository.[{itemsTable}]')
+                          AND c.name = N'{safeCol}'
+                          AND t.name IN (N'nvarchar', N'varchar', N'varbinary')
+                          AND c.max_length = -1)
+                   AND NOT EXISTS (
+                        SELECT 1 FROM sys.indexes
+                        WHERE name = N'{safeIndex}'
+                          AND object_id = OBJECT_ID(N'repository.[{itemsTable}]'))
+                CREATE INDEX [{indexName}] ON repository.[{itemsTable}] (RepositoryId, IsDeleted, [{col}])
+                INCLUDE (FileName, FileType, FileSize, CreatedAtUtc);
+                """);
+        }
+    }
+
+    private static string EscapeSqlLiteral(string value) => value.Replace("'", "''");
 
     private static string BuildStageTableScript(Guid repoId, string stageTable, IReadOnlyList<RepositoryFieldDefinitionDto> fields)
     {

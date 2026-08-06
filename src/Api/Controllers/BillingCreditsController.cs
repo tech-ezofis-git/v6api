@@ -6,6 +6,7 @@ using Microsoft.AspNetCore.Mvc;
 using SaaSApp.Billing.Application.Contracts;
 using SaaSApp.Billing.Application.Credits.Commands.UpdateCredit;
 using SaaSApp.Billing.Application.Credits.Queries.GetCreditMaster;
+using SaaSApp.Billing.Application.Credits.Queries.GetCreditMonthlyBalances;
 using SaaSApp.Billing.Application.Credits.Queries.GetCreditUsageDashboard;
 using SaaSApp.Security;
 using SaaSApp.Users.Application.Contracts;
@@ -40,7 +41,7 @@ public sealed class BillingCreditsController : ControllerBase
         return Ok(new CreditUpdateResponse((int)result.Status, result.Message));
     }
 
-    /// <summary>Current month credit master row for the tenant.</summary>
+    /// <summary>Current month credit master row for the tenant (defaults to current IST month). Includes calculated monthlyBalance.</summary>
     [HttpGet("master")]
     [ProducesResponseType(typeof(CreditMasterDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
@@ -56,6 +57,21 @@ public sealed class BillingCreditsController : ControllerBase
             cancellationToken);
 
         return result is null ? NotFound() : Ok(result);
+    }
+
+    /// <summary>Monthly credit balances from creditMaster for a year (calculated monthlyBalance per month).</summary>
+    [HttpGet("master/monthly")]
+    [ProducesResponseType(typeof(IReadOnlyList<CreditMonthlyBalanceDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetCreditMonthlyBalances(
+        [FromQuery] int? year,
+        [FromQuery] string? creditType,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = _tenantContext.TenantId ?? throw new InvalidOperationException("Tenant context is required.");
+        var result = await _mediator.Send(
+            new GetCreditMonthlyBalancesQuery(tenantId, year, creditType),
+            cancellationToken);
+        return Ok(result);
     }
 
     /// <summary>Credit usage dashboard (summary, distribution, overall split pie chart, timeline) for today, yesterday, monthly, quarterly, or yearly.</summary>

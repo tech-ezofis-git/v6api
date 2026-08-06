@@ -21,6 +21,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
     private readonly IUserRepository _userRepository;
     private readonly IShareGuestUserProvisioningService _guestProvisioning;
     private readonly IRepositoryItemShareService _shareService;
+    private readonly IRepositorySignRequestService _signRequestService;
     private readonly ITwoFactorService _twoFactorService;
     private readonly IMemoryCache _cache;
     private readonly IConfiguration _configuration;
@@ -29,6 +30,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
         IUserRepository userRepository,
         IShareGuestUserProvisioningService guestProvisioning,
         IRepositoryItemShareService shareService,
+        IRepositorySignRequestService signRequestService,
         ITwoFactorService twoFactorService,
         IMemoryCache cache,
         IConfiguration configuration)
@@ -36,6 +38,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
         _userRepository = userRepository;
         _guestProvisioning = guestProvisioning;
         _shareService = shareService;
+        _signRequestService = signRequestService;
         _twoFactorService = twoFactorService;
         _cache = cache;
         _configuration = configuration;
@@ -182,6 +185,93 @@ public sealed class EzofisAuthService : IEzofisAuthService
         await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
         await _guestProvisioning.ConfirmGuestSocialLoginAsync(tenantId, email.Trim(), provider, cancellationToken);
 
+        return await SocialLoginAsync(email.Trim(), provider, tenantId, cancellationToken);
+    }
+
+    public async Task<LoginResult> SetSignInvitePasswordAsync(
+        string inviteToken,
+        string email,
+        string password,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(inviteToken))
+            throw new ArgumentException("InviteToken is required.");
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email is required.");
+        if (string.IsNullOrWhiteSpace(password))
+            throw new ArgumentException("Password is required.");
+
+        var preview = await _signRequestService.GetInvitePreviewAsync(inviteToken.Trim(), cancellationToken)
+            ?? throw new UnauthorizedAccessException("Invalid or expired sign invite.");
+
+        if (!string.Equals(preview.RecipientEmail, email.Trim(), StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Email does not match this sign invite.");
+
+        var tenantId = preview.TenantId;
+        var authInfo = await _guestProvisioning.GetShareInviteAuthInfoAsync(tenantId, email.Trim(), cancellationToken);
+        if (authInfo.RequiredSocialProvider != null)
+        {
+            throw new UnauthorizedAccessException(
+                $"This account uses {authInfo.RequiredSocialProvider} sign-in. Use POST /api/auth/sign-request/social-login instead.");
+        }
+
+        if (!authInfo.AllowedAuthMethods.Contains("password_setup", StringComparer.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Password setup is not available for this account. Use login or social sign-in.");
+
+        var userId = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
+        var updated = await _guestProvisioning.SetFirstPasswordAsync(tenantId, email.Trim(), password, cancellationToken);
+        if (!updated)
+            throw new UnauthorizedAccessException("Unable to set password for this invite.");
+
+        return new LoginSuccess(
+            userId,
+            GenerateJwt(userId, email.Trim().ToLowerInvariant(), email.Trim(), SaaSApp.Users.Domain.Entities.User.RoleTenantUser, tenantId),
+            "Bearer",
+            (int)AccessTokenExpiry.TotalSeconds);
+    }
+
+    public async Task<LoginResult> SetSignInviteSocialLoginAsync(
+        string inviteToken,
+        string email,
+        string provider,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(inviteToken))
+            throw new ArgumentException("InviteToken is required.");
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email is required.");
+        if (string.IsNullOrWhiteSpace(provider))
+            throw new ArgumentException("Provider is required (google or microsoft).");
+
+        var preview = await _signRequestService.GetInvitePreviewAsync(inviteToken.Trim(), cancellationToken)
+            ?? throw new UnauthorizedAccessException("Invalid or expired sign invite.");
+
+        if (!string.Equals(preview.RecipientEmail, email.Trim(), StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Email does not match this sign invite.");
+
+        var tenantId = preview.TenantId;
+        var authInfo = await _guestProvisioning.GetShareInviteAuthInfoAsync(tenantId, email.Trim(), cancellationToken);
+        var normalizedProvider = provider.Trim();
+        if (authInfo.RequiredSocialProvider != null
+            && !authInfo.RequiredSocialProvider.Equals(normalizedProvider, StringComparison.OrdinalIgnoreCase)
+            && !authInfo.RequiredSocialProvider.Equals(
+                normalizedProvider.Equals("office365", StringComparison.OrdinalIgnoreCase) ? "microsoft" : normalizedProvider,
+                StringComparison.OrdinalIgnoreCase))
+        {
+            throw new UnauthorizedAccessException(
+                $"This account must sign in with {authInfo.RequiredSocialProvider}.");
+        }
+
+        if (!authInfo.AllowedAuthMethods.Any(m =>
+                m.Equals(normalizedProvider, StringComparison.OrdinalIgnoreCase)
+                || (m.Equals("microsoft", StringComparison.OrdinalIgnoreCase)
+                    && normalizedProvider.Equals("office365", StringComparison.OrdinalIgnoreCase))))
+        {
+            throw new UnauthorizedAccessException("Social sign-in is not available for this sign invite.");
+        }
+
+        await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
+        await _guestProvisioning.ConfirmGuestSocialLoginAsync(tenantId, email.Trim(), provider, cancellationToken);
         return await SocialLoginAsync(email.Trim(), provider, tenantId, cancellationToken);
     }
 

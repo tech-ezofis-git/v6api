@@ -17,17 +17,20 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
   private readonly ITenantContext _tenantContext;
   private readonly IWorkflowRepository _workflowRepository;
   private readonly IWorkflowEzfbFormDataLoader _formDataLoader;
+  private readonly IApDashboardInsightsClient _insightsClient;
   private readonly ILogger<ApDashboardQueryService> _logger;
 
   public ApDashboardQueryService(
     ITenantContext tenantContext,
     IWorkflowRepository workflowRepository,
     IWorkflowEzfbFormDataLoader formDataLoader,
+    IApDashboardInsightsClient insightsClient,
     ILogger<ApDashboardQueryService> logger)
   {
     _tenantContext = tenantContext;
     _workflowRepository = workflowRepository;
     _formDataLoader = formDataLoader;
+    _insightsClient = insightsClient;
     _logger = logger;
   }
 
@@ -116,7 +119,7 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
       allInvoices.Where(i => InRange(ResolvePeriodDate(i, request.Period), prevStart, prevEnd)).ToList(),
       request);
 
-    return ApDashboardBuilder.Build(
+    var result = ApDashboardBuilder.Build(
       request,
       rangeStart,
       rangeEnd,
@@ -125,6 +128,9 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
       current,
       previous,
       filterOptions);
+
+    var insights = await _insightsClient.GetInsightsAsync(result, cancellationToken);
+    return result with { Insights = insights };
   }
 
   private async Task<List<ApDashboardInvoiceDto>> LoadAgentTableInvoicesAsync(

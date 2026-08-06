@@ -15,19 +15,19 @@ internal static class CreditUsageDashboardBuilder
         var total = transactions.Sum(t => t.Credit);
 
         var highest = transactions
-            .GroupBy(t => ResolveCategory(t.ActivityType, t.SubActivityType))
+            .GroupBy(t => ResolveCategory(t.Agent, t.SubActivityType))
             .Select(g => new CreditUsageTypeSummaryDto(g.Key, g.Sum(x => x.Credit)))
             .OrderByDescending(x => x.CreditsUsed)
             .ToList();
 
         var distribution = transactions
-            .GroupBy(t => ResolveDistributionLabel(t.ActivityType, t.SubActivityType, t.Remarks))
+            .GroupBy(t => ResolveDistributionLabel(t.Agent, t.SubActivityType, t.Remarks))
             .Select(g => new CreditUsageTypeSummaryDto(g.Key, g.Sum(x => x.Credit)))
             .OrderByDescending(x => x.CreditsUsed)
             .ToList();
 
         var overallSplit = transactions
-            .GroupBy(t => ResolveOverallCreditSplitLabel(t.ActivityType, t.SubActivityType, t.Remarks))
+            .GroupBy(t => ResolveOverallCreditSplitLabel(t.Agent, t.SubActivityType, t.Remarks))
             .Select(g => new CreditUsageTypeSummaryDto(g.Key, g.Sum(x => x.Credit)))
             .OrderByDescending(x => x.CreditsUsed)
             .ToList();

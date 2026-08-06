@@ -373,7 +373,7 @@ Dual axis:
   "title": "Profit vs AP spending",
   "subtitle": "Dual axis: AP amount and match-rate % (proxy for profit efficiency)",
   "points": [
-    { "label": "Jul", "primary": 87579.52, "secondary": 42.3, "primaryUnit": "currency", "secondaryUnit": "percent" }
+    { "label": "Jul 2026", "primary": 87579.52, "secondary": 42.3, "primaryUnit": "currency", "secondaryUnit": "percent" }
   ]
 }
 ```
@@ -385,7 +385,7 @@ Dual axis:
   "title": "Monthly payment trend",
   "subtitle": "Cash leaving the building, month by month",
   "points": [
-    { "label": "Jul", "primary": 12000, "secondary": null, "primaryUnit": "currency", "secondaryUnit": null }
+    { "label": "Jul 2026", "primary": 12000, "secondary": null, "primaryUnit": "currency", "secondaryUnit": null }
   ]
 }
 ```

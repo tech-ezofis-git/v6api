@@ -42,13 +42,64 @@ public sealed record CreditMasterDto(
     string? Status,
     int? OverallConsumedCredit,
     DateTime? ValidFromDate,
-    DateTime? ValidToDate);
+    DateTime? ValidToDate,
+    int? CarryForwardCredit = null,
+    int? TopUpBalanceCredit = null,
+    int? ExtraConsumedCredit = null,
+    /// <summary>Calculated remaining for the allocation month (initial + carryForward + topUp − overallConsumed).</summary>
+    int MonthlyBalance = 0);
+
+/// <summary>One month’s credit master balance for yearly / history views.</summary>
+public sealed record CreditMonthlyBalanceDto(
+    int Id,
+    Guid TenantId,
+    int AllocationMonth,
+    int AllocationYear,
+    string Label,
+    string? CreditType,
+    int InitialCredit,
+    int? CarryForwardCredit,
+    int? TopUpBalanceCredit,
+    int? OverallConsumedCredit,
+    int? ExtraConsumedCredit,
+    int BalanceCredit,
+    int MonthlyBalance,
+    string? Status);
+
+public static class CreditBalanceCalculator
+{
+    /// <summary>
+    /// Monthly remaining balance from credit master fields:
+    /// initial + carryForward + topUp − overallConsumed.
+    /// </summary>
+    public static int CalculateMonthlyBalance(
+        int initialCredit,
+        int? carryForwardCredit = null,
+        int? topUpBalanceCredit = null,
+        int? overallConsumedCredit = null)
+    {
+        var opening = initialCredit
+                      + (carryForwardCredit ?? 0)
+                      + (topUpBalanceCredit ?? 0);
+        var consumed = overallConsumedCredit ?? 0;
+        return opening - consumed;
+    }
+
+    public static int CalculateMonthlyBalance(CreditMasterDto master) =>
+        CalculateMonthlyBalance(
+            master.InitialCredit,
+            master.CarryForwardCredit,
+            master.TopUpBalanceCredit,
+            master.OverallConsumedCredit);
+}
 
 public sealed record CreditTransactionItemDto(
     int Id,
-    string? ActivityType,
+    /// <summary>Agent / service that consumed credits (UI column: Agent). Formerly activityType / Category.</summary>
+    string? Agent,
     string? SubActivityType,
-    string? IdentifyTable,
+    /// <summary>Document or invoice filename/reference (UI column: Filename). Formerly identifyTable / Reference.</summary>
+    string? FileName,
     int? IdentifyId,
     string? Remarks,
     int Credit,

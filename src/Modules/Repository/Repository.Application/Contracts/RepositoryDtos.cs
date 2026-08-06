@@ -208,7 +208,16 @@ public sealed record RepositoryItemListDto(
     string? StorageProviderCode,
     bool HasFilePath,
     /// <summary>When set, this file was linked from a workflow ticket initiate/upload.</summary>
-    Guid? WorkflowInstanceId = null);
+    Guid? WorkflowInstanceId = null,
+    /// <summary>Uploader email/username for grid display (FE "Created By" column).</summary>
+    string? CreatedBy = null,
+    /// <summary>Uploader user id for ACL / document-security CreatedBy grants.</summary>
+    Guid? CreatedByUserId = null,
+    /// <summary>
+    /// Repository-defined field values (this repo's columns), keyed by camelCase sqlColumnName.
+    /// Use this for HR/custom repos where AP scalar columns do not apply.
+    /// </summary>
+    IReadOnlyDictionary<string, object?>? Fields = null);
 
 public sealed record RepositoryItemDetailDto(
     Guid Id,
@@ -331,7 +340,10 @@ public sealed record RepositoryItemTimelineEventDto(
 
 public sealed record RepositoryItemTimelineResultDto(
     IReadOnlyList<RepositoryItemTimelineEventDto> Events,
-    int TotalCount);
+    int TotalCount,
+    Guid? LinkedWorkflowInstanceId = null,
+    Guid? LinkedWorkflowId = null,
+    string? LinkedWorkflowReferenceNumber = null);
 
 public sealed record AddRepositoryItemTimelineEventRequest(
     string Title,
@@ -344,7 +356,9 @@ public sealed record RepositoryItemCommentDto(
     string Body,
     Guid AuthorUserId,
     DateTime CreatedAtUtc,
-    DateTime? ModifiedAtUtc);
+    DateTime? ModifiedAtUtc,
+    string? AuthorName = null,
+    string? AuthorEmail = null);
 
 public sealed record RepositoryItemCommentsResultDto(
     IReadOnlyList<RepositoryItemCommentDto> Comments,
@@ -354,9 +368,44 @@ public sealed record RepositoryItemCommentsResultDto(
 
 public sealed record AddRepositoryItemCommentRequest(string Body);
 
-public sealed record AddRepositoryItemCommentResult(Guid CommentId);
+public sealed record AddRepositoryItemCommentResult(
+    Guid CommentId,
+    string? AuthorName = null,
+    string? AuthorEmail = null);
 
 public sealed record FacetValueDto(string Value, int Count);
+
+/// <summary>
+/// Related documents across all tenant repositories for an open file.
+/// Match is chosen automatically from the source item metadata (FE only passes repoId + itemId).
+/// </summary>
+public sealed record RepositoryRelatedDocumentsResultDto(
+    Guid SourceRepositoryId,
+    Guid SourceItemId,
+    IReadOnlyDictionary<string, string> Match,
+    IReadOnlyList<string> MatchFields,
+    int Page,
+    int PageSize,
+    int TotalCount,
+    IReadOnlyList<RepositoryRelatedDocumentDto> Data);
+
+public sealed record RepositoryRelatedDocumentDto(
+    Guid RepositoryId,
+    string RepositoryName,
+    Guid Id,
+    string? FileName,
+    string? FileType,
+    int? FileSize,
+    string? DocumentType,
+    string? Supplier,
+    string? PoNumber,
+    string? InvoiceNumber,
+    DateTime? CreatedAtUtc,
+    int MatchScore,
+    /// <summary>How many folder-structure fields matched on this file.</summary>
+    int MatchCount = 0,
+    /// <summary>Which match keys matched (sqlColumnName).</summary>
+    IReadOnlyList<string>? MatchedFields = null);
 
 public sealed record PagedResult<T>(
     IReadOnlyList<T> Data,

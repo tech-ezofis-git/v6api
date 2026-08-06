@@ -16,6 +16,7 @@ internal static class RepositoryItemListMetadataEnricher
             ["Vendor"] = "Supplier",
             ["Invoice Date"] = "DocumentDate",
             ["InvoiceDate"] = "InvoiceDate",
+            ["Date"] = "DocumentDate",
             ["PO Date"] = "DocumentDate",
             ["PODate"] = "PoDate",
             ["Invoice Amount"] = "Amount",
@@ -58,7 +59,7 @@ internal static class RepositoryItemListMetadataEnricher
             InvoiceNumber = Coalesce(row.InvoiceNumber, repositoryScalars, extracted, "InvoiceNumber")
                 ?? RepositoryOcrJsonMetadataExtractor.TryInferInvoiceNumberFromFileName(row.FileName),
             PoNumber = Coalesce(row.PoNumber, repositoryScalars, extracted, "PoNumber"),
-            DocumentDate = CoalesceDate(row.DocumentDate, repositoryScalars, extracted, "DocumentDate"),
+            DocumentDate = CoalesceDate(row.DocumentDate, repositoryScalars, extracted, "DocumentDate", "Date"),
             Amount = CoalesceDecimal(row.Amount, repositoryScalars, extracted, "Amount"),
             Currency = Coalesce(row.Currency, repositoryScalars, extracted, "Currency"),
             Status = Coalesce(row.Status, repositoryScalars, extracted, "Status"),
@@ -69,7 +70,7 @@ internal static class RepositoryItemListMetadataEnricher
             RiskLevel = Coalesce(row.RiskLevel, repositoryScalars, extracted, "RiskLevel"),
             Source = Coalesce(row.Source, repositoryScalars, extracted, "Source"),
             Department = Coalesce(row.Department, repositoryScalars, extracted, "Department"),
-            InvoiceDate = CoalesceDate(row.InvoiceDate, repositoryScalars, extracted, "InvoiceDate", "DocumentDate"),
+            InvoiceDate = CoalesceDate(row.InvoiceDate, repositoryScalars, extracted, "InvoiceDate", "DocumentDate", "Date"),
             InvoiceAmount = CoalesceDecimal(row.InvoiceAmount, repositoryScalars, extracted, "InvoiceAmount", "Amount"),
             InvoiceTaxAmount = CoalesceDecimal(row.InvoiceTaxAmount, repositoryScalars, extracted, "InvoiceTaxAmount"),
             PoDate = CoalesceDate(row.PoDate, repositoryScalars, extracted, "PoDate", "PODate"),
@@ -79,6 +80,7 @@ internal static class RepositoryItemListMetadataEnricher
             SupplierAddress = Coalesce(row.SupplierAddress, repositoryScalars, extracted, "SupplierAddress"),
             ShipToAddress = Coalesce(row.ShipToAddress, repositoryScalars, extracted, "ShipToAddress"),
             PayToAddress = Coalesce(row.PayToAddress, repositoryScalars, extracted, "PayToAddress"),
+            Fields = row.Fields
         };
     }
 

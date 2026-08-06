@@ -30,11 +30,11 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var events = new List<RepositoryItemTimelineEventDto>();
+        var stored = new List<RepositoryItemTimelineEventDto>();
         if (await TimelineTableExistsAsync(connection, cancellationToken))
         {
             const string sql = """
-                SELECT Id, EventType, Title, Description, ActorType, ActorName, CreatedAtUtc
+                SELECT Id, EventType, Title, Description, ActorType, ActorName, ActorUserId, CreatedAtUtc
                 FROM repository.ItemTimelineEvents
                 WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0
                 ORDER BY CreatedAtUtc ASC;
@@ -48,25 +48,71 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                events.Add(new RepositoryItemTimelineEventDto(
+                var title = reader.GetString(2);
+                // Hide noisy metadata-change rows from the FE timeline.
+                if (string.Equals(title, "Metadata updated", StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                stored.Add(new RepositoryItemTimelineEventDto(
                     reader.GetGuid(0),
                     reader.GetString(1),
-                    reader.GetString(2),
+                    title,
                     reader.IsDBNull(3) ? null : reader.GetString(3),
                     reader.IsDBNull(4) ? null : reader.GetString(4),
                     reader.IsDBNull(5) ? null : reader.GetString(5),
-                    reader.GetDateTime(6)));
+                    reader.GetDateTime(7),
+                    IsDerived: false));
             }
         }
 
-        if (events.Count == 0)
+        var fields = await LoadItemFieldsForTimelineAsync(repositoryId, tenantId, itemId, cancellationToken);
+        string? createdByName = null;
+        Guid? linkedInstanceId = null;
+        Guid? linkedWorkflowId = null;
+        string? linkedReference = null;
+
+        if (fields != null)
         {
-            var fields = await LoadItemFieldsForTimelineAsync(repositoryId, tenantId, itemId, cancellationToken);
-            if (fields != null)
-                events.AddRange(RepositoryItemTimelineDeriver.Derive(fields));
+            if (fields.TryGetValue("CreatedBy", out var createdByRaw)
+                && RepositoryUserNameResolver.TryParseUserId(createdByRaw, out var createdById))
+            {
+                var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, createdById, cancellationToken);
+                createdByName = RepositoryUserNameResolver.PreferEmail(profile?.Email, profile?.DisplayName, createdById);
+            }
+
+            if (fields.TryGetValue("WorkflowInstanceId", out var wfRaw)
+                && RepositoryUserNameResolver.TryParseUserId(wfRaw, out var wfId))
+            {
+                linkedInstanceId = wfId;
+            }
         }
 
-        return new RepositoryItemTimelineResultDto(events, events.Count);
+        var events = new List<RepositoryItemTimelineEventDto>();
+        if (fields != null)
+            events.AddRange(RepositoryItemTimelineDeriver.Derive(fields, createdByName));
+
+        events.AddRange(stored);
+
+        if (linkedInstanceId is Guid instanceId)
+        {
+            var workflowEvents = await LoadWorkflowHistoryEventsAsync(connection, instanceId, cancellationToken);
+            events.AddRange(workflowEvents.Events);
+            linkedWorkflowId = workflowEvents.WorkflowId;
+            linkedReference = workflowEvents.ReferenceNumber;
+        }
+
+        events = await ResolveActorNamesAsync(connection, events, cancellationToken);
+        events = events
+            .OrderBy(e => e.CreatedAtUtc)
+            .ThenBy(e => e.Title, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        return new RepositoryItemTimelineResultDto(
+            events,
+            events.Count,
+            linkedInstanceId,
+            linkedWorkflowId,
+            linkedReference);
     }
 
     public async Task<RepositoryItemTimelineEventDto?> AddTimelineEventAsync(
@@ -86,12 +132,17 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         var eventType = string.IsNullOrWhiteSpace(request.EventType) ? "user" : request.EventType.Trim();
         var actorName = request.ActorName;
         if (string.IsNullOrWhiteSpace(actorName) && userId.HasValue)
-            actorName = userId.Value.ToString("D");
+        {
+            await using var connection = new SqlConnection(RequireConnectionString());
+            await connection.OpenAsync(cancellationToken);
+            var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, userId.Value, cancellationToken);
+            actorName = RepositoryUserNameResolver.PreferEmail(profile?.Email, profile?.DisplayName, userId);
+        }
 
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
-        if (!await TimelineTableExistsAsync(connection, cancellationToken))
+        await using var writeConnection = new SqlConnection(connectionString);
+        await writeConnection.OpenAsync(cancellationToken);
+        if (!await TimelineTableExistsAsync(writeConnection, cancellationToken))
             throw new InvalidOperationException("Timeline is not enabled for this tenant database. Apply repository schema or run CreateRepositorySchema.sql.");
 
         var id = Guid.NewGuid();
@@ -173,42 +224,64 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0;
             """;
 
+        int total;
         await using (var countCmd = new SqlCommand(countSql, connection))
         {
             countCmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             countCmd.Parameters.AddWithValue("@ItemId", itemId);
             countCmd.Parameters.AddWithValue("@TenantId", tenantId);
-            var total = (int)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+            total = (int)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+        }
 
-            const string sql = """
-                SELECT Id, Body, CreatedBy, CreatedAtUtc, ModifiedAtUtc
-                FROM repository.ItemComments
-                WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0
-                ORDER BY CreatedAtUtc DESC
-                OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
-                """;
+        const string sql = """
+            SELECT Id, Body, CreatedBy, CreatedAtUtc, ModifiedAtUtc
+            FROM repository.ItemComments
+            WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0
+            ORDER BY CreatedAtUtc DESC
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
+            """;
 
-            await using var cmd = new SqlCommand(sql, connection);
+        var raw = new List<(Guid Id, string Body, Guid AuthorUserId, DateTime CreatedAtUtc, DateTime? ModifiedAtUtc)>();
+        await using (var cmd = new SqlCommand(sql, connection))
+        {
             cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             cmd.Parameters.AddWithValue("@ItemId", itemId);
             cmd.Parameters.AddWithValue("@TenantId", tenantId);
             cmd.Parameters.AddWithValue("@Offset", offset);
             cmd.Parameters.AddWithValue("@PageSize", pageSize);
 
-            var comments = new List<RepositoryItemCommentDto>();
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
             {
-                comments.Add(new RepositoryItemCommentDto(
+                raw.Add((
                     reader.GetGuid(0),
                     reader.GetString(1),
                     reader.GetGuid(2),
                     reader.GetDateTime(3),
                     reader.IsDBNull(4) ? null : reader.GetDateTime(4)));
             }
-
-            return new RepositoryItemCommentsResultDto(comments, total, page, pageSize);
         }
+
+        // Reader must be closed before another command uses this connection.
+        var profiles = await RepositoryUserNameResolver.ResolveProfilesAsync(
+            connection, raw.Select(r => r.AuthorUserId), cancellationToken);
+
+        var comments = raw.Select(r =>
+        {
+            profiles.TryGetValue(r.AuthorUserId, out var profile);
+            var authorEmail = profile.Email;
+            var authorName = RepositoryUserNameResolver.PreferEmail(authorEmail, profile.DisplayName, r.AuthorUserId);
+            return new RepositoryItemCommentDto(
+                r.Id,
+                r.Body,
+                r.AuthorUserId,
+                r.CreatedAtUtc,
+                r.ModifiedAtUtc,
+                authorName,
+                authorEmail);
+        }).ToList();
+
+        return new RepositoryItemCommentsResultDto(comments, total, page, pageSize);
     }
 
     public async Task<AddRepositoryItemCommentResult?> AddCommentAsync(
@@ -247,7 +320,11 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         cmd.Parameters.AddWithValue("@CreatedBy", userId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
-        return new AddRepositoryItemCommentResult(commentId);
+        var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, userId, cancellationToken);
+        return new AddRepositoryItemCommentResult(
+            commentId,
+            RepositoryUserNameResolver.PreferEmail(profile?.Email, profile?.DisplayName, userId),
+            profile?.Email);
     }
 
     private async Task RecordTimelineEventInternalAsync(
@@ -270,6 +347,12 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
 
         if (!await TimelineTableExistsAsync(connection, cancellationToken))
             return;
+
+        if (string.IsNullOrWhiteSpace(actorName) && actorUserId is Guid uid)
+        {
+            var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, uid, cancellationToken);
+            actorName = RepositoryUserNameResolver.PreferEmail(profile?.Email, profile?.DisplayName, uid);
+        }
 
         const string sql = """
             INSERT INTO repository.ItemTimelineEvents
@@ -308,8 +391,16 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         await using var connection = new SqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        var columns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
+        var selectCols = new List<string> { "CreatedAtUtc" };
+        foreach (var col in new[] { "Source", "OcrScore", "AiStatus", "MatchedStatus", "WorkflowInstanceId", "CreatedBy" })
+        {
+            if (RepositoryItemTableColumns.Has(columns, col))
+                selectCols.Add(col);
+        }
+
         var sql = $"""
-            SELECT CreatedAtUtc, Source, OcrScore, AiStatus, MatchedStatus
+            SELECT {string.Join(", ", selectCols.Select(c => $"[{c}]"))}
             FROM {table}
             WHERE Id = @ItemId AND RepositoryId = @RepositoryId AND TenantId = @TenantId AND IsDeleted = 0;
             """;
@@ -322,14 +413,179 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         if (!await reader.ReadAsync(cancellationToken))
             return null;
 
-        return new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
+        var map = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < selectCols.Count; i++)
+            map[selectCols[i]] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+
+        return map;
+    }
+
+    private static async Task<(IReadOnlyList<RepositoryItemTimelineEventDto> Events, Guid? WorkflowId, string? ReferenceNumber)> LoadWorkflowHistoryEventsAsync(
+        SqlConnection connection,
+        Guid workflowInstanceId,
+        CancellationToken cancellationToken)
+    {
+        if (!await WorkflowTableExistsAsync(connection, "WorkflowInstanceLookup", cancellationToken))
+            return (Array.Empty<RepositoryItemTimelineEventDto>(), null, null);
+
+        Guid? workflowId = null;
+        string? referenceNumber = null;
+        const string lookupSql = """
+            SELECT TOP 1 WorkflowId, WorkflowName
+            FROM workflow.WorkflowInstanceLookup
+            WHERE InstanceId = @InstanceId;
+            """;
+        string? workflowName = null;
+        await using (var lookupCmd = new SqlCommand(lookupSql, connection))
         {
-            ["CreatedAtUtc"] = reader.IsDBNull(0) ? null : reader.GetValue(0),
-            ["Source"] = reader.IsDBNull(1) ? null : reader.GetValue(1),
-            ["OcrScore"] = reader.IsDBNull(2) ? null : reader.GetValue(2),
-            ["AiStatus"] = reader.IsDBNull(3) ? null : reader.GetValue(3),
-            ["MatchedStatus"] = reader.IsDBNull(4) ? null : reader.GetValue(4),
-        };
+            lookupCmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
+            await using var lookupReader = await lookupCmd.ExecuteReaderAsync(cancellationToken);
+            if (!await lookupReader.ReadAsync(cancellationToken))
+                return (Array.Empty<RepositoryItemTimelineEventDto>(), null, null);
+            workflowId = lookupReader.GetGuid(0);
+            workflowName = lookupReader.IsDBNull(1) ? null : lookupReader.GetString(1);
+        }
+
+        var suffix = workflowId.Value.ToString("N")[..8];
+        var instancesTable = $"WorkflowInstances_{suffix}";
+        if (await WorkflowTableExistsAsync(connection, instancesTable, cancellationToken))
+        {
+            var refSql = $"""
+                SELECT TOP 1 ReferenceNumber
+                FROM workflow.[{instancesTable}]
+                WHERE Id = @InstanceId;
+                """;
+            await using var refCmd = new SqlCommand(refSql, connection);
+            refCmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
+            var refObj = await refCmd.ExecuteScalarAsync(cancellationToken);
+            if (refObj is string s && !string.IsNullOrWhiteSpace(s))
+                referenceNumber = s.Trim();
+        }
+
+        referenceNumber ??= workflowName;
+        var txTable = $"transaction_{suffix}";
+        if (!await WorkflowTableExistsAsync(connection, txTable, cancellationToken))
+            return (Array.Empty<RepositoryItemTimelineEventDto>(), workflowId, referenceNumber);
+
+        var sql = $"""
+            SELECT Id, StageName, StageType, Review, ActionStatus, ActivityUserId, CreatedBy, ModifiedBy, CreatedAt, ModifiedAt
+            FROM workflow.[{txTable}]
+            WHERE WorkflowInstanceId = @InstanceId AND IsDeleted = 0
+            ORDER BY Id ASC;
+            """;
+
+        var rows = new List<(int Id, string? StageName, string? StageType, string? Review, int ActionStatus, Guid? ActivityUserId, Guid? CreatedBy, Guid? ModifiedBy, DateTime CreatedAt, DateTime? ModifiedAt)>();
+        await using (var cmd = new SqlCommand(sql, connection))
+        {
+            cmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                rows.Add((
+                    reader.GetInt32(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.GetInt32(4),
+                    reader.IsDBNull(5) ? null : reader.GetGuid(5),
+                    reader.IsDBNull(6) ? null : reader.GetGuid(6),
+                    reader.IsDBNull(7) ? null : reader.GetGuid(7),
+                    reader.GetDateTime(8),
+                    reader.IsDBNull(9) ? null : reader.GetDateTime(9)));
+            }
+        }
+
+        var userIds = rows
+            .SelectMany(r => new[] { r.ActivityUserId, r.CreatedBy, r.ModifiedBy })
+            .Where(id => id is Guid g && g != Guid.Empty)
+            .Select(id => id!.Value);
+        var names = await RepositoryUserNameResolver.ResolveDisplayNamesAsync(connection, userIds, cancellationToken);
+
+        var events = new List<RepositoryItemTimelineEventDto>();
+        foreach (var row in rows)
+        {
+            var stage = string.IsNullOrWhiteSpace(row.StageName) ? row.StageType : row.StageName;
+            stage = string.IsNullOrWhiteSpace(stage) ? "Stage" : stage.Trim();
+            var performerId = row.ModifiedBy ?? row.ActivityUserId ?? row.CreatedBy;
+            names.TryGetValue(performerId ?? Guid.Empty, out var performerName);
+            if (string.IsNullOrWhiteSpace(performerName))
+                performerName = "System";
+
+            string title;
+            string? description = null;
+            var when = row.ModifiedAt ?? row.CreatedAt;
+
+            if (string.Equals(row.StageType, "END", StringComparison.OrdinalIgnoreCase))
+            {
+                title = "Workflow completed";
+                description = string.IsNullOrWhiteSpace(row.Review) ? null : row.Review;
+            }
+            else if (!string.IsNullOrWhiteSpace(row.Review))
+            {
+                var review = row.Review.Trim();
+                if (review.Contains("approv", StringComparison.OrdinalIgnoreCase))
+                    title = $"{stage} approval granted";
+                else if (review.Contains("verif", StringComparison.OrdinalIgnoreCase))
+                    title = $"{stage} verified";
+                else if (review.Contains("reject", StringComparison.OrdinalIgnoreCase)
+                         || review.Contains("escalat", StringComparison.OrdinalIgnoreCase))
+                    title = $"{stage}: {review}";
+                else
+                    title = $"{stage} — {review}";
+                description = review;
+            }
+            else if (row.ActionStatus == 0)
+            {
+                title = $"Pending — {stage}";
+                if (row.ActivityUserId is Guid assignee && names.TryGetValue(assignee, out var assigneeName))
+                    description = $"Assigned to {assigneeName}";
+            }
+            else
+            {
+                title = $"Moved to {stage}";
+            }
+
+            events.Add(new RepositoryItemTimelineEventDto(
+                Guid.Empty,
+                "workflow",
+                title,
+                description,
+                "User",
+                performerName,
+                when,
+                IsDerived: true));
+        }
+
+        return (events, workflowId, referenceNumber);
+    }
+
+    private static async Task<List<RepositoryItemTimelineEventDto>> ResolveActorNamesAsync(
+        SqlConnection connection,
+        List<RepositoryItemTimelineEventDto> events,
+        CancellationToken cancellationToken)
+    {
+        var guidActors = new List<Guid>();
+        foreach (var evt in events)
+        {
+            if (RepositoryUserNameResolver.TryParseUserId(evt.ActorName, out var id))
+                guidActors.Add(id);
+        }
+
+        if (guidActors.Count == 0)
+            return events;
+
+        var names = await RepositoryUserNameResolver.ResolveDisplayNamesAsync(connection, guidActors, cancellationToken);
+        for (var i = 0; i < events.Count; i++)
+        {
+            var evt = events[i];
+            if (RepositoryUserNameResolver.TryParseUserId(evt.ActorName, out var id)
+                && names.TryGetValue(id, out var name))
+            {
+                events[i] = evt with { ActorName = name };
+            }
+        }
+
+        return events;
     }
 
     private async Task<bool> ItemExistsAsync(
@@ -364,6 +620,9 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
 
     private static Task<bool> CommentsTableExistsAsync(SqlConnection connection, CancellationToken cancellationToken) =>
         TableExistsAsync(connection, "repository", "ItemComments", cancellationToken);
+
+    private static Task<bool> WorkflowTableExistsAsync(SqlConnection connection, string tableName, CancellationToken cancellationToken) =>
+        TableExistsAsync(connection, "workflow", tableName, cancellationToken);
 
     private static async Task<bool> TableExistsAsync(
         SqlConnection connection,

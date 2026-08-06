@@ -45,17 +45,27 @@ internal static class RepositoryArchiveFileNameResolver
     {
         var stem = ResolveArchiveFileStem(allFields, metadata);
         var ext = Path.GetExtension(originalFileName);
-        if (string.IsNullOrEmpty(ext))
+        if (string.IsNullOrEmpty(ext) || ext == ".")
             ext = ".pdf";
+        else
+            ext = ext.ToLowerInvariant();
 
         if (string.IsNullOrWhiteSpace(stem))
-            return RepositoryFilePathHelper.GetBaseFileName(originalFileName);
+            return RepositoryFilePathHelper.EnsureFileNameHasExtension(
+                RepositoryFilePathHelper.GetBaseFileName(originalFileName),
+                filePath: originalFileName);
 
-        stem = RepositoryFilePathHelper.SanitizePathSegment(stem);
+        // Naming metadata is a stem (invoice/PO no.). Strip any accidental extension before appending.
+        var rawStem = Path.GetFileNameWithoutExtension(stem);
+        if (string.IsNullOrWhiteSpace(rawStem))
+            rawStem = stem;
+        stem = RepositoryFilePathHelper.SanitizePathSegment(rawStem);
         if (string.IsNullOrWhiteSpace(stem))
-            return RepositoryFilePathHelper.GetBaseFileName(originalFileName);
+            return RepositoryFilePathHelper.EnsureFileNameHasExtension(
+                RepositoryFilePathHelper.GetBaseFileName(originalFileName),
+                filePath: originalFileName);
 
-        return $"{stem}{ext.ToLowerInvariant()}";
+        return RepositoryFilePathHelper.EnsureFileNameHasExtension($"{stem}{ext}", filePath: originalFileName);
     }
 
     public static void EnsureMandatoryNamingMetadata(

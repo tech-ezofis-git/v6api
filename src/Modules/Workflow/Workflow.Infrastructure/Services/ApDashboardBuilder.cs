@@ -27,6 +27,10 @@ internal static class ApDashboardBuilder
     var departments = BuildDepartmentSpend(currentInvoices);
     var geography = BuildGeography(currentInvoices);
     var activeFilters = ApDashboardFilterSupport.BuildActiveFilters(request);
+    var profitability = BuildProfitabilityCashPosition(currentInvoices, rangeEndUtc);
+    var supplierConcentration = BuildSupplierConcentrationRisk(currentInvoices, riskRadar);
+    var agingOversight = BuildAgingProcessOversight(currentInvoices, rangeEndUtc);
+    var invoiceAging = BuildInvoiceAgingAnalysis(currentInvoices, rangeEndUtc);
 
     return new ApDashboardResult(
       request.Period,
@@ -45,6 +49,10 @@ internal static class ApDashboardBuilder
       geography,
       filterOptions,
       activeFilters,
+      profitability,
+      supplierConcentration,
+      agingOversight,
+      invoiceAging,
       request.IncludeInvoiceDetails ? currentInvoices : null);
   }
 
@@ -304,8 +312,12 @@ internal static class ApDashboardBuilder
         var ap = g.Sum(x => x.Amount);
         var matched = g.Count(x => IsMatched(x.MatchedStatus));
         var matchRate = g.Count() == 0 ? 0m : Math.Round(matched * 100m / g.Count(), 1);
-        var label = $"{CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(g.Key.Month)}";
-        return new ApDashboardSeriesPointDto(label, ap, matchRate, "currency", "percent");
+        return new ApDashboardSeriesPointDto(
+          FormatMonthYearLabel(g.Key.Year, g.Key.Month),
+          ap,
+          matchRate,
+          "currency",
+          "percent");
       })
       .ToList();
 
@@ -322,7 +334,7 @@ internal static class ApDashboardBuilder
       .GroupBy(i => new { i.InvoiceDate!.Value.Year, i.InvoiceDate!.Value.Month })
       .OrderBy(g => g.Key.Year).ThenBy(g => g.Key.Month)
       .Select(g => new ApDashboardSeriesPointDto(
-        CultureInfo.InvariantCulture.DateTimeFormat.GetAbbreviatedMonthName(g.Key.Month),
+        FormatMonthYearLabel(g.Key.Year, g.Key.Month),
         g.Where(x => IsPaid(x.PaymentStatus)).Sum(x => x.Amount),
         null,
         "currency",
@@ -334,6 +346,10 @@ internal static class ApDashboardBuilder
       "Cash leaving the building, month by month",
       points);
   }
+
+  /// <summary>Month label with year so Jul 2025 and Jul 2026 do not collide on charts.</summary>
+  private static string FormatMonthYearLabel(int year, int month) =>
+    new DateTime(year, month, 1).ToString("MMM yyyy", CultureInfo.InvariantCulture);
 
   private static ApDashboardSeriesDto BuildCashFlowForecast(
     IReadOnlyList<ApDashboardInvoiceDto> invoices,
@@ -425,6 +441,238 @@ internal static class ApDashboardBuilder
       })
       .OrderByDescending(x => x.Amount)
       .ToList();
+  }
+
+  private static ApDashboardPanelSectionDto BuildProfitabilityCashPosition(
+    IReadOnlyList<ApDashboardInvoiceDto> invoices,
+    DateTime asOfUtc)
+  {
+    var outstanding = invoices.Where(i => !IsPaid(i.PaymentStatus)).ToList();
+    var totalAp = outstanding.Sum(i => i.Amount);
+    var overdue = outstanding
+      .Where(i => string.Equals(i.PaymentStatus, "overdue", StringComparison.OrdinalIgnoreCase))
+      .Sum(i => i.Amount);
+    var matchShare = invoices.Count == 0
+      ? 0m
+      : invoices.Count(i => IsMatched(i.MatchedStatus)) / (decimal)invoices.Count;
+    var overdueShare = totalAp <= 0 ? 0m : overdue / totalAp;
+    // Margin proxy from match quality eroded by overdue share (no GL P&amp;L in AP tables).
+    var profitMargin = Math.Round(Math.Clamp((1m - overdueShare) * matchShare * 25m, 0m, 40m), 1);
+
+    var weekAmounts = BuildNextWeekAmounts(outstanding, asOfUtc, weekCount: 4);
+    var next4Weeks = weekAmounts.Sum();
+    var peakWeekIndex = 1;
+    var peakAmount = 0m;
+    for (var i = 0; i < weekAmounts.Count; i++)
+    {
+      if (weekAmounts[i] < peakAmount)
+        continue;
+      peakAmount = weekAmounts[i];
+      peakWeekIndex = i + 1;
+    }
+
+    return new ApDashboardPanelSectionDto(
+      "profitability_cash_position",
+      "Profitability & Cash Position",
+      "Payables growth eating margin · future liquidity needs",
+      [
+        new ApDashboardKpiDto(
+          "profit_margin",
+          "Profit Margin",
+          $"{profitMargin.ToString("0.0", CultureInfo.InvariantCulture)}%",
+          profitMargin,
+          null,
+          null),
+        new ApDashboardKpiDto(
+          "next_4_weeks_forecast",
+          "Next 4 Weeks",
+          FormatMoney(next4Weeks),
+          next4Weeks,
+          null,
+          null),
+        new ApDashboardKpiDto(
+          "peak_week",
+          "Peak Week",
+          $"Week {peakWeekIndex}",
+          peakAmount,
+          null,
+          null,
+          ComparisonLabel: peakAmount > 0 ? FormatMoney(peakAmount) : null)
+      ]);
+  }
+
+  private static ApDashboardPanelSectionDto BuildSupplierConcentrationRisk(
+    IReadOnlyList<ApDashboardInvoiceDto> invoices,
+    ApDashboardSupplierRiskRadarDto riskRadar)
+  {
+    var outstanding = invoices.Where(i => !IsPaid(i.PaymentStatus)).ToList();
+    var bySupplier = outstanding
+      .GroupBy(i => string.IsNullOrWhiteSpace(i.Supplier) ? "Unknown" : i.Supplier.Trim(), StringComparer.OrdinalIgnoreCase)
+      .Select(g => g.Sum(x => x.Amount))
+      .OrderByDescending(a => a)
+      .ToList();
+
+    var total = bySupplier.Sum();
+    var top3 = bySupplier.Take(3).Sum();
+    var top3Pct = total <= 0 ? 0m : Math.Round(top3 * 100m / total, 1);
+    var activeSuppliers = riskRadar.TotalSuppliers;
+    var highRisk = riskRadar.Segments
+      .FirstOrDefault(s => string.Equals(s.Key, "high", StringComparison.OrdinalIgnoreCase))
+      ?.SupplierCount ?? 0;
+
+    return new ApDashboardPanelSectionDto(
+      "supplier_concentration_risk",
+      "Supplier Concentration & Risk",
+      "Where spend concentrates · vendor risk exposure",
+      [
+        new ApDashboardKpiDto(
+          "active_suppliers",
+          "Active Suppliers",
+          activeSuppliers.ToString(CultureInfo.InvariantCulture),
+          activeSuppliers,
+          null,
+          null),
+        new ApDashboardKpiDto(
+          "high_risk_suppliers",
+          "High Risk",
+          highRisk.ToString(CultureInfo.InvariantCulture),
+          highRisk,
+          null,
+          highRisk > 0 ? "down" : "flat"),
+        new ApDashboardKpiDto(
+          "top3_concentration",
+          "Top-3 Concentration",
+          $"{top3Pct.ToString("0.0", CultureInfo.InvariantCulture)}%",
+          top3Pct,
+          null,
+          null)
+      ]);
+  }
+
+  private static ApDashboardPanelSectionDto BuildAgingProcessOversight(
+    IReadOnlyList<ApDashboardInvoiceDto> invoices,
+    DateTime asOfUtc)
+  {
+    var outstanding = invoices.Where(i => !IsPaid(i.PaymentStatus)).ToList();
+    var aging90 = outstanding
+      .Where(i => DaysPastDue(i, asOfUtc) >= 90)
+      .Sum(i => i.Amount);
+
+    var criticalExceptions = outstanding.Count(i =>
+      string.Equals(i.RiskLevel, "high", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "rejected", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "hold", StringComparison.OrdinalIgnoreCase)
+      || (!string.IsNullOrWhiteSpace(i.MatchedStatus)
+          && (i.MatchedStatus.Contains("unmatch", StringComparison.OrdinalIgnoreCase)
+              || i.MatchedStatus.Contains("partial", StringComparison.OrdinalIgnoreCase)
+              || i.MatchedStatus.Contains("exception", StringComparison.OrdinalIgnoreCase))));
+
+    var decided = invoices.Where(i =>
+      string.Equals(i.ApprovalStatus, "approved", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "partially_approved", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "rejected", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "paid", StringComparison.OrdinalIgnoreCase)).ToList();
+    var approved = decided.Count(i =>
+      string.Equals(i.ApprovalStatus, "approved", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "partially_approved", StringComparison.OrdinalIgnoreCase)
+      || string.Equals(i.ApprovalStatus, "paid", StringComparison.OrdinalIgnoreCase));
+    var approvalRate = decided.Count == 0
+      ? 0m
+      : Math.Round(approved * 100m / decided.Count, 1);
+
+    return new ApDashboardPanelSectionDto(
+      "aging_process_oversight",
+      "Aging & Process Oversight",
+      "Portfolio-level view of overdue exposure and approval cycles",
+      [
+        new ApDashboardKpiDto(
+          "aging_90_plus",
+          "90+ Days",
+          FormatMoney(aging90),
+          aging90,
+          null,
+          aging90 > 0 ? "down" : "flat"),
+        new ApDashboardKpiDto(
+          "critical_exceptions",
+          "Critical Exceptions",
+          criticalExceptions.ToString(CultureInfo.InvariantCulture),
+          criticalExceptions,
+          null,
+          criticalExceptions > 0 ? "down" : "flat"),
+        new ApDashboardKpiDto(
+          "approval_rate",
+          "Approval Rate",
+          $"{approvalRate.ToString("0.0", CultureInfo.InvariantCulture)}%",
+          approvalRate,
+          null,
+          null)
+      ]);
+  }
+
+  private static ApDashboardAgingAnalysisDto BuildInvoiceAgingAnalysis(
+    IReadOnlyList<ApDashboardInvoiceDto> invoices,
+    DateTime asOfUtc)
+  {
+    var outstanding = invoices.Where(i => !IsPaid(i.PaymentStatus)).ToList();
+    var definitions = new (string Key, string Label, Func<int, bool> Match)[]
+    {
+      ("current", "Current", d => d <= 0),
+      ("1_30", "1–30 Days", d => d is >= 1 and <= 30),
+      ("31_60", "31–60 Days", d => d is >= 31 and <= 60),
+      ("61_90", "61–90 Days", d => d is >= 61 and <= 90),
+      ("90_plus", "90+ Days", d => d >= 91)
+    };
+
+    var total = outstanding.Sum(i => i.Amount);
+    var buckets = definitions
+      .Select(def =>
+      {
+        var rows = outstanding.Where(i => def.Match(DaysPastDue(i, asOfUtc))).ToList();
+        var amount = rows.Sum(x => x.Amount);
+        return new ApDashboardAgingBucketDto(
+          def.Key,
+          def.Label,
+          amount,
+          FormatMoney(amount),
+          rows.Count,
+          total <= 0 ? 0m : Math.Round(amount * 100m / total, 1));
+      })
+      .ToList();
+
+    return new ApDashboardAgingAnalysisDto(
+      "Invoice aging analysis",
+      "Outstanding AP by days past due",
+      total,
+      FormatMoney(total),
+      buckets);
+  }
+
+  private static List<decimal> BuildNextWeekAmounts(
+    IReadOnlyList<ApDashboardInvoiceDto> outstanding,
+    DateTime asOfUtc,
+    int weekCount)
+  {
+    var amounts = new List<decimal>(weekCount);
+    var weekStart = asOfUtc.Date;
+    for (var w = 0; w < weekCount; w++)
+    {
+      var weekEnd = weekStart.AddDays(7);
+      amounts.Add(outstanding
+        .Where(i => i.DueDate.HasValue && i.DueDate.Value.Date >= weekStart && i.DueDate.Value.Date < weekEnd)
+        .Sum(i => i.Amount));
+      weekStart = weekEnd;
+    }
+
+    return amounts;
+  }
+
+  private static int DaysPastDue(ApDashboardInvoiceDto invoice, DateTime asOfUtc)
+  {
+    if (!invoice.DueDate.HasValue)
+      return 0;
+
+    var days = (asOfUtc.Date - invoice.DueDate.Value.Date).TotalDays;
+    return days <= 0 ? 0 : (int)Math.Floor(days);
   }
 
   private static string BuildPeriodLabel(ApDashboardPeriod period, DateTime start, DateTime end) =>

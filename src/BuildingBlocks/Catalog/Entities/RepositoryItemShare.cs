@@ -21,6 +21,9 @@ public sealed class RepositoryItemShare
 
     /// <summary>Optional workflow instance that originated this share (workflow inbox).</summary>
     public Guid? WorkflowInstanceId { get; set; }
+
+    /// <summary>0 = Can View, 1 = Can Edit (upload). Used for repository invite shares.</summary>
+    public int Action { get; set; }
 }
 
 public static class ShareStatuses
