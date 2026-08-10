@@ -374,7 +374,7 @@ X-Tenant-Id: <tenant-guid>
 |----------|--------------|----------------|
 | `GET /api/repositories` | Only accessible repos | — |
 | `GET /api/repositories/{id}` | View (or grant-only) | — |
-| `GET/POST .../items`, browse, facets | View (or grant-only) | Hide/grant filter on items |
+| `GET/POST .../items`, browse, facets | View (or grant-only) | Hide/grant filter on items; browse folder groups omit folders with **zero** visible files after hide |
 | `GET .../items/{itemId}` | — | Item must be allowed |
 | `GET .../workspace` | — | Item must be allowed |
 | `GET .../file` | Download (or View) | Item must be allowed |

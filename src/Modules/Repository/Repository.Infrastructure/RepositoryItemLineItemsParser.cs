@@ -7,7 +7,7 @@ internal static class RepositoryItemLineItemsParser
 {
     /// <summary>
     /// Returns the invoice line-item JSON array as <see cref="JsonElement"/> (no rows/grandTotal wrapper).
-    /// Prefers Invoice Extracted Line Item / similar fields, then SummaryJson / OcrJson.
+    /// Sources must be dedicated line-item fields only (not SummaryJson / AI key-facts).
     /// </summary>
     public static JsonElement? TryParseArray(params string?[] jsonSources)
     {
@@ -42,6 +42,7 @@ internal static class RepositoryItemLineItemsParser
             if (node is not JsonObject rootObj)
                 return false;
 
+            // Only known line-item property names — do not grab AI summary arrays.
             foreach (var name in new[]
                      {
                          "lineItems", "line_items", "LineItems", "items", "invoiceLines",
@@ -50,12 +51,6 @@ internal static class RepositoryItemLineItemsParser
                      })
             {
                 if (TryTakeArray(rootObj[name], out arrayJson))
-                    return true;
-            }
-
-            foreach (var prop in rootObj)
-            {
-                if (TryTakeArray(prop.Value, out arrayJson))
                     return true;
             }
 

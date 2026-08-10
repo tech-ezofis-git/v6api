@@ -101,6 +101,12 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             linkedReference = workflowEvents.ReferenceNumber;
         }
 
+        events.AddRange(await LoadSignRequestTimelineEventsAsync(
+            connection, repositoryId, tenantId, itemId, cancellationToken));
+
+        events.AddRange(await LoadCommentTimelineEventsAsync(
+            connection, repositoryId, tenantId, itemId, cancellationToken));
+
         events = await ResolveActorNamesAsync(connection, events, cancellationToken);
         events = events
             .OrderBy(e => e.CreatedAtUtc)
@@ -557,6 +563,249 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         }
 
         return (events, workflowId, referenceNumber);
+    }
+
+    private static async Task<IReadOnlyList<RepositoryItemTimelineEventDto>> LoadSignRequestTimelineEventsAsync(
+        SqlConnection connection,
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        if (!await TableExistsAsync(connection, "repository", "SignRequests", cancellationToken)
+            || !await TableExistsAsync(connection, "repository", "SignRequestSigners", cancellationToken))
+            return Array.Empty<RepositoryItemTimelineEventDto>();
+
+        var requests = new List<(
+            Guid Id,
+            string Mode,
+            string Status,
+            string? Message,
+            string InitiatedByEmail,
+            string InitiatedByName,
+            DateTime CreatedAtUtc,
+            DateTime? ModifiedAtUtc,
+            DateTime? CompletedAtUtc)>();
+
+        await using (var cmd = new SqlCommand("""
+            SELECT Id, SigningMode, Status, Message, InitiatedByEmail, InitiatedByName,
+                   CreatedAtUtc, ModifiedAtUtc, CompletedAtUtc
+            FROM repository.SignRequests
+            WHERE TenantId = @TenantId
+              AND RepositoryId = @RepositoryId
+              AND ItemId = @ItemId
+              AND IsDeleted = 0
+            ORDER BY CreatedAtUtc ASC;
+            """, connection))
+        {
+            cmd.Parameters.AddWithValue("@TenantId", tenantId);
+            cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
+            cmd.Parameters.AddWithValue("@ItemId", itemId);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                requests.Add((
+                    reader.GetGuid(0),
+                    reader.GetString(1),
+                    reader.GetString(2),
+                    reader.IsDBNull(3) ? null : reader.GetString(3),
+                    reader.GetString(4),
+                    reader.GetString(5),
+                    reader.GetDateTime(6),
+                    reader.IsDBNull(7) ? null : reader.GetDateTime(7),
+                    reader.IsDBNull(8) ? null : reader.GetDateTime(8)));
+            }
+        }
+
+        if (requests.Count == 0)
+            return Array.Empty<RepositoryItemTimelineEventDto>();
+
+        var events = new List<RepositoryItemTimelineEventDto>();
+        foreach (var req in requests)
+        {
+            var signers = new List<(
+                string Email,
+                string? Name,
+                string Status,
+                DateTime? InvitedAtUtc,
+                DateTime? SignedAtUtc,
+                DateTime? ModifiedAtUtc,
+                string? DeclineReason)>();
+
+            await using (var sCmd = new SqlCommand("""
+                SELECT Email, Name, Status, InvitedAtUtc, SignedAtUtc, ModifiedAtUtc, DeclineReason
+                FROM repository.SignRequestSigners
+                WHERE SignRequestId = @RequestId AND IsDeleted = 0
+                ORDER BY SortOrder, CreatedAtUtc;
+                """, connection))
+            {
+                sCmd.Parameters.AddWithValue("@RequestId", req.Id);
+                await using var reader = await sCmd.ExecuteReaderAsync(cancellationToken);
+                while (await reader.ReadAsync(cancellationToken))
+                {
+                    signers.Add((
+                        reader.GetString(0),
+                        reader.IsDBNull(1) ? null : reader.GetString(1),
+                        reader.GetString(2),
+                        reader.IsDBNull(3) ? null : reader.GetDateTime(3),
+                        reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                        reader.IsDBNull(5) ? null : reader.GetDateTime(5),
+                        reader.IsDBNull(6) ? null : reader.GetString(6)));
+                }
+            }
+
+            var signerSummary = signers.Count == 0
+                ? "No signers"
+                : string.Join(", ", signers.Select(s =>
+                    $"{s.Email} ({s.Status})"));
+
+            var sendDescription =
+                $"Status: {req.Status}. Mode: {req.Mode}. Signers: {signerSummary}";
+
+            events.Add(new RepositoryItemTimelineEventDto(
+                Guid.Empty,
+                "sign",
+                "Sign request sent",
+                sendDescription,
+                "User",
+                string.IsNullOrWhiteSpace(req.InitiatedByEmail) ? req.InitiatedByName : req.InitiatedByEmail,
+                req.CreatedAtUtc,
+                IsDerived: true));
+
+            foreach (var signer in signers)
+            {
+                if (signer.SignedAtUtc is DateTime signedAt)
+                {
+                    events.Add(new RepositoryItemTimelineEventDto(
+                        Guid.Empty,
+                        "sign",
+                        "Document signed",
+                        $"Status: Signed. Sign request: {req.Status}",
+                        "User",
+                        signer.Email,
+                        signedAt,
+                        IsDerived: true));
+                }
+                else if (string.Equals(signer.Status, SignRequestSignerStatuses.Declined, StringComparison.OrdinalIgnoreCase))
+                {
+                    var when = signer.ModifiedAtUtc ?? req.ModifiedAtUtc ?? req.CreatedAtUtc;
+                    var reason = string.IsNullOrWhiteSpace(signer.DeclineReason)
+                        ? $"Status: Declined. Sign request: {req.Status}"
+                        : $"Status: Declined. Reason: {signer.DeclineReason.Trim()}. Sign request: {req.Status}";
+                    events.Add(new RepositoryItemTimelineEventDto(
+                        Guid.Empty,
+                        "sign",
+                        "Signature declined",
+                        reason,
+                        "User",
+                        signer.Email,
+                        when,
+                        IsDerived: true));
+                }
+                else if (string.Equals(signer.Status, SignRequestSignerStatuses.Pending, StringComparison.OrdinalIgnoreCase)
+                         && string.Equals(req.Status, SignRequestStatuses.InProgress, StringComparison.OrdinalIgnoreCase)
+                         && signer.InvitedAtUtc is DateTime invitedAt
+                         && invitedAt > req.CreatedAtUtc.AddSeconds(2))
+                {
+                    // Sequential: later signer activated after a previous signature.
+                    events.Add(new RepositoryItemTimelineEventDto(
+                        Guid.Empty,
+                        "sign",
+                        "Awaiting signature",
+                        $"Status: Pending. Waiting for {signer.Email}",
+                        "User",
+                        signer.Email,
+                        invitedAt,
+                        IsDerived: true));
+                }
+            }
+
+            if (string.Equals(req.Status, SignRequestStatuses.Completed, StringComparison.OrdinalIgnoreCase)
+                && req.CompletedAtUtc is DateTime completedAt)
+            {
+                events.Add(new RepositoryItemTimelineEventDto(
+                    Guid.Empty,
+                    "sign",
+                    "Sign request completed",
+                    $"Status: {req.Status}",
+                    "System",
+                    "System",
+                    completedAt,
+                    IsDerived: true));
+            }
+            else if (string.Equals(req.Status, SignRequestStatuses.Cancelled, StringComparison.OrdinalIgnoreCase))
+            {
+                events.Add(new RepositoryItemTimelineEventDto(
+                    Guid.Empty,
+                    "sign",
+                    "Sign request cancelled",
+                    $"Status: {req.Status}",
+                    "System",
+                    "System",
+                    req.ModifiedAtUtc ?? req.CompletedAtUtc ?? req.CreatedAtUtc,
+                    IsDerived: true));
+            }
+            else if (string.Equals(req.Status, SignRequestStatuses.Expired, StringComparison.OrdinalIgnoreCase))
+            {
+                events.Add(new RepositoryItemTimelineEventDto(
+                    Guid.Empty,
+                    "sign",
+                    "Sign request expired",
+                    $"Status: {req.Status}",
+                    "System",
+                    "System",
+                    req.ModifiedAtUtc ?? req.CompletedAtUtc ?? req.CreatedAtUtc,
+                    IsDerived: true));
+            }
+        }
+
+        return events;
+    }
+
+    private static async Task<IReadOnlyList<RepositoryItemTimelineEventDto>> LoadCommentTimelineEventsAsync(
+        SqlConnection connection,
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        if (!await CommentsTableExistsAsync(connection, cancellationToken))
+            return Array.Empty<RepositoryItemTimelineEventDto>();
+
+        const string sql = """
+            SELECT Id, Body, CreatedBy, CreatedAtUtc
+            FROM repository.ItemComments
+            WHERE RepositoryId = @RepositoryId
+              AND ItemId = @ItemId
+              AND TenantId = @TenantId
+              AND IsDeleted = 0
+            ORDER BY CreatedAtUtc ASC;
+            """;
+
+        var events = new List<RepositoryItemTimelineEventDto>();
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
+        cmd.Parameters.AddWithValue("@ItemId", itemId);
+        cmd.Parameters.AddWithValue("@TenantId", tenantId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var body = reader.GetString(1);
+            if (string.IsNullOrWhiteSpace(body))
+                continue;
+
+            events.Add(new RepositoryItemTimelineEventDto(
+                reader.GetGuid(0),
+                "comment",
+                "Comment added",
+                body.Trim(),
+                "User",
+                reader.GetGuid(2).ToString("D"),
+                reader.GetDateTime(3),
+                IsDerived: true));
+        }
+
+        return events;
     }
 
     private static async Task<List<RepositoryItemTimelineEventDto>> ResolveActorNamesAsync(
