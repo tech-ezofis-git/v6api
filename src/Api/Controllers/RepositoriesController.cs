@@ -300,9 +300,12 @@ public sealed class RepositoriesController : ControllerBase
         if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
             return denied;
         var filters = ParseParentFilters(query.ParentFilters);
+        var userId = GetUserId();
+        var isAdmin = IsCurrentUserAdmin();
         return await Browse(async () =>
             await _browse.GetBrowseChildrenAsync(
-                id, tenantId, query.PathId, filters, query.Page, query.PageSize, query.Search, cancellationToken));
+                id, tenantId, query.PathId, filters, query.Page, query.PageSize, query.Search,
+                userId, isAdmin, cancellationToken));
     }
 
     /// <summary>Group items by any folder field name; parentFilters JSON for drill-down context.</summary>
@@ -317,9 +320,12 @@ public sealed class RepositoriesController : ControllerBase
         if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
             return denied;
         var filters = ParseParentFilters(query.ParentFilters);
+        var userId = GetUserId();
+        var isAdmin = IsCurrentUserAdmin();
         return await Browse(async () =>
             await _browse.GetBrowseGroupsAsync(
-                id, tenantId, fieldName, filters, query.Page, query.PageSize, query.Search, cancellationToken));
+                id, tenantId, fieldName, filters, query.Page, query.PageSize, query.Search,
+                userId, isAdmin, cancellationToken));
     }
 
     /// <summary>Allowed filter keys for GET .../items (per repository fields + standard columns).</summary>

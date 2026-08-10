@@ -39,12 +39,24 @@ internal static class RepositorySqlHelper
         if (string.IsNullOrWhiteSpace(name))
             throw new ArgumentException("Field name is required.");
 
-        var cleaned = Regex.Replace(name.Trim(), @"[^a-zA-Z0-9_]", "");
+        var trimmed = name.Trim();
+        // Allow Unicode letters/digits (Arabic, etc.) + underscore. Strip spaces/punctuation only.
+        var cleaned = Regex.Replace(trimmed, @"[^\p{L}\p{N}_]", "");
         if (cleaned.Length == 0)
-            throw new ArgumentException($"Invalid field name: {name}");
+        {
+            // Emoji-only / symbol labels: stable ASCII fallback from the display name.
+            var hash = Convert.ToHexString(
+                System.Security.Cryptography.SHA256.HashData(
+                    System.Text.Encoding.UTF8.GetBytes(trimmed)))[..8];
+            cleaned = "F_" + hash;
+        }
 
-        if (char.IsDigit(cleaned[0]))
+        // SQL identifiers cannot start with a digit.
+        if (char.IsDigit(cleaned[0]) || !char.IsLetter(cleaned[0]))
             cleaned = "F_" + cleaned;
+
+        if (cleaned.Length > 128)
+            cleaned = cleaned[..128];
 
         return cleaned;
     }

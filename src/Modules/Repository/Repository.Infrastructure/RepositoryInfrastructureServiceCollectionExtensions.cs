@@ -17,8 +17,16 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
         services.Configure<RepositoryAiSummaryOptions>(configuration.GetSection(RepositoryAiSummaryOptions.SectionName));
         services.Configure<RepositoryShareOptions>(configuration.GetSection(RepositoryShareOptions.SectionName));
         services.Configure<RepositorySignRequestOptions>(configuration.GetSection(RepositorySignRequestOptions.SectionName));
+        services.Configure<RepositoryPythonAssistantOptions>(configuration.GetSection(RepositoryPythonAssistantOptions.SectionName));
         services.AddHttpClient<IOcrExtractionService, OcrExtractionService>();
         services.AddHttpClient<IRepositoryAiSummaryService, RepositoryAiSummaryService>();
+        services.AddHttpClient(nameof(RepositoryPythonAssistantClient), (sp, client) =>
+        {
+            var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<RepositoryPythonAssistantOptions>>().Value;
+            var timeout = opts.TimeoutSeconds > 0 ? opts.TimeoutSeconds : 120;
+            client.Timeout = TimeSpan.FromSeconds(timeout);
+        });
+        services.AddScoped<IRepositoryPythonAssistantClient, RepositoryPythonAssistantClient>();
         services.AddScoped<IRepositorySchemaService, RepositorySchemaService>();
         services.AddScoped<IRepositoryStorageSeedService, RepositoryStorageSeedService>();
         services.AddScoped<IStaticRepositoryProvisioner, StaticRepositoryProvisioner>();

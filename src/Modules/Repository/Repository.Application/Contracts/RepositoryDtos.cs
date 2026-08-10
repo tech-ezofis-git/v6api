@@ -252,7 +252,7 @@ public sealed record RepositoryItemLineItemsSectionDto(
 
 /// <summary>
 /// Structured item detail for the document workspace UI (click filename).
-/// Side panels are in <see cref="DetailsRow"/> (document, supplier, AI, system).
+/// Side panels are in <see cref="DetailsRow"/> (document info, repository field details, AI, system).
 /// <see cref="LineItems"/> is a JSON array of invoice line objects (not wrapped in rows).
 /// </summary>
 public sealed record RepositoryItemWorkspaceDto(
@@ -264,7 +264,9 @@ public sealed record RepositoryItemWorkspaceDto(
     Guid StorageProviderId,
     string? StorageProviderCode,
     [property: JsonPropertyName("DetailsRow")] IReadOnlyList<RepositoryItemPanelSectionDto> DetailsRow,
-    [property: JsonPropertyName("lineItems")] JsonElement? LineItems = null);
+    [property: JsonPropertyName("lineItems")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    JsonElement? LineItems = null);
 
 public sealed record CreateRepositoryItemRequest(
     Guid? StorageProviderId,
