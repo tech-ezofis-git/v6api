@@ -36,6 +36,8 @@ public interface IRepositoryBrowseService
         int page,
         int pageSize,
         string? search,
+        Guid? userId = null,
+        bool isAdmin = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>Group items by any folder field; parent filters via query string (e.g. ?Supplier=Acme).</summary>
@@ -47,6 +49,8 @@ public interface IRepositoryBrowseService
         int page,
         int pageSize,
         string? search,
+        Guid? userId = null,
+        bool isAdmin = false,
         CancellationToken cancellationToken = default);
 }
 

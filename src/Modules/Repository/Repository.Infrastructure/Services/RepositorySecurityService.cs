@@ -537,6 +537,120 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         return result;
     }
 
+    public async Task<(string? Sql, IReadOnlyList<(string Name, object Value)> Parameters)> BuildHideDocumentsSqlFilterAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid userId,
+        bool isAdmin,
+        IReadOnlyDictionary<string, string> fieldToSqlColumn,
+        string paramPrefix,
+        CancellationToken cancellationToken = default)
+    {
+        if (isAdmin || userId == Guid.Empty)
+            return (null, Array.Empty<(string, object)>());
+
+        await EnsureSchemaAsync(cancellationToken);
+        var principalIds = await ResolvePrincipalIdsAsync(tenantId, userId, cancellationToken);
+        var docs = await GetDocumentSecurityAsync(repositoryId, tenantId, cancellationToken);
+
+        var hideRules = docs.Rules
+            .Where(r =>
+                string.Equals(r.Action, RepositorySecurityActions.Hide, StringComparison.OrdinalIgnoreCase)
+                && PrincipalsMatch(r.UserIds, r.GroupIds, principalIds)
+                && r.Conditions is { Count: > 0 })
+            .ToList();
+
+        if (hideRules.Count == 0)
+            return (null, Array.Empty<(string, object)>());
+
+        var ruleSql = new List<string>();
+        var parameters = new List<(string Name, object Value)>();
+        var p = 0;
+
+        foreach (var rule in hideRules)
+        {
+            var matchAll = string.Equals(rule.Match, RepositorySecurityMatchModes.All, StringComparison.OrdinalIgnoreCase);
+            var parts = new List<string>();
+            var allMapped = true;
+
+            foreach (var condition in rule.Conditions)
+            {
+                if (!TryResolveSqlColumn(condition.Field, fieldToSqlColumn, out var column))
+                {
+                    allMapped = false;
+                    break;
+                }
+
+                var paramName = $"@{paramPrefix}{p++}";
+                var op = (condition.Op ?? "equals").Trim().ToLowerInvariant();
+                var value = condition.Value?.Trim() ?? string.Empty;
+
+                var columnRef = RepositorySqlHelper.ColumnRef(column);
+
+                if (op is "contains")
+                {
+                    parts.Add($"LTRIM(RTRIM(CAST({columnRef} AS TEXT))) LIKE {paramName}");
+                    parameters.Add((paramName, $"%{value}%"));
+                }
+                else if (op is "notequals" or "ne" or "!=")
+                {
+                    parts.Add($"(LTRIM(RTRIM(CAST({columnRef} AS TEXT))) <> {paramName} OR {columnRef} IS NULL)");
+                    parameters.Add((paramName, value));
+                }
+                else
+                {
+                    parts.Add($"LTRIM(RTRIM(CAST({columnRef} AS TEXT))) = {paramName}");
+                    parameters.Add((paramName, value));
+                }
+            }
+
+            if (!allMapped || parts.Count == 0)
+                continue;
+
+            ruleSql.Add(matchAll
+                ? "(" + string.Join(" AND ", parts) + ")"
+                : "(" + string.Join(" OR ", parts) + ")");
+        }
+
+        if (ruleSql.Count == 0)
+            return (null, Array.Empty<(string, object)>());
+
+        return ("NOT (" + string.Join(" OR ", ruleSql) + ")", parameters);
+    }
+
+    private static bool TryResolveSqlColumn(
+        string? field,
+        IReadOnlyDictionary<string, string> fieldToSqlColumn,
+        out string column)
+    {
+        column = string.Empty;
+        if (string.IsNullOrWhiteSpace(field) || fieldToSqlColumn.Count == 0)
+            return false;
+
+        var key = field.Trim();
+        if (fieldToSqlColumn.TryGetValue(key, out var direct) && !string.IsNullOrWhiteSpace(direct))
+        {
+            column = direct;
+            return true;
+        }
+
+        try
+        {
+            var sanitized = RepositorySqlHelper.SanitizeColumnName(key);
+            if (fieldToSqlColumn.TryGetValue(sanitized, out var bySanitized) && !string.IsNullOrWhiteSpace(bySanitized))
+            {
+                column = bySanitized;
+                return true;
+            }
+        }
+        catch (ArgumentException)
+        {
+            // invalid field label
+        }
+
+        return false;
+    }
+
     private async Task EnsureRepositoryExistsAsync(Guid repositoryId, Guid tenantId, CancellationToken cancellationToken)
     {
         var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);

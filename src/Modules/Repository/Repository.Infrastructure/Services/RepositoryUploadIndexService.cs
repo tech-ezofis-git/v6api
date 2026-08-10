@@ -257,8 +257,9 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
 
         var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
             repo.Fields.Where(f => f.IncludeInFolderStructure));
+        var pathFolderFields = RepositoryArchiveFileNameResolver.PathFolderFields(repo.Fields, folderFields);
 
-        var archiveSegments = folderFields
+        var archiveSegments = pathFolderFields
             .Select(f =>
             {
                 row.FieldValues.TryGetValue(f.SqlColumnName, out var v1);

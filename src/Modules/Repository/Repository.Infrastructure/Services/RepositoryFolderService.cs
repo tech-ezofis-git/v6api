@@ -29,15 +29,19 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         var repositoryName = await LoadRepositoryNameAsync(connection, repositoryId, tenantId, cancellationToken)
             ?? throw new InvalidOperationException("Repository not found.");
 
+        var allFields = await LoadRepositoryFieldsAsync(connection, repositoryId, cancellationToken);
         var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
-            await LoadFolderStructureFieldsAsync(connection, repositoryId, cancellationToken));
+            allFields.Where(f => f.IncludeInFolderStructure));
         if (folderFields.Count == 0)
             return null;
+
+        // Highest folder field (or dedicated Level > max) is the file name — not a path segment.
+        var pathFolderFields = RepositoryArchiveFileNameResolver.PathFolderFields(allFields, folderFields);
 
         var missing = new List<string>();
         var folderNames = new List<string>();
 
-        foreach (var field in folderFields)
+        foreach (var field in pathFolderFields)
         {
             var segmentName = RepositoryFolderMetadataResolver.ResolveSegmentName(metadata, field);
             if (string.IsNullOrWhiteSpace(segmentName))
@@ -74,9 +78,9 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         var folderChain = new List<Guid>();
         var archivePrefix = $"{RepositoryFilePathHelper.ArchiveRoot}/{RepositoryFilePathHelper.SanitizePathSegment(repositoryName)}";
 
-        for (var i = 0; i < folderFields.Count; i++)
+        for (var i = 0; i < pathFolderFields.Count; i++)
         {
-            var field = folderFields[i];
+            var field = pathFolderFields[i];
             var segmentName = folderNames[i];
 
             var folderId = await FindOrCreateFolderAsync(
@@ -98,7 +102,8 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         }
 
         var leafFolderId = folderChain.Count > 0 ? folderChain[^1] : Guid.Empty;
-        return new RepositoryFolderResolveResult(leafFolderId, folderChain, folderNames, repositoryName);    }
+        return new RepositoryFolderResolveResult(leafFolderId, folderChain, folderNames, repositoryName);
+    }
 
     private static async Task<string?> LoadRepositoryNameAsync(
         NpgsqlConnection connection,
@@ -119,7 +124,7 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         return (await cmd.ExecuteScalarAsync(cancellationToken)) as string;
     }
 
-    private static async Task<IReadOnlyList<RepositoryFieldDto>> LoadFolderStructureFieldsAsync(
+    private static async Task<IReadOnlyList<RepositoryFieldDto>> LoadRepositoryFieldsAsync(
         NpgsqlConnection connection,
         Guid repositoryId,
         CancellationToken cancellationToken)
@@ -129,7 +134,6 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
             FROM repository."RepositoryFields"
             WHERE "RepositoryId" = @RepositoryId
               AND "IsDeleted" = false
-              AND "IncludeInFolderStructure" = true
             ORDER BY "Level", "OrderId", "Name";
             """;
 

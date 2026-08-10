@@ -4,8 +4,9 @@ using SaaSApp.Repository.Infrastructure.Storage;
 namespace SaaSApp.Repository.Infrastructure.Services;
 
 /// <summary>
-/// Archive blob/file name: folder levels from <see cref="RepositoryFieldDto.IncludeInFolderStructure"/>;
-/// the file stem comes from the highest-level metadata field above those folder levels (e.g. PoNumber at level 3).
+/// Archive blob/file name: folder path from <see cref="RepositoryFieldDto.IncludeInFolderStructure"/>
+/// except the naming field. Prefer a non-folder field with Level above folder max; otherwise the
+/// highest folder-structure field is the file stem (not a folder segment).
 /// </summary>
 internal static class RepositoryArchiveFileNameResolver
 {
@@ -17,12 +18,34 @@ internal static class RepositoryArchiveFileNameResolver
             ? orderedFolderFields.Max(f => f.Level)
             : -1;
 
-        return allFields
+        var dedicated = allFields
             .Where(f => !f.IncludeInFolderStructure && f.Level > folderMaxLevel)
             .OrderByDescending(f => f.Level)
             .ThenBy(f => f.OrderId ?? int.MaxValue)
             .ThenBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
             .FirstOrDefault();
+        if (dedicated != null)
+            return dedicated;
+
+        // No level above folders → highest IncludeInFolderStructure field is the file name.
+        if (orderedFolderFields.Count == 0)
+            return null;
+
+        return orderedFolderFields[^1];
+    }
+
+    /// <summary>Folder path levels only (excludes naming field when it is a folder-structure field).</summary>
+    public static IReadOnlyList<RepositoryFieldDto> PathFolderFields(
+        IReadOnlyList<RepositoryFieldDto> allFields,
+        IReadOnlyList<RepositoryFieldDto> orderedFolderFields)
+    {
+        var naming = ResolveNamingField(allFields, orderedFolderFields);
+        if (naming == null || !naming.IncludeInFolderStructure)
+            return orderedFolderFields;
+
+        return orderedFolderFields
+            .Where(f => !string.Equals(f.SqlColumnName, naming.SqlColumnName, StringComparison.OrdinalIgnoreCase))
+            .ToList();
     }
 
     public static string? ResolveArchiveFileStem(

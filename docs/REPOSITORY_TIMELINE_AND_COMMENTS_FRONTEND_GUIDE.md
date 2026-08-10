@@ -75,16 +75,18 @@ Optional share: `?shareToken=` / `?sharedtoken=`
 | `system` | Ingest (manual upload / email) or linked instance |
 | `ai` | OCR % / AI validation |
 | `workflow` | Approver / verifier / pending / completed from linked ticket |
+| `sign` | Sign request sent / signed / declined / completed / cancelled |
+| `comment` | User comments on the file (`description` = comment body) |
 | `user` | Manual timeline notes (if posted) |
 
 **Notes**
 - `"Metadata updated"` rows are **hidden** (no longer useful for this UI).
 - `actorName` / comment `authorName` is the user **email** (falls back to display name only if email missing).
-- `isDerived: true` = computed from item / workflow (not a stored note).
+- `isDerived: true` = computed from item / workflow / sign request / comments (not a stored note).
 - Email ingest titles use **Document ingested via email** (`actorName`: `System (Email)`).
 - Manual uploads use **Document uploaded manually**.
-
----
+- Sign request events are derived from `repository.SignRequests` + `SignRequestSigners` (status in `description`).
+- Comment events are derived from `repository.ItemComments` (same comments API data).---
 
 ## 2. Comments (already available — like workflow)
 

@@ -8,11 +8,16 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
 {
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IStaticRepositoryProvisioner _provisioner;
+    private readonly IRepositorySecurityService _security;
 
-    public RepositoryBrowseService(ITenantConnectionProvider connectionProvider, IStaticRepositoryProvisioner provisioner)
+    public RepositoryBrowseService(
+        ITenantConnectionProvider connectionProvider,
+        IStaticRepositoryProvisioner provisioner,
+        IRepositorySecurityService security)
     {
         _connectionProvider = connectionProvider;
         _provisioner = provisioner;
+        _security = security;
     }
 
     public async Task<BrowseStructureDto> GetBrowseStructureAsync(
@@ -40,6 +45,8 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         int page,
         int pageSize,
         string? search,
+        Guid? userId = null,
+        bool isAdmin = false,
         CancellationToken cancellationToken = default)
     {
         var structure = await GetBrowseStructureAsync(repositoryId, tenantId, cancellationToken);
@@ -86,6 +93,8 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
             page,
             pageSize,
             search,
+            userId,
+            isAdmin,
             cancellationToken);
 
         return new BrowseChildrenResponseDto(
@@ -107,9 +116,12 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         int page,
         int pageSize,
         string? search,
+        Guid? userId = null,
+        bool isAdmin = false,
         CancellationToken cancellationToken = default)
     {
-        return GetGroupsAsync(repositoryId, tenantId, groupField, parentFilters, page, pageSize, search, cancellationToken);
+        return GetGroupsAsync(
+            repositoryId, tenantId, groupField, parentFilters, page, pageSize, search, userId, isAdmin, cancellationToken);
     }
 
     private async Task<PagedResult<BrowseGroupDto>> GetGroupsAsync(
@@ -120,6 +132,8 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         int page,
         int pageSize,
         string? search,
+        Guid? userId,
+        bool isAdmin,
         CancellationToken cancellationToken)
     {
         var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
@@ -177,6 +191,20 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
             parameters.Add(new NpgsqlParameter("@Search", $"%{search.Trim()}%"));
         }
 
+        // Document security: hide folders that only contain documents the user must not see.
+        if (userId is Guid uid)
+        {
+            var fieldMap = BuildFieldToSqlColumnMap(repo.Fields);
+            var (hideSql, hideParams) = await _security.BuildHideDocumentsSqlFilterAsync(
+                repositoryId, tenantId, uid, isAdmin, fieldMap, "HideDoc", cancellationToken);
+            if (!string.IsNullOrWhiteSpace(hideSql))
+            {
+                where.Add(hideSql);
+                foreach (var (name, value) in hideParams)
+                    parameters.Add(new NpgsqlParameter(name, value));
+            }
+        }
+
         var whereSql = string.Join(" AND ", where);
 
         var connectionString = _connectionProvider.ConnectionString
@@ -231,23 +259,30 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         return new PagedResult<BrowseGroupDto>(list, page, pageSize, total);
     }
 
+    private static Dictionary<string, string> BuildFieldToSqlColumnMap(IReadOnlyList<RepositoryFieldDto> fields)
+    {
+        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var field in fields)
+        {
+            if (string.IsNullOrWhiteSpace(field.SqlColumnName))
+                continue;
+            var sqlCol = RepositorySqlHelper.SanitizeColumnName(field.SqlColumnName);
+            map[sqlCol] = sqlCol;
+            if (!string.IsNullOrWhiteSpace(field.Name))
+                map[field.Name.Trim()] = sqlCol;
+            if (!string.IsNullOrWhiteSpace(field.SqlColumnName))
+                map[field.SqlColumnName.Trim()] = sqlCol;
+        }
+
+        return map;
+    }
+
     private static RepositoryFieldDto? ResolveFolderField(IReadOnlyList<RepositoryFieldDto> folderFields, string fieldName) =>
         folderFields.FirstOrDefault(f =>
             string.Equals(f.Name, fieldName, StringComparison.OrdinalIgnoreCase) ||
             string.Equals(f.SqlColumnName, fieldName, StringComparison.OrdinalIgnoreCase));
 
     private static string? TryGetFilterValue(IReadOnlyDictionary<string, string> filters, BrowseFolderFieldDto field)
-    {
-        foreach (var key in new[] { field.SqlColumnName, field.Name })
-        {
-            if (filters.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value))
-                return value.Trim();
-        }
-
-        return null;
-    }
-
-    private static string? TryGetFilterValue(IReadOnlyDictionary<string, string> filters, RepositoryFieldDto field)
     {
         foreach (var key in new[] { field.SqlColumnName, field.Name })
         {
@@ -269,7 +304,6 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
             var match = structure.BrowsePaths.FirstOrDefault(p =>
                 string.Equals(p.Id, id, StringComparison.OrdinalIgnoreCase));
 
-            // Allow shorthand: pathId=Supplier → by-Supplier
             if (match == null && !id.StartsWith("by-", StringComparison.OrdinalIgnoreCase))
             {
                 match = structure.BrowsePaths.FirstOrDefault(p =>
@@ -315,9 +349,28 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         {
             var order = new[] { root.SqlColumnName }
                 .Concat(folderFields.Where(f => f.SqlColumnName != root.SqlColumnName).OrderBy(f => f.Level).Select(f => f.SqlColumnName));
-            AddPath($"by-{root.SqlColumnName}", $"By {root.Name}", order);
+            var label = ContainsArabicScript(root.Name) ? root.Name : $"By {root.Name}";
+            AddPath($"by-{root.SqlColumnName}", label, order);
         }
 
         return paths;
+    }
+
+    private static bool ContainsArabicScript(string? text)
+    {
+        if (string.IsNullOrEmpty(text))
+            return false;
+
+        foreach (var c in text)
+        {
+            if (c is (>= '\u0600' and <= '\u06FF')
+                or (>= '\u0750' and <= '\u077F')
+                or (>= '\u08A0' and <= '\u08FF')
+                or (>= '\uFB50' and <= '\uFDFF')
+                or (>= '\uFE70' and <= '\uFEFF'))
+                return true;
+        }
+
+        return false;
     }
 }
