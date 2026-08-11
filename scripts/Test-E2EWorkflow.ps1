@@ -40,7 +40,7 @@ function Invoke-Api {
     $h = $headers.Clone()
     if ($ExtraHeaders) { $ExtraHeaders.GetEnumerator() | ForEach-Object { $h[$_.Key] = $_.Value } }
     $params = @{ Method = $Method; Uri = $Uri; Headers = $h; UseBasicParsing = $true }
-    if ($Body) { $params.Body = ($Body | ConvertTo-Json) }
+    if ($Body) { $params.Body = ($Body | ConvertTo-Json -Depth 10) }
     return Invoke-RestMethod @params
 }
 
@@ -100,12 +100,32 @@ Write-Host "  OK: Logged in" -ForegroundColor Green
 
 $authHeaders = @{ "Authorization" = "Bearer $token"; "X-Tenant-Id" = $tenantId }
 
+# Step 2.5: Create a minimal form (POST /api/form returns the new form's string id as the body).
+# Needed because Workflow start requires a real dbo.wForm/wFormControl row -- WorkflowEzfbFormDataLoader
+# queries dbo."wFormControl" unconditionally, and that table is only created (by FormService's
+# EnsureFormSchemaAsync) the first time a form is actually saved via this endpoint. A random,
+# never-saved GUID as FormId fails with "relation dbo.wFormControl does not exist" (confirmed --
+# same behavior would occur pre-migration too, since EnsureFormSchemaAsync's lazy-create-on-first-
+# save comment describes pre-existing, dialect-neutral behavior, not something this port changed).
+Write-Host "`nStep 2.5: Create form (for workflow InitiateUsing.FormId)..." -ForegroundColor Cyan
+$formBody = @{ formJson = @{ name = "Invoice Form" } }
+$formId = Invoke-Api -Method POST -Uri "$BaseUrl/api/form" -Body $formBody -ExtraHeaders $authHeaders
+$formId = $formId -replace '"', ''
+Write-Host "  OK: Form $formId created" -ForegroundColor Green
+
 # Step 3: Create Invoice Approval Workflow
 Write-Host "`nStep 3: Create Invoice Approval workflow..." -ForegroundColor Cyan
 $createBody = @{
     name        = "Invoice Approval"
     description = "5-step invoice approval: Submit -> Dept Review -> Finance -> Manager -> Final"
     triggerType = 0  # Manual
+    workflowJson = @{
+        settings = @{
+            general = @{
+                initiateUsing = @{ type = "FORM"; formId = $formId }
+            }
+        }
+    }
 }
 $create = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows" -Body $createBody -ExtraHeaders $authHeaders
 $workflowId = $create.workflowId; if (-not $workflowId) { $workflowId = $create.WorkflowId }
@@ -120,8 +140,12 @@ $steps = @(
     @{ name = "Manager Approval"; stepType = 1; order = 4; description = "Manager approves/rejects"; isRequired = $true }
     @{ name = "Final Approval"; stepType = 1; order = 5; description = "Final sign-off"; isRequired = $true }
 )
+$stepIdsByOrder = @{}
 foreach ($s in $steps) {
-    Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/steps" -Body $s -ExtraHeaders $authHeaders | Out-Null
+    $stepResp = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/steps" -Body $s -ExtraHeaders $authHeaders
+    $stepId = $stepResp.stepId; if (-not $stepId) { $stepId = $stepResp.StepId }
+    if (-not $stepId) { $stepId = $stepResp.id }
+    $stepIdsByOrder[$s.order] = $stepId
 }
 Write-Host "  OK: Added Submit Invoice, Department Review, Finance Approval, Manager Approval, Final Approval" -ForegroundColor Green
 
@@ -133,24 +157,28 @@ Write-Host "  OK: Published" -ForegroundColor Green
 # Step 6: Start instance (Submit Invoice)
 Write-Host "`nStep 6: Start workflow instance (Submit Invoice)..." -ForegroundColor Cyan
 $startBody = @{ context = '{"referenceNumber":"INV-2025-001","amount":5000}' }
-$start = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/start" -Body $startBody -ExtraHeaders $authHeaders
+$start = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/start/json" -Body $startBody -ExtraHeaders $authHeaders
 $instanceId = $start.instanceId; if (-not $instanceId) { $instanceId = $start.InstanceId }
 Write-Host "  OK: Instance $instanceId started" -ForegroundColor Green
 
 # Step 7: Add comment (Invoice submitted)
 Write-Host "`nStep 7: Add comment (Invoice submitted)..." -ForegroundColor Cyan
 $commentBody = @{ comments = "Invoice #INV-2025-001 submitted. Amount: $5,000" }
-Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/comments" -Body $commentBody -ExtraHeaders $authHeaders | Out-Null
+Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/instances/$instanceId/comments" -Body $commentBody -ExtraHeaders $authHeaders | Out-Null
 Write-Host "  OK: Comment added" -ForegroundColor Green
 
 # Step 8: MoveToNext (complete Submit Invoice, start Department Review)
 Write-Host "`nStep 8: MoveToNext (complete Submit Invoice -> Department Review)..." -ForegroundColor Cyan
-Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ comments = "Invoice details verified" } -ExtraHeaders $authHeaders | Out-Null
+# review must be non-empty for the step to actually complete-and-advance (WorkflowLegacyTransactionSyncService's
+# own doc comment: "review empty/null: insert step row if missing; if exists return StepAlreadyThere; review
+# provided: update review on existing open row ... on successful review update insert next step row"). Without
+# it, move-next only records/no-ops -- confirmed empirically (step stayed InProgress, next step never started).
+Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ activityid = $stepIdsByOrder[1]; review = "Reviewed"; comments = "Invoice details verified" } -ExtraHeaders $authHeaders | Out-Null
 Write-Host "  OK: Moved to Department Review" -ForegroundColor Green
 
 # Step 9: MoveToNext (complete Department Review, start Finance Approval)
 Write-Host "`nStep 9: MoveToNext (complete Dept Review -> Finance Approval)..." -ForegroundColor Cyan
-Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ comments = "Dept review done" } -ExtraHeaders $authHeaders | Out-Null
+Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ activityid = $stepIdsByOrder[2]; review = "Reviewed"; comments = "Dept review done" } -ExtraHeaders $authHeaders | Out-Null
 Write-Host "  OK: Moved to Finance Approval" -ForegroundColor Green
 
 # Step 10: Finance Approval - Approve or Reject

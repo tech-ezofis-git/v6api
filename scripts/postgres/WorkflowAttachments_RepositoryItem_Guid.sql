@@ -1,0 +1,6 @@
+-- WorkflowAttachments_{suffix} -- RepositoryId & ItemId as UUID -- Postgres
+-- Ported from scripts/WorkflowAttachments_RepositoryItem_Guid.sql -- Phase 3.
+-- NOT PORTED -- see Alter_WorkflowAttachments_IntToUniqueIdentifier.sql (postgres/)
+-- for the full reasoning: one-time legacy repair tool (create-or-upgrade variant,
+-- including a commented-out "fix all tables" bonus section) for a table shape
+-- Postgres tenants will never have.

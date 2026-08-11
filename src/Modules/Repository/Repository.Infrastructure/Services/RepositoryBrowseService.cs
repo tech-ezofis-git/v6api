@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -137,7 +137,10 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         var groupFieldDef = ResolveFolderField(folderFields, groupField)
             ?? throw new ArgumentException($"Field '{groupField}' is not a folder structure field for this repository.");
 
+        // Folder-structure fields are always repository-configured (custom) columns, never
+        // reserved ones -- ColumnRef quotes them with their original casing preserved.
         var groupCol = RepositorySqlHelper.SanitizeColumnName(groupFieldDef.SqlColumnName);
+        var groupColRef = RepositorySqlHelper.ColumnRef(groupCol);
         var allowedFilterColumns = folderFields
             .Where(f => !string.Equals(f.SqlColumnName, groupFieldDef.SqlColumnName, StringComparison.OrdinalIgnoreCase))
             .Select(f => f.SqlColumnName)
@@ -148,8 +151,8 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         pageSize = Math.Clamp(pageSize, 1, 200);
         var offset = (page - 1) * pageSize;
 
-        var where = new List<string> { "RepositoryId = @RepositoryId", "IsDeleted = 0", $"[{groupCol}] IS NOT NULL", $"LTRIM(RTRIM([{groupCol}])) <> ''" };
-        var parameters = new List<SqlParameter> { new("@RepositoryId", repositoryId) };
+        var where = new List<string> { "repository_id = @RepositoryId", "is_deleted = false", $"{groupColRef} IS NOT NULL", $"TRIM({groupColRef}) <> ''" };
+        var parameters = new List<NpgsqlParameter> { new("@RepositoryId", repositoryId) };
 
         foreach (var (key, value) in parentFilters)
         {
@@ -164,14 +167,14 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
 
             var filterCol = RepositorySqlHelper.SanitizeColumnName(filterField.SqlColumnName);
             var paramName = "@F_" + filterCol;
-            where.Add($"[{filterCol}] = {paramName}");
-            parameters.Add(new SqlParameter(paramName, value.Trim()));
+            where.Add($"{RepositorySqlHelper.ColumnRef(filterCol)} = {paramName}");
+            parameters.Add(new NpgsqlParameter(paramName, value.Trim()));
         }
 
         if (!string.IsNullOrWhiteSpace(search))
         {
-            where.Add($"[{groupCol}] LIKE @Search");
-            parameters.Add(new SqlParameter("@Search", $"%{search.Trim()}%"));
+            where.Add($"{groupColRef} LIKE @Search");
+            parameters.Add(new NpgsqlParameter("@Search", $"%{search.Trim()}%"));
         }
 
         var whereSql = string.Join(" AND ", where);
@@ -179,38 +182,38 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var countSql = $"""
             SELECT COUNT(*) FROM (
-                SELECT [{groupCol}] AS GroupName
+                SELECT {groupColRef} AS group_name
                 FROM {table}
                 WHERE {whereSql}
-                GROUP BY [{groupCol}]
+                GROUP BY {groupColRef}
             ) g;
             """;
 
         int total;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
             RepositorySqlHelper.AddParameters(countCmd, parameters);
             total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
         }
 
         var dataSql = $"""
-            SELECT [{groupCol}] AS GroupName,
-                   COUNT(*) AS ItemCount,
-                   MAX(ModifiedAtUtc) AS DateModified
+            SELECT {groupColRef} AS group_name,
+                   COUNT(*) AS item_count,
+                   MAX(modified_at_utc) AS date_modified
             FROM {table}
             WHERE {whereSql}
-            GROUP BY [{groupCol}]
-            ORDER BY [{groupCol}]
+            GROUP BY {groupColRef}
+            ORDER BY {groupColRef}
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
             """;
 
         var list = new List<BrowseGroupDto>();
-        await using (var cmd = new SqlCommand(dataSql, connection))
+        await using (var cmd = new NpgsqlCommand(dataSql, connection))
         {
             RepositorySqlHelper.AddParameters(cmd, parameters);
             cmd.Parameters.AddWithValue("@Offset", offset);
@@ -219,8 +222,8 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
             while (await reader.ReadAsync(cancellationToken))
             {
                 list.Add(new BrowseGroupDto(
-                    reader.GetString(0),
-                    reader.GetInt32(1),
+                    Convert.ToString(reader.GetValue(0)) ?? string.Empty,
+                    Convert.ToInt32(reader.GetValue(1)),
                     reader.IsDBNull(2) ? null : reader.GetDateTime(2)));
             }
         }

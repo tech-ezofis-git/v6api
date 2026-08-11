@@ -41,5 +41,5 @@ $missing = Invoke-RestMethod -Method POST -Uri "$BaseUrl/api/connector/$Connecto
 $missing | ConvertTo-Json -Depth 4
 
 if (-not $result.found) { throw "Expected found=true for PO '$PoNumber'" }
-if (-not $result.purchaseOrder.lines) { Write-Warning "PO has no line items" }
-Write-Host ("`nSMOKE OK - found={0} vendor={1} total={2} lines={3}" -f $result.found, $result.purchaseOrder.vendorName, $result.purchaseOrder.totalAmount, $result.purchaseOrder.lines.Count) -ForegroundColor Green
+$lineCount = @($result.purchaseOrder.'PO Line Item').Count
+Write-Host ("`nSMOKE OK - found={0} vendor={1} total={2} lines={3}" -f $result.found, $result.purchaseOrder.'Vendor Name', $result.purchaseOrder.'PO Amount', $lineCount) -ForegroundColor Green

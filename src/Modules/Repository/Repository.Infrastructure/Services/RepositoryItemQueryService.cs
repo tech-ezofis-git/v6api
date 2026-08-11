@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Storage;
@@ -50,7 +50,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
@@ -72,8 +72,8 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         if (!useCursor)
             offset = (page - 1) * pageSize;
 
-        var where = new List<string> { "i.RepositoryId = @RepositoryId", "i.IsDeleted = 0" };
-        var parameters = new List<SqlParameter> { new("@RepositoryId", repositoryId) };
+        var where = new List<string> { "i.repository_id = @RepositoryId", "i.is_deleted = false" };
+        var parameters = new List<NpgsqlParameter> { new("@RepositoryId", repositoryId) };
 
         if (statusValues.Count > 0)
         {
@@ -102,21 +102,21 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
 
         if (!string.IsNullOrWhiteSpace(query.Search))
         {
-            where.Add("i.FileName LIKE @Search");
-            parameters.Add(new SqlParameter("@Search", $"%{query.Search.Trim()}%"));
+            where.Add("i.file_name LIKE @Search");
+            parameters.Add(new NpgsqlParameter("@Search", $"%{query.Search.Trim()}%"));
         }
 
         var dateFilterCol = RepositoryItemListReader.ResolveDateFilterColumn(tableColumns, repo);
         if (query.DateFrom.HasValue && dateFilterCol != null)
         {
-            where.Add($"i.[{dateFilterCol}] >= @DateFrom");
-            parameters.Add(new SqlParameter("@DateFrom", query.DateFrom.Value.Date));
+            where.Add($"i.{RepositorySqlHelper.ColumnRef(dateFilterCol)} >= @DateFrom");
+            parameters.Add(new NpgsqlParameter("@DateFrom", query.DateFrom.Value.Date));
         }
 
         if (query.DateTo.HasValue && dateFilterCol != null)
         {
-            where.Add($"i.[{dateFilterCol}] <= @DateTo");
-            parameters.Add(new SqlParameter("@DateTo", query.DateTo.Value.Date));
+            where.Add($"i.{RepositorySqlHelper.ColumnRef(dateFilterCol)} <= @DateTo");
+            parameters.Add(new NpgsqlParameter("@DateTo", query.DateTo.Value.Date));
         }
 
         var whereSql = string.Join(" AND ", where);
@@ -126,7 +126,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         if (!query.SkipTotal)
         {
             var countSql = $"SELECT COUNT(*) FROM {table} i WHERE {whereSql};";
-            await using var countCmd = new SqlCommand(countSql, connection);
+            await using var countCmd = new NpgsqlCommand(countSql, connection);
             RepositorySqlHelper.AddParameters(countCmd, parameters);
             total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
         }
@@ -138,14 +138,14 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var dataSql = $"""
             SELECT {selectList}
             FROM {table} i
-            INNER JOIN repository.StorageProviders sp ON sp.Id = i.StorageProviderId
+            INNER JOIN repository."StorageProviders" sp ON sp."Id" = i.storage_provider_id
             WHERE {whereSql}
-            ORDER BY i.[{sortCol}] {sortDir}, i.Id {sortDir}
+            ORDER BY i.{RepositorySqlHelper.ColumnRef(sortCol)} {sortDir}, i.id {sortDir}
             {pagingSql};
             """;
 
         var list = new List<RepositoryItemListDto>();
-        await using (var cmd = new SqlCommand(dataSql, connection))
+        await using (var cmd = new NpgsqlCommand(dataSql, connection))
         {
             RepositorySqlHelper.AddParameters(cmd, parameters);
             if (!useCursor)
@@ -185,7 +185,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
@@ -194,8 +194,8 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
         limit = Math.Clamp(limit, 1, 500);
 
-        var where = new List<string> { "RepositoryId = @RepositoryId", "IsDeleted = 0" };
-        var parameters = new List<SqlParameter> { new("@RepositoryId", repositoryId) };
+        var where = new List<string> { "repository_id = @RepositoryId", "is_deleted = false" };
+        var parameters = new List<NpgsqlParameter> { new("@RepositoryId", repositoryId) };
 
         var scope = RepositoryItemFilterHelper.ParseItemFilters(scopeFilters)
             .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
@@ -217,24 +217,26 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
                 connection, table, tableColumns, where, parameters, limit, cancellationToken);
         }
 
-        where.Add($"[{col}] IS NOT NULL");
+        var colRef = RepositorySqlHelper.ColumnRef(col);
+        where.Add($"{colRef} IS NOT NULL");
 
         var sql = $"""
-            SELECT TOP (@Limit) [{col}] AS Value, COUNT(*) AS Cnt
+            SELECT {colRef} AS value, COUNT(*) AS cnt
             FROM {table}
             WHERE {string.Join(" AND ", where)}
-            GROUP BY [{col}]
-            ORDER BY COUNT(*) DESC, [{col}];
+            GROUP BY {colRef}
+            ORDER BY COUNT(*) DESC, {colRef}
+            LIMIT @Limit;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         RepositorySqlHelper.AddParameters(cmd, parameters);
         cmd.Parameters.AddWithValue("@Limit", limit);
 
         var list = new List<FacetValueDto>();
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-            list.Add(new FacetValueDto(reader.GetString(0), reader.GetInt32(1)));
+            list.Add(new FacetValueDto(Convert.ToString(reader.GetValue(0)) ?? string.Empty, Convert.ToInt32(reader.GetValue(1))));
 
         return list;
     }
@@ -248,17 +250,24 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
+        // Explicit aliased select instead of `i.*` -- reserved physical columns are lowercase
+        // snake_case now, so an unaliased `i.*` would return them under names that no longer
+        // match the PascalCase dictionary keys the rest of this method (and its callers) read.
+        var selectList = RepositorySqlHelper.BuildAliasedSelectList(
+            tableColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase), "i");
+
         var sql = $"""
-            SELECT i.*, sp.Code
+            SELECT {selectList}, sp."Code" AS "Code"
             FROM {table} i
-            INNER JOIN repository.StorageProviders sp ON sp.Id = i.StorageProviderId
-            WHERE i.Id = @ItemId AND i.RepositoryId = @RepositoryId AND i.IsDeleted = 0;
+            INNER JOIN repository."StorageProviders" sp ON sp."Id" = i.storage_provider_id
+            WHERE i.id = @ItemId AND i.repository_id = @RepositoryId AND i.is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -270,7 +279,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         for (var i = 0; i < reader.FieldCount; i++)
         {
             var name = reader.GetName(i);
-            if (name is "Code" or "ValidFrom" or "ValidTo")
+            if (name is "Code")
                 continue;
             fields[name] = reader.IsDBNull(i) ? null : reader.GetValue(i);
         }
@@ -347,7 +356,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var email = await RepositoryUserNameResolver.ResolveEmailAsync(
@@ -381,7 +390,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await RepositoryItemInsertHelper.InsertItemAsync(
@@ -404,7 +413,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var updatedFieldCount = await RepositoryItemMetadataUpdateHelper.UpdateAsync(
@@ -413,7 +422,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         if (updatedFieldCount < 0)
             return null;
 
-        // Do not write noisy "Metadata updated" timeline rows — ingest/OCR/workflow history are shown instead.
+        // Do not write noisy "Metadata updated" timeline rows -- ingest/OCR/workflow history are shown instead.
         return new UpdateRepositoryItemMetadataResult(itemId, updatedFieldCount);
     }
 
@@ -441,7 +450,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
     }
 
     private static async Task<IReadOnlyList<Guid>> ResolveMatchingWorkflowInstanceIdsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string qualifiedItemsTable,
         Guid repositoryId,
         HashSet<string> tableColumns,
@@ -453,13 +462,13 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
 
         var candidates = new List<Guid>();
         var sql = $"""
-            SELECT DISTINCT [WorkflowInstanceId]
+            SELECT DISTINCT workflow_instance_id
             FROM {qualifiedItemsTable}
-            WHERE RepositoryId = @RepositoryId
-              AND IsDeleted = 0
-              AND [WorkflowInstanceId] IS NOT NULL;
+            WHERE repository_id = @RepositoryId
+              AND is_deleted = false
+              AND workflow_instance_id IS NOT NULL;
             """;
-        await using (var cmd = new SqlCommand(sql, connection))
+        await using (var cmd = new NpgsqlCommand(sql, connection))
         {
             cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -472,11 +481,11 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
     }
 
     private static async Task<IReadOnlyList<FacetValueDto>> GetStatusFacetsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string qualifiedItemsTable,
         HashSet<string> tableColumns,
         IReadOnlyList<string> where,
-        IList<SqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         int limit,
         CancellationToken cancellationToken)
     {
@@ -490,11 +499,11 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
             counts[key] = counts.TryGetValue(key, out var n) ? n + 1 : 1;
         }
 
-        var selectParts = new List<string> { "Id" };
+        var selectParts = new List<string> { "id AS \"Id\"" };
         foreach (var col in new[] { "Status", "StageStatus", "AiStatus", "MatchedStatus", "WorkflowInstanceId" })
         {
             if (RepositoryItemTableColumns.Has(tableColumns, col))
-                selectParts.Add($"[{col}]");
+                selectParts.Add($"{RepositorySqlHelper.ColumnRef(col)} AS \"{col}\"");
         }
 
         var sql = $"""
@@ -504,7 +513,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
             """;
 
         var rows = new List<(string? Status, string? StageStatus, string? AiStatus, string? MatchedStatus, Guid? WorkflowInstanceId)>();
-        await using (var cmd = new SqlCommand(sql, connection))
+        await using (var cmd = new NpgsqlCommand(sql, connection))
         {
             RepositorySqlHelper.AddParameters(cmd, parameters);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -565,7 +574,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         return null;
     }
 
-    private static bool HasOrdinal(SqlDataReader reader, string name)
+    private static bool HasOrdinal(NpgsqlDataReader reader, string name)
     {
         for (var i = 0; i < reader.FieldCount; i++)
         {

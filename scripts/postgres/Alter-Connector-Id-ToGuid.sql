@@ -1,0 +1,10 @@
+-- Migrate dbo.connector.id from legacy INT IDENTITY to UUID -- Postgres
+-- Ported from scripts/Alter-Connector-Id-ToGuid.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL SCRIPT. This is a one-time legacy migration for SQL
+-- Server tenant databases whose dbo.connector table pre-dates the modern schema
+-- (started life with an INT IDENTITY id). scripts/postgres/Create-Connector-Table.sql
+-- and 02_CreateTenantDatabase.sql both create dbo."connector" with "Id" typed uuid from
+-- the very start -- no Postgres tenant database will ever have the legacy int-id shape
+-- this script migrates away from. Same reasoning as the legacy-migration branch
+-- deliberately left unported in Create-Connector-Table.sql.

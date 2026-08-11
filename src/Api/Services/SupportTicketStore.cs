@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 
 namespace SaaSApp.Api.Services;
@@ -24,7 +24,7 @@ public sealed class SupportTicketInsertRequest
 }
 
 /// <summary>
-/// Persists support tickets in the tenant DB. Creates support.SupportTickets on first use.
+/// Persists support tickets in the tenant DB. Creates support."SupportTickets" on first use.
 /// </summary>
 public sealed class SupportTicketStore
 {
@@ -40,17 +40,17 @@ public sealed class SupportTicketStore
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string is not available.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await EnsureTableAsync(connection, cancellationToken);
 
         const string sql = """
-            INSERT INTO support.SupportTickets (
-                Id, TenantId, UserId, CallerEmail,
-                SupportCategory, Priorty, PreferredContact, PhoneNO, RequestDescription, IsEmailSend,
-                JiraIssueId, JiraIssueKey, JiraIssueUrl, JiraRawResponse, JiraSuccess,
-                CreatedAtUtc)
+            INSERT INTO support."SupportTickets" (
+                "Id", "TenantId", "UserId", "CallerEmail",
+                "SupportCategory", "Priorty", "PreferredContact", "PhoneNO", "RequestDescription", "IsEmailSend",
+                "JiraIssueId", "JiraIssueKey", "JiraIssueUrl", "JiraRawResponse", "JiraSuccess",
+                "CreatedAtUtc")
             VALUES (
                 @Id, @TenantId, @UserId, @CallerEmail,
                 @SupportCategory, @Priorty, @PreferredContact, @PhoneNO, @RequestDescription, @IsEmailSend,
@@ -58,7 +58,7 @@ public sealed class SupportTicketStore
                 @CreatedAtUtc)
             """;
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@Id", entry.Id);
         command.Parameters.AddWithValue("@TenantId", entry.TenantId);
         command.Parameters.AddWithValue("@UserId", (object?)entry.UserId ?? DBNull.Value);
@@ -79,53 +79,51 @@ public sealed class SupportTicketStore
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task EnsureTableAsync(SqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// PHASE 4: support."SupportTickets" is always created fresh on Postgres tenant DBs with
+    /// "SupportCategory" already the column name (see CREATE TABLE below) -- the SQL Server
+    /// version's "rename legacy NeedHelp column" branch has nothing to detect here (no Postgres
+    /// tenant DB ever had a NeedHelp column), so it was dropped rather than translated. Same
+    /// precedent as FormService.cs / other legacy-drift-detection removals in this migration.
+    /// </summary>
+    private static async Task EnsureTableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         const string sql = """
-            IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = N'support')
-                EXEC(N'CREATE SCHEMA support');
+            CREATE SCHEMA IF NOT EXISTS support;
 
-            IF OBJECT_ID(N'support.SupportTickets', N'U') IS NULL
-            BEGIN
-                CREATE TABLE support.SupportTickets (
-                    Id                  uniqueidentifier NOT NULL CONSTRAINT PK_SupportTickets PRIMARY KEY,
-                    TenantId            uniqueidentifier NOT NULL,
-                    UserId              uniqueidentifier NULL,
-                    CallerEmail         nvarchar(256) NULL,
-                    SupportCategory     nvarchar(256) NULL,
-                    Priorty             nvarchar(64) NULL,
-                    PreferredContact    nvarchar(64) NULL,
-                    PhoneNO             nvarchar(64) NULL,
-                    RequestDescription  nvarchar(1000) NULL,
-                    IsEmailSend         bit NOT NULL CONSTRAINT DF_SupportTickets_IsEmailSend DEFAULT(0),
-                    JiraIssueId         nvarchar(64) NULL,
-                    JiraIssueKey        nvarchar(64) NULL,
-                    JiraIssueUrl        nvarchar(512) NULL,
-                    JiraRawResponse     nvarchar(max) NULL,
-                    JiraSuccess         bit NOT NULL CONSTRAINT DF_SupportTickets_JiraSuccess DEFAULT(0),
-                    CreatedAtUtc        datetime2 NOT NULL
-                );
+            CREATE TABLE IF NOT EXISTS support."SupportTickets" (
+                "Id"                  uuid NOT NULL CONSTRAINT "PK_SupportTickets" PRIMARY KEY,
+                "TenantId"            uuid NOT NULL,
+                "UserId"              uuid NULL,
+                "CallerEmail"         varchar(256) NULL,
+                "SupportCategory"     varchar(256) NULL,
+                "Priorty"             varchar(64) NULL,
+                "PreferredContact"    varchar(64) NULL,
+                "PhoneNO"             varchar(64) NULL,
+                "RequestDescription"  varchar(1000) NULL,
+                "IsEmailSend"         boolean NOT NULL DEFAULT false,
+                "JiraIssueId"         varchar(64) NULL,
+                "JiraIssueKey"        varchar(64) NULL,
+                "JiraIssueUrl"        varchar(512) NULL,
+                "JiraRawResponse"     text NULL,
+                "JiraSuccess"         boolean NOT NULL DEFAULT false,
+                "CreatedAtUtc"        timestamptz NOT NULL
+            );
 
-                CREATE INDEX IX_SupportTickets_TenantId_CreatedAtUtc
-                    ON support.SupportTickets (TenantId, CreatedAtUtc DESC);
-            END
-            ELSE
-            BEGIN
-                -- Existing table created with NeedHelp: rename column to SupportCategory.
-                IF COL_LENGTH(N'support.SupportTickets', N'NeedHelp') IS NOT NULL
-                   AND COL_LENGTH(N'support.SupportTickets', N'SupportCategory') IS NULL
-                BEGIN
-                    EXEC sp_rename N'support.SupportTickets.NeedHelp', N'SupportCategory', N'COLUMN';
-                END
-            END
+            CREATE INDEX IF NOT EXISTS "IX_SupportTickets_TenantId_CreatedAtUtc"
+                ON support."SupportTickets" ("TenantId", "CreatedAtUtc" DESC);
             """;
 
         try
         {
-            await using var command = new SqlCommand(sql, connection) { CommandTimeout = 60 };
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 60 };
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
-        catch (SqlException ex) when (ex.Number is 2714 or 1913 or 2705 or 2627)
+        catch (PostgresException ex) when (ex.SqlState is
+            PostgresErrorCodes.DuplicateTable or
+            PostgresErrorCodes.DuplicateObject or
+            PostgresErrorCodes.DuplicateSchema or
+            PostgresErrorCodes.UniqueViolation)
         {
             // Race: another request created the table/index — safe to continue.
         }

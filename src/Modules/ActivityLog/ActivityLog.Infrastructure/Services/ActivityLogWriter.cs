@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SaaSApp.ActivityLog.Application.Contracts;
@@ -38,19 +38,19 @@ public sealed class ActivityLogInsertService
 {
     public async Task InsertAsync(ActivityLogEntry entry, string connectionString, CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            INSERT INTO activitylog.ApiAccessLogs (
-                Id, TenantId, UserId, UserEmail, HttpMethod, Path, QueryString,
-                StatusCode, DurationMs, CorrelationId, ClientIp, UserAgent, CreatedAtUtc)
+            INSERT INTO activitylog."ApiAccessLogs" (
+                "Id", "TenantId", "UserId", "UserEmail", "HttpMethod", "Path", "QueryString",
+                "StatusCode", "DurationMs", "CorrelationId", "ClientIp", "UserAgent", "CreatedAtUtc")
             VALUES (
                 @Id, @TenantId, @UserId, @UserEmail, @HttpMethod, @Path, @QueryString,
                 @StatusCode, @DurationMs, @CorrelationId, @ClientIp, @UserAgent, @CreatedAtUtc)
             """;
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@Id", entry.Id);
         command.Parameters.AddWithValue("@TenantId", entry.TenantId);
         command.Parameters.AddWithValue("@UserId", (object?)entry.UserId ?? DBNull.Value);

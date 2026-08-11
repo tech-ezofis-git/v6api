@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
@@ -31,19 +31,17 @@ public sealed class UserEmailLookup : IUserEmailLookup
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        var parameters = ids.Select((id, index) => new SqlParameter($"@id{index}", id)).ToArray();
-        var inList = string.Join(", ", parameters.Select(p => p.ParameterName));
-        var sql = $"""
-            SELECT Id, Email, DisplayName, FirstName, LastName
-            FROM users.Users
-            WHERE IsDeleted = 0 AND Id IN ({inList});
+        const string sql = """
+            SELECT "Id", "Email", "DisplayName", "FirstName", "LastName"
+            FROM users."Users"
+            WHERE "IsDeleted" = false AND "Id" = ANY(@Ids);
             """;
 
         var map = new Dictionary<Guid, UserProfileLookupDto>();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddRange(parameters);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Ids", ids.ToArray());
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

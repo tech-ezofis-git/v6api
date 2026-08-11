@@ -1,11 +1,11 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.Repository.Infrastructure;
 
 internal static class RepositoryUserNameResolver
 {
     public static async Task<string?> ResolveEmailAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid userId,
         CancellationToken cancellationToken = default)
     {
@@ -14,7 +14,7 @@ internal static class RepositoryUserNameResolver
     }
 
     public static async Task<(string? Email, string? DisplayName)?> ResolveProfileAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid userId,
         CancellationToken cancellationToken = default)
     {
@@ -22,12 +22,12 @@ internal static class RepositoryUserNameResolver
             return null;
 
         const string sql = """
-            SELECT Email, DisplayName
-            FROM users.Users
-            WHERE Id = @UserId AND IsDeleted = 0;
+            SELECT "Email", "DisplayName"
+            FROM users."Users"
+            WHERE "Id" = @UserId AND "IsDeleted" = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@UserId", userId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -39,7 +39,7 @@ internal static class RepositoryUserNameResolver
     }
 
     public static async Task<Dictionary<Guid, string>> ResolveDisplayNamesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IEnumerable<Guid> userIds,
         CancellationToken cancellationToken = default)
     {
@@ -51,7 +51,7 @@ internal static class RepositoryUserNameResolver
     }
 
     public static async Task<Dictionary<Guid, (string? Email, string? DisplayName)>> ResolveProfilesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IEnumerable<Guid> userIds,
         CancellationToken cancellationToken = default)
     {
@@ -61,16 +61,14 @@ internal static class RepositoryUserNameResolver
             return map;
 
         const string sql = """
-            SELECT Id, Email, DisplayName
-            FROM users.Users
-            WHERE IsDeleted = 0
-              AND Id IN (SELECT CAST([value] AS uniqueidentifier) FROM OPENJSON(@Ids));
+            SELECT "Id", "Email", "DisplayName"
+            FROM users."Users"
+            WHERE "IsDeleted" = false
+              AND "Id" = ANY(@Ids);
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue(
-            "@Ids",
-            "[" + string.Join(",", ids.Select(id => $"\"{id:D}\"")) + "]");
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Ids", ids.ToArray());
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

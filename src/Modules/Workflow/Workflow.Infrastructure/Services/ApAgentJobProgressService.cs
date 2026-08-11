@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application;
 using SaaSApp.Workflow.Application.Contracts;
 
@@ -7,7 +7,7 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 
 public sealed class ApAgentJobProgressService : IApAgentJobProgressService
 {
-    private const string TableName = "workflow.ApAgentJobProgress";
+    private const string TableName = "workflow.\"ApAgentJobProgress\"";
     private static readonly ConcurrentDictionary<string, byte> TableEnsured = new(StringComparer.Ordinal);
 
     private readonly ITenantContext _tenantContext;
@@ -25,11 +25,11 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         CancellationToken cancellationToken = default)
     {
         await EnsureTableAsync(cancellationToken);
-        const string sql = $"""
+        var sql = $"""
             INSERT INTO {TableName}
-                (JobId, TenantId, WorkflowId, InstanceId, HangfireState, Stage, Message, ProgressPercent, ErrorMessage, CreatedAtUtc, UpdatedAtUtc)
+                ("JobId", "TenantId", "WorkflowId", "InstanceId", "HangfireState", "Stage", "Message", "ProgressPercent", "ErrorMessage", "CreatedAtUtc", "UpdatedAtUtc")
             VALUES
-                (@JobId, @TenantId, @WorkflowId, @InstanceId, N'Enqueued', N'QUEUED', N'AP Agent job queued', NULL, NULL, SYSUTCDATETIME(), SYSUTCDATETIME());
+                (@JobId, @TenantId, @WorkflowId, @InstanceId, 'Enqueued', 'QUEUED', 'AP Agent job queued', NULL, NULL, now(), now());
             """;
 
         try
@@ -42,7 +42,7 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
                 cmd.Parameters.AddWithValue("@InstanceId", instanceId);
             }, cancellationToken);
         }
-        catch (SqlException ex) when (ex.Number == 208)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             TableEnsured.TryRemove(_tenantContext.ConnectionString?.Trim() ?? string.Empty, out _);
             await EnsureTableAsync(cancellationToken, force: true);
@@ -118,18 +118,18 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         }
 
         await EnsureTableAsync(cancellationToken);
-        const string sql = $"""
+        var sql = $"""
             UPDATE {TableName}
-            SET HangfireState = @HangfireState,
-                Message = COALESCE(@Message, Message),
-                ErrorMessage = @ErrorMessage,
-                Stage = CASE
-                    WHEN @HangfireState = N'Succeeded' THEN COALESCE(Stage, N'COMPLETED')
-                    WHEN @HangfireState = N'Failed' THEN COALESCE(Stage, N'FAILED')
-                    ELSE Stage
+            SET "HangfireState" = @HangfireState,
+                "Message" = COALESCE(@Message, "Message"),
+                "ErrorMessage" = @ErrorMessage,
+                "Stage" = CASE
+                    WHEN @HangfireState = 'Succeeded' THEN COALESCE("Stage", 'COMPLETED')
+                    WHEN @HangfireState = 'Failed' THEN COALESCE("Stage", 'FAILED')
+                    ELSE "Stage"
                 END,
-                UpdatedAtUtc = SYSUTCDATETIME()
-            WHERE JobId = @JobId;
+                "UpdatedAtUtc" = now()
+            WHERE "JobId" = @JobId;
             """;
 
         await ExecuteAsync(sql, cmd =>
@@ -147,14 +147,15 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
     public async Task<ApAgentJobProgressRow?> GetByJobIdAsync(string jobId, CancellationToken cancellationToken = default)
     {
         await EnsureTableAsync(cancellationToken);
-        const string sql = $"""
-            SELECT TOP 1 JobId, TenantId, WorkflowId, InstanceId, HangfireState, Stage, Message, ProgressPercent, ErrorMessage, FormData, UpdatedAtUtc
+        var sql = $"""
+            SELECT "JobId", "TenantId", "WorkflowId", "InstanceId", "HangfireState", "Stage", "Message", "ProgressPercent", "ErrorMessage", "FormData", "UpdatedAtUtc"
             FROM {TableName}
-            WHERE JobId = @JobId;
+            WHERE "JobId" = @JobId
+            LIMIT 1;
             """;
 
-        await using var connection = OpenConnection();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@JobId", jobId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -168,16 +169,17 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         CancellationToken cancellationToken = default)
     {
         await EnsureTableAsync(cancellationToken);
-        const string sql = $"""
-            SELECT TOP 1 JobId
+        var sql = $"""
+            SELECT "JobId"
             FROM {TableName}
-            WHERE InstanceId = @InstanceId
-              AND HangfireState IN (N'Enqueued', N'Processing')
-            ORDER BY UpdatedAtUtc DESC;
+            WHERE "InstanceId" = @InstanceId
+              AND "HangfireState" IN ('Enqueued', 'Processing')
+            ORDER BY "UpdatedAtUtc" DESC
+            LIMIT 1;
             """;
 
-        await using var connection = OpenConnection();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
         return value == null || value == DBNull.Value ? null : Convert.ToString(value);
@@ -189,16 +191,17 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         CancellationToken cancellationToken = default)
     {
         await EnsureTableAsync(cancellationToken);
-        const string sql = $"""
-            SELECT TOP 1 JobId
+        var sql = $"""
+            SELECT "JobId"
             FROM {TableName}
-            WHERE WorkflowId = @WorkflowId
-              AND InstanceId = @InstanceId
-            ORDER BY UpdatedAtUtc DESC;
+            WHERE "WorkflowId" = @WorkflowId
+              AND "InstanceId" = @InstanceId
+            ORDER BY "UpdatedAtUtc" DESC
+            LIMIT 1;
             """;
 
-        await using var connection = OpenConnection();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -224,14 +227,14 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
                 return;
         }
 
-        const string sql = $"""
+        var sql = $"""
             UPDATE {TableName}
-            SET Stage = COALESCE(@Stage, Stage),
-                Message = COALESCE(@Message, Message),
-                ProgressPercent = COALESCE(@ProgressPercent, ProgressPercent),
-                FormData = COALESCE(@FormData, FormData),
-                UpdatedAtUtc = SYSUTCDATETIME()
-            WHERE JobId = @JobId;
+            SET "Stage" = COALESCE(@Stage, "Stage"),
+                "Message" = COALESCE(@Message, "Message"),
+                "ProgressPercent" = COALESCE(@ProgressPercent, "ProgressPercent"),
+                "FormData" = COALESCE(@FormData, "FormData"),
+                "UpdatedAtUtc" = now()
+            WHERE "JobId" = @JobId;
             """;
 
         await ExecuteAsync(sql, cmd =>
@@ -277,76 +280,54 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
 
         TableEnsured.TryRemove(cacheKey, out _);
 
-        const string ensureSchemaSql = """
-            IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
-                EXEC(N'CREATE SCHEMA workflow');
-            """;
+        const string ensureSchemaSql = "CREATE SCHEMA IF NOT EXISTS workflow;";
 
         const string dropLegacySql = """
-            IF OBJECT_ID(N'workflow.ApAgentJobProgress', N'U') IS NOT NULL
-               AND COL_LENGTH(N'workflow.ApAgentJobProgress', N'ProgressPercent') IS NULL
+            DO $$
             BEGIN
-                DROP TABLE workflow.ApAgentJobProgress;
-            END
+                IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'workflow' AND table_name = 'ApAgentJobProgress')
+                   AND NOT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'workflow' AND table_name = 'ApAgentJobProgress' AND column_name = 'ProgressPercent')
+                THEN
+                    DROP TABLE workflow."ApAgentJobProgress";
+                END IF;
+            END $$;
             """;
 
         const string createTableSql = """
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.tables t
-                INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = N'workflow' AND t.name = N'ApAgentJobProgress')
-            BEGIN
-                CREATE TABLE workflow.ApAgentJobProgress (
-                    JobId NVARCHAR(64) NOT NULL PRIMARY KEY,
-                    TenantId UNIQUEIDENTIFIER NOT NULL,
-                    WorkflowId UNIQUEIDENTIFIER NOT NULL,
-                    InstanceId UNIQUEIDENTIFIER NOT NULL,
-                    HangfireState NVARCHAR(32) NULL,
-                    Stage NVARCHAR(64) NULL,
-                    Message NVARCHAR(2000) NULL,
-                    ProgressPercent INT NULL,
-                    ErrorMessage NVARCHAR(MAX) NULL,
-                    FormData NVARCHAR(MAX) NULL,
-                    CreatedAtUtc DATETIME2 NOT NULL CONSTRAINT DF_ApAgentJobProgress_CreatedAt DEFAULT SYSUTCDATETIME(),
-                    UpdatedAtUtc DATETIME2 NOT NULL CONSTRAINT DF_ApAgentJobProgress_UpdatedAt DEFAULT SYSUTCDATETIME()
-                );
-            END
+            CREATE TABLE IF NOT EXISTS workflow."ApAgentJobProgress" (
+                "JobId" varchar(64) NOT NULL PRIMARY KEY,
+                "TenantId" uuid NOT NULL,
+                "WorkflowId" uuid NOT NULL,
+                "InstanceId" uuid NOT NULL,
+                "HangfireState" varchar(32) NULL,
+                "Stage" varchar(64) NULL,
+                "Message" varchar(2000) NULL,
+                "ProgressPercent" integer NULL,
+                "ErrorMessage" text NULL,
+                "FormData" text NULL,
+                "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+                "UpdatedAtUtc" timestamptz NOT NULL DEFAULT now()
+            );
             """;
 
         const string addFormDataColumnSql = """
-            IF EXISTS (
-                SELECT 1 FROM sys.tables t
-                INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = N'workflow' AND t.name = N'ApAgentJobProgress')
-               AND COL_LENGTH(N'workflow.ApAgentJobProgress', N'FormData') IS NULL
-            BEGIN
-                ALTER TABLE workflow.ApAgentJobProgress ADD FormData NVARCHAR(MAX) NULL;
-            END
+            ALTER TABLE IF EXISTS workflow."ApAgentJobProgress" ADD COLUMN IF NOT EXISTS "FormData" text NULL;
             """;
 
         const string createIndexSql = """
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.indexes i
-                INNER JOIN sys.tables t ON t.object_id = i.object_id
-                INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = N'workflow'
-                  AND t.name = N'ApAgentJobProgress'
-                  AND i.name = N'IX_ApAgentJobProgress_InstanceId_Updated')
-            BEGIN
-                CREATE INDEX IX_ApAgentJobProgress_InstanceId_Updated
-                    ON workflow.ApAgentJobProgress (InstanceId, UpdatedAtUtc DESC);
-            END
+            CREATE INDEX IF NOT EXISTS "IX_ApAgentJobProgress_InstanceId_Updated"
+                ON workflow."ApAgentJobProgress" ("InstanceId", "UpdatedAtUtc" DESC);
             """;
 
-        await using var connection = OpenConnection();
+        await using var connection = await OpenConnectionAsync(cancellationToken);
         foreach (var batch in new[] { ensureSchemaSql, dropLegacySql, createTableSql, addFormDataColumnSql, createIndexSql })
         {
-            await using var cmd = new SqlCommand(batch, connection);
+            await using var cmd = new NpgsqlCommand(batch, connection) { CommandTimeout = 120 };
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         if (!await TableExistsAsync(cancellationToken))
-            throw new InvalidOperationException("Failed to create workflow.ApAgentJobProgress table.");
+            throw new InvalidOperationException("Failed to create workflow.\"ApAgentJobProgress\" table.");
 
         TableEnsured.TryAdd(cacheKey, 0);
     }
@@ -354,42 +335,39 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
     private async Task<bool> TableExistsAsync(CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT CASE WHEN EXISTS (
-                SELECT 1
-                FROM sys.tables t
-                INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = N'workflow' AND t.name = N'ApAgentJobProgress'
-            ) THEN 1 ELSE 0 END;
+            SELECT COUNT(1)
+            FROM information_schema.tables
+            WHERE table_schema = 'workflow' AND table_name = 'ApAgentJobProgress';
             """;
 
-        await using var connection = OpenConnection();
-        await using var cmd = new SqlCommand(sql, connection);
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) == 1;
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
-    private SqlConnection OpenConnection()
+    private async Task<NpgsqlConnection> OpenConnectionAsync(CancellationToken cancellationToken)
     {
         var connectionString = _tenantContext.ConnectionString;
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        var connection = new SqlConnection(connectionString);
-        connection.Open();
+        var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
         return connection;
     }
 
     private async Task ExecuteAsync(
         string sql,
-        Action<SqlCommand> configure,
+        Action<NpgsqlCommand> configure,
         CancellationToken cancellationToken)
     {
-        await using var connection = OpenConnection();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         configure(cmd);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static ApAgentJobProgressRow MapRow(SqlDataReader reader) =>
+    private static ApAgentJobProgressRow MapRow(NpgsqlDataReader reader) =>
         new(
             reader.GetString(0),
             reader.GetGuid(1),

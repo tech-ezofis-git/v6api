@@ -1,0 +1,12 @@
+-- Add Configuration column to users.Users for ALL registered tenants -- Postgres
+-- Ported from scripts/AddUserConfigurationAllTenants.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL SCRIPT, for two independent reasons:
+-- (1) users.Users is 100% EF-managed on Postgres (Phase 2) -- User.cs already has a
+--     Configuration property (int, used by MarkConfigurationCompleted()), so
+--     `dotnet ef database update` against UsersDbContext already creates this column
+--     from the start. Nothing left for an ALTER to add.
+-- (2) Even if it were still needed, this is an ...AllTenants.sql cross-database loop
+--     script -- see AddRepositoryFolderDocumentSecurityAllTenants.sql's header comment
+--     for why those don't port as a single Postgres .sql file (no cross-database USE;
+--     that orchestration is Phase 6's job).

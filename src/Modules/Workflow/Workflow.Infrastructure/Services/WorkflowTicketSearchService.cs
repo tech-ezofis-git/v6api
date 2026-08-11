@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Forms;
@@ -42,7 +42,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var formId = await LoadWorkflowFormIdAsync(connection, workflowId, cancellationToken);
@@ -53,8 +53,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             return new WorkflowTicketFilterSchemaDto(workflowId, null, Array.Empty<WorkflowTicketFilterFieldDto>());
 
         var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
-        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
-        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+        var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
 
         var fields = new List<WorkflowTicketFilterFieldDto>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -99,7 +98,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await WorkflowExistsAsync(connection, workflowId, cancellationToken))
@@ -131,7 +130,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await WorkflowExistsAsync(connection, workflowId, cancellationToken))
@@ -150,17 +149,17 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var formSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
         var ezfbTable = $"ezfb_{formSuffix}_items";
         var workflowSuffix = workflowId.ToString("N")[..8];
-        var processFormTable = $"workflow.processForm_{workflowSuffix}";
-        var instancesTable = $"workflow.[WorkflowInstances_{workflowSuffix}]";
-        var transactionTable = $"workflow.[transaction_{workflowSuffix}]";
-        var workflowFormsTable = $"workflow.WorkflowForms_{workflowSuffix}";
-        var workflowAttachmentsTable = $"workflow.WorkflowAttachments_{workflowSuffix}";
-        var workflowCommentsTable = $"workflow.WorkflowComments_{workflowSuffix}";
-        var agentDataValidationTable = $"workflow.[agentDataValidation_{workflowSuffix}]";
+        var processFormTable = $"workflow.process_form_{workflowSuffix}";
+        var instancesTable = $"workflow.workflow_instances_{workflowSuffix}";
+        var transactionTable = $"workflow.transaction_{workflowSuffix}";
+        var workflowFormsTable = $"workflow.workflow_forms_{workflowSuffix}";
+        var workflowAttachmentsTable = $"workflow.workflow_attachments_{workflowSuffix}";
+        var workflowCommentsTable = $"workflow.workflow_comments_{workflowSuffix}";
+        var agentDataValidationTable = $"workflow.agent_data_validation_{workflowSuffix}";
 
         if (!await TableExistsAsync(connection, "dbo", ezfbTable, cancellationToken)
-            || !await TableExistsAsync(connection, "workflow", $"processForm_{workflowSuffix}", cancellationToken)
-            || !await TableExistsAsync(connection, "workflow", $"WorkflowInstances_{workflowSuffix}", cancellationToken)
+            || !await TableExistsAsync(connection, "workflow", $"process_form_{workflowSuffix}", cancellationToken)
+            || !await TableExistsAsync(connection, "workflow", $"workflow_instances_{workflowSuffix}", cancellationToken)
             || !await TableExistsAsync(connection, "workflow", $"transaction_{workflowSuffix}", cancellationToken))
         {
             return new WorkflowTicketSearchOutcome(
@@ -168,13 +167,14 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 EmptyResult(page, pageSize, tableExists: false, request.GroupBy));
         }
 
+        await EnsureTryCastFunctionsAsync(connection, cancellationToken);
+
         var offset = (page - 1) * pageSize;
         var ezfbColumns = await LoadTableColumnsAsync(connection, ezfbTable, cancellationToken);
-        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
-        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+        var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
 
-        var ezfbWhereParts = new List<string> { "(e.isDeleted = 0 OR e.isDeleted IS NULL)" };
-        var filterParameters = new List<SqlParameter>();
+        var ezfbWhereParts = new List<string> { "(e.item_id IS NOT NULL)", "(e.is_deleted = false OR e.is_deleted IS NULL)" };
+        var filterParameters = new List<NpgsqlParameter>();
         var filters = request.FilterBy ?? Array.Empty<WorkflowTicketSearchFilter>();
         var index = 0;
         foreach (var filter in filters)
@@ -202,27 +202,30 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var matchedInstancesCte = filters.Count == 0
             ? $"""
                 matched AS (
-                    SELECT DISTINCT pf.WorkflowInstanceId
+                    SELECT DISTINCT pf.workflow_instance_id AS "WorkflowInstanceId"
                     FROM {processFormTable} pf
-                    WHERE pf.IsDeleted = 0
+                    WHERE pf.is_deleted = false
                 )
                 """
             : $"""
                 matched AS (
-                    SELECT DISTINCT pf.WorkflowInstanceId
+                    SELECT DISTINCT pf.workflow_instance_id AS "WorkflowInstanceId"
                     FROM {processFormTable} pf
-                    INNER JOIN dbo.[{ezfbTable}] e ON e.itemId = pf.FormEntryId
-                    WHERE pf.IsDeleted = 0
+                    INNER JOIN dbo."{ezfbTable}" e ON e.item_id = pf.form_entry_id
+                    WHERE pf.is_deleted = false
                       AND {ezfbWhereSql}
                 )
                 """;
 
         var sortColumn = MapSortColumn(request.SortBy?.Criteria);
         var sortOrder = string.Equals(request.SortBy?.Order, "ASC", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
-        var hasCompletedAt = await ColumnExistsAsync(connection, "workflow", $"WorkflowInstances_{workflowSuffix}", "CompletedAtUtc", cancellationToken);
-        var hasModifiedBy = await ColumnExistsAsync(connection, "workflow", $"transaction_{workflowSuffix}", "ModifiedBy", cancellationToken);
-        var completedAtSelect = hasCompletedAt ? "wi.CompletedAtUtc" : "CAST(NULL AS datetime2)";
-        var modifiedBySelect = hasModifiedBy ? "t.ModifiedBy" : "CAST(NULL AS uniqueidentifier)";
+        // Every column below is unconditionally present in WorkflowTableCreator.cs's fixed
+        // schema (no SQL-Server-era legacy-drift variance possible on a fresh Postgres tenant
+        // DB), so the existence checks always resolve true; kept for defensive parity.
+        var hasCompletedAt = await ColumnExistsAsync(connection, "workflow", $"workflow_instances_{workflowSuffix}", "completed_at_utc", cancellationToken);
+        var hasModifiedBy = await ColumnExistsAsync(connection, "workflow", $"transaction_{workflowSuffix}", "modified_by", cancellationToken);
+        var completedAtSelect = hasCompletedAt ? "wi.completed_at_utc" : "CAST(NULL AS timestamptz)";
+        var modifiedBySelect = hasModifiedBy ? "t.modified_by" : "CAST(NULL AS uuid)";
 
         var countSql = $"""
             WITH {matchedInstancesCte}
@@ -230,9 +233,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             """;
 
         int totalItems;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
-            countCmd.Parameters.AddRange(CloneParameters(filterParameters));
+            foreach (var p in CloneParameters(filterParameters))
+                countCmd.Parameters.Add(p);
             totalItems = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         }
 
@@ -245,31 +249,31 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             WITH {matchedInstancesCte},
             ranked AS (
                 SELECT
-                    t.Id AS TransactionId,
-                    t.WorkflowInstanceId,
-                    wi.ReferenceNumber,
-                    wi.StartedAtUtc AS InstanceStartedAtUtc,
-                    {completedAtSelect} AS CompletedAtUtc,
-                    wi.StartedBy AS RaisedByUserId,
-                    t.ActivityId,
-                    t.RuleId,
-                    t.StageType,
-                    t.StageName,
-                    t.Review,
-                    t.CreatedAt AS TransactionCreatedAt,
-                    t.CreatedBy AS TransactionCreatedBy,
-                    t.ModifiedAt AS TransactionModifiedAt,
-                    {modifiedBySelect} AS TransactionModifiedBy,
-                    t.ActivityUserId,
-                    t.ActivityGroupId,
+                    t.id AS "TransactionId",
+                    t.workflow_instance_id AS "WorkflowInstanceId",
+                    wi.reference_number AS "ReferenceNumber",
+                    wi.started_at_utc AS "InstanceStartedAtUtc",
+                    {completedAtSelect} AS "CompletedAtUtc",
+                    wi.started_by AS "RaisedByUserId",
+                    t.activity_id AS "ActivityId",
+                    t.rule_id AS "RuleId",
+                    t.stage_type AS "StageType",
+                    t.stage_name AS "StageName",
+                    t.review AS "Review",
+                    t.created_at AS "TransactionCreatedAt",
+                    t.created_by AS "TransactionCreatedBy",
+                    t.modified_at AS "TransactionModifiedAt",
+                    {modifiedBySelect} AS "TransactionModifiedBy",
+                    t.activity_user_id AS "ActivityUserId",
+                    t.activity_group_id AS "ActivityGroupId",
                     ROW_NUMBER() OVER (
-                        PARTITION BY t.WorkflowInstanceId
-                        ORDER BY t.CreatedAt DESC, t.Id DESC
+                        PARTITION BY t.workflow_instance_id
+                        ORDER BY t.created_at DESC, t.id DESC
                     ) AS rn
                 FROM {transactionTable} t
-                INNER JOIN {instancesTable} wi ON wi.Id = t.WorkflowInstanceId
-                INNER JOIN matched m ON m.WorkflowInstanceId = t.WorkflowInstanceId
-                WHERE t.IsDeleted = 0
+                INNER JOIN {instancesTable} wi ON wi.id = t.workflow_instance_id
+                INNER JOIN matched m ON m."WorkflowInstanceId" = t.workflow_instance_id
+                WHERE t.is_deleted = false
             )
             SELECT *
             FROM ranked
@@ -279,9 +283,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             """;
 
         var pagedRows = new List<TicketSearchRow>();
-        await using (var dataCmd = new SqlCommand(dataSql, connection))
+        await using (var dataCmd = new NpgsqlCommand(dataSql, connection))
         {
-            dataCmd.Parameters.AddRange(CloneParameters(filterParameters));
+            foreach (var p in CloneParameters(filterParameters))
+                dataCmd.Parameters.Add(p);
             dataCmd.Parameters.AddWithValue("@Offset", Math.Max(offset, 0));
             dataCmd.Parameters.AddWithValue("@PageSize", pageSize);
             await using var reader = await dataCmd.ExecuteReaderAsync(cancellationToken);
@@ -380,6 +385,35 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         return new WorkflowTicketSearchOutcome(
             WorkflowTicketSearchStatus.Found,
             ToGroupedResult(items, totalItems, page, pageSize, request.GroupBy, tableExists: true, controls, ezfbColumns));
+    }
+
+    /// <summary>
+    /// Postgres has no TRY_CONVERT -- these two small wrapper functions are the direct
+    /// equivalent (catch the cast exception, return NULL), used for filtering/sorting ezfb
+    /// custom columns (always stored as text) as a date or number when the value happens to
+    /// parse as one. Idempotent CREATE OR REPLACE, cheap to call every search.
+    /// </summary>
+    private static async Task EnsureTryCastFunctionsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            CREATE OR REPLACE FUNCTION dbo.try_cast_timestamp(p_text text) RETURNS timestamptz AS $body$
+            BEGIN
+                RETURN p_text::timestamptz;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NULL;
+            END;
+            $body$ LANGUAGE plpgsql IMMUTABLE;
+
+            CREATE OR REPLACE FUNCTION dbo.try_cast_numeric(p_text text) RETURNS numeric AS $body$
+            BEGIN
+                RETURN p_text::numeric;
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NULL;
+            END;
+            $body$ LANGUAGE plpgsql IMMUTABLE;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static WorkflowFilterSearchResult EmptyResult(
@@ -600,12 +634,12 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     private sealed record WorkflowMeta(string? FormId, string? Name);
 
     private static async Task<WorkflowMeta> LoadWorkflowMetaAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowId,
         CancellationToken cancellationToken)
     {
-        const string sql = "SELECT FormId, Name FROM workflow.Workflows WHERE Id = @Id AND IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+        const string sql = """SELECT "FormId", "Name" FROM workflow."Workflows" WHERE "Id" = @Id AND "IsDeleted" = false;""";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", workflowId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -617,7 +651,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     }
 
     private static async Task<bool> ColumnExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string schema,
         string tableName,
         string columnName,
@@ -625,10 +659,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     {
         const string sql = """
             SELECT COUNT(1)
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @TableName AND COLUMN_NAME = @ColumnName
+            FROM information_schema.columns
+            WHERE table_schema = @Schema AND table_name = @TableName AND column_name = @ColumnName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Schema", schema);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         cmd.Parameters.AddWithValue("@ColumnName", columnName);
@@ -636,57 +670,57 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     }
 
     private static async Task<bool> WorkflowExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowId,
         CancellationToken cancellationToken)
     {
-        const string sql = "SELECT COUNT(1) FROM workflow.Workflows WHERE Id = @Id AND IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+        const string sql = """SELECT COUNT(1) FROM workflow."Workflows" WHERE "Id" = @Id AND "IsDeleted" = false;""";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", workflowId);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
     }
 
     private static async Task<string?> LoadWorkflowFormIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowId,
         CancellationToken cancellationToken)
     {
-        const string sql = "SELECT FormId FROM workflow.Workflows WHERE Id = @Id AND IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+        const string sql = """SELECT "FormId" FROM workflow."Workflows" WHERE "Id" = @Id AND "IsDeleted" = false;""";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", workflowId);
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
         return value == null || value == DBNull.Value ? null : Convert.ToString(value)?.Trim();
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string schema,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT COUNT(1)
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @TableName
+            FROM information_schema.tables
+            WHERE table_schema = @Schema AND table_name = @TableName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Schema", schema);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
     }
 
     private static async Task<HashSet<string>> LoadTableColumnsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = @TableName
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'dbo' AND table_name = @TableName
             """;
         var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -697,21 +731,21 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     private sealed record FormControlRow(string JsonId, string? Name, string? Type);
 
     private static async Task<List<FormControlRow>> LoadFormControlsAsync(
-        SqlConnection connection,
-        object wFormIdValue,
+        NpgsqlConnection connection,
+        string formId,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT jsonId, name, [type]
-            FROM dbo.wFormControl
-            WHERE wFormId = @FormId
-              AND isDeleted = 0
-              AND jsonId IS NOT NULL
-              AND LTRIM(RTRIM(jsonId)) <> ''
+            SELECT "jsonId", name, type
+            FROM dbo."wFormControl"
+            WHERE "wFormId" = @FormId
+              AND "isDeleted" = false
+              AND "jsonId" IS NOT NULL
+              AND TRIM("jsonId") <> ''
             """;
         var rows = new List<FormControlRow>();
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@FormId", formId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -722,32 +756,6 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         }
 
         return rows;
-    }
-
-    private static async Task<object> ResolveWFormIdParameterAsync(
-        SqlConnection connection,
-        string formId,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'wFormControl' AND COLUMN_NAME = N'wFormId'
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        var type = (await cmd.ExecuteScalarAsync(cancellationToken))?.ToString()?.ToLowerInvariant();
-        if (type is "int" or "bigint" or "smallint" or "tinyint")
-        {
-            if (int.TryParse(formId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                return n;
-            var hex = new string(formId.Where(Uri.IsHexDigit).ToArray());
-            if (hex.Length > 8)
-                hex = hex[..8];
-            if (uint.TryParse(hex.PadLeft(8, '0'), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var u))
-                return unchecked((int)u);
-        }
-
-        return formId;
     }
 
     private static bool TryResolveColumn(
@@ -825,14 +833,17 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         string? dataType,
         int index,
         out string sql,
-        out List<SqlParameter> parameters,
+        out List<NpgsqlParameter> parameters,
         string tableAlias = "")
     {
         sql = string.Empty;
-        parameters = new List<SqlParameter>();
+        parameters = new List<NpgsqlParameter>();
         var escaped = EscapeColumn(column);
         var prefix = string.IsNullOrEmpty(tableAlias) ? string.Empty : $"{tableAlias}.";
-        var columnExpr = $"{prefix}[{escaped}]";
+        // ezfb columns are always the item_id system column or a custom (quoted, original-case)
+        // field column -- item_id itself is never filterable via this path (it's not exposed as
+        // a form control), so every column reaching here is a custom column.
+        var columnExpr = $"{prefix}\"{escaped}\"";
         var cond = (condition ?? string.Empty).Trim().ToLowerInvariant();
         var paramBase = $"@p{index}";
         var typeHint = (dataType ?? string.Empty).Trim().ToLowerInvariant();
@@ -848,23 +859,23 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         {
             case "eq" or "=" or "equal":
                 sql = $"{columnExpr} = {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, scalar ?? string.Empty));
+                parameters.Add(new NpgsqlParameter(paramBase, scalar ?? string.Empty));
                 return true;
             case "neq" or "!=" or "notequal":
                 sql = $"{columnExpr} <> {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, scalar ?? string.Empty));
+                parameters.Add(new NpgsqlParameter(paramBase, scalar ?? string.Empty));
                 return true;
             case "contains" or "like":
                 sql = $"{columnExpr} LIKE {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, $"%{scalar ?? string.Empty}%"));
+                parameters.Add(new NpgsqlParameter(paramBase, $"%{scalar ?? string.Empty}%"));
                 return true;
             case "startswith":
                 sql = $"{columnExpr} LIKE {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, $"{scalar ?? string.Empty}%"));
+                parameters.Add(new NpgsqlParameter(paramBase, $"{scalar ?? string.Empty}%"));
                 return true;
             case "endswith":
                 sql = $"{columnExpr} LIKE {paramBase}";
-                parameters.Add(new SqlParameter(paramBase, $"%{scalar ?? string.Empty}"));
+                parameters.Add(new NpgsqlParameter(paramBase, $"%{scalar ?? string.Empty}"));
                 return true;
             case "gt":
                 return BuildComparison(columnExpr, ">", paramBase, scalar, out sql, out parameters);
@@ -886,7 +897,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 {
                     var name = $"{paramBase}_{i}";
                     names.Add(name);
-                    parameters.Add(new SqlParameter(name, values[i]));
+                    parameters.Add(new NpgsqlParameter(name, values[i]));
                 }
                 sql = $"{columnExpr} IN ({string.Join(", ", names)})";
                 return true;
@@ -932,9 +943,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         string? valueTo,
         string typeHint,
         out string sql,
-        out List<SqlParameter> parameters)
+        out List<NpgsqlParameter> parameters)
     {
-        parameters = new List<SqlParameter>();
+        parameters = new List<NpgsqlParameter>();
         if (string.IsNullOrWhiteSpace(valueFrom) || string.IsNullOrWhiteSpace(valueTo))
             throw new ArgumentException("Filter condition 'between' requires value and valueTo.");
 
@@ -948,29 +959,29 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             && DateTime.TryParse(valueFrom, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var fromDt)
             && DateTime.TryParse(valueTo, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var toDt))
         {
-            sql = $"TRY_CONVERT(datetime2, {columnExpr}) >= {fromName} AND TRY_CONVERT(datetime2, {columnExpr}) <= {toName}";
-            parameters.Add(new SqlParameter(fromName, fromDt));
-            parameters.Add(new SqlParameter(toName, toDt));
+            sql = $"dbo.try_cast_timestamp({columnExpr}) >= {fromName} AND dbo.try_cast_timestamp({columnExpr}) <= {toName}";
+            parameters.Add(new NpgsqlParameter(fromName, fromDt));
+            parameters.Add(new NpgsqlParameter(toName, toDt));
             return true;
         }
 
         if (decimal.TryParse(valueFrom, NumberStyles.Any, CultureInfo.InvariantCulture, out var fromNum)
             && decimal.TryParse(valueTo, NumberStyles.Any, CultureInfo.InvariantCulture, out var toNum))
         {
-            sql = $"TRY_CONVERT(float, {columnExpr}) >= {fromName} AND TRY_CONVERT(float, {columnExpr}) <= {toName}";
-            parameters.Add(new SqlParameter(fromName, fromNum));
-            parameters.Add(new SqlParameter(toName, toNum));
+            sql = $"dbo.try_cast_numeric({columnExpr}) >= {fromName} AND dbo.try_cast_numeric({columnExpr}) <= {toName}";
+            parameters.Add(new NpgsqlParameter(fromName, fromNum));
+            parameters.Add(new NpgsqlParameter(toName, toNum));
             return true;
         }
 
         sql = $"{columnExpr} >= {fromName} AND {columnExpr} <= {toName}";
-        parameters.Add(new SqlParameter(fromName, valueFrom));
-        parameters.Add(new SqlParameter(toName, valueTo));
+        parameters.Add(new NpgsqlParameter(fromName, valueFrom));
+        parameters.Add(new NpgsqlParameter(toName, valueTo));
         return true;
     }
 
-    private static SqlParameter[] CloneParameters(IEnumerable<SqlParameter> source) =>
-        source.Select(p => new SqlParameter(p.ParameterName, p.Value ?? DBNull.Value)).ToArray();
+    private static NpgsqlParameter[] CloneParameters(IEnumerable<NpgsqlParameter> source) =>
+        source.Select(p => new NpgsqlParameter(p.ParameterName, p.Value ?? DBNull.Value)).ToArray();
 
     private sealed record TicketSearchRow(
         int TransactionId,
@@ -1002,7 +1013,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
     private sealed record AgentValidationResult(string? WorkflowId, string? AgentResponse, string? AgentHtml);
 
-    private static TicketSearchRow ReadSearchRow(SqlDataReader reader) =>
+    private static TicketSearchRow ReadSearchRow(NpgsqlDataReader reader) =>
         new(
             TransactionId: reader.GetInt32(reader.GetOrdinal("TransactionId")),
             WorkflowInstanceId: reader.GetGuid(reader.GetOrdinal("WorkflowInstanceId")),
@@ -1028,26 +1039,26 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         string paramName,
         string? value,
         out string sql,
-        out List<SqlParameter> parameters)
+        out List<NpgsqlParameter> parameters)
     {
-        parameters = new List<SqlParameter>();
+        parameters = new List<NpgsqlParameter>();
         if (DateTime.TryParse(value, CultureInfo.InvariantCulture, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out var dt)
             && !decimal.TryParse(value, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
         {
-            sql = $"TRY_CONVERT(datetime2, {columnExpr}) {op} {paramName}";
-            parameters.Add(new SqlParameter(paramName, dt));
+            sql = $"dbo.try_cast_timestamp({columnExpr}) {op} {paramName}";
+            parameters.Add(new NpgsqlParameter(paramName, dt));
             return true;
         }
 
         if (decimal.TryParse(value, NumberStyles.Any, CultureInfo.InvariantCulture, out var d))
         {
-            sql = $"TRY_CONVERT(float, {columnExpr}) {op} {paramName}";
-            parameters.Add(new SqlParameter(paramName, d));
+            sql = $"dbo.try_cast_numeric({columnExpr}) {op} {paramName}";
+            parameters.Add(new NpgsqlParameter(paramName, d));
             return true;
         }
 
         sql = $"{columnExpr} {op} {paramName}";
-        parameters.Add(new SqlParameter(paramName, value ?? string.Empty));
+        parameters.Add(new NpgsqlParameter(paramName, value ?? string.Empty));
         return true;
     }
 
@@ -1084,17 +1095,17 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var c = (criteria ?? "raisedAt").Trim().ToLowerInvariant();
         return c switch
         {
-            "requestno" or "referencenumber" => "ReferenceNumber",
-            "stagename" => "StageName",
-            "activityid" => "ActivityId",
-            "transactioncreatedat" or "createdat" => "TransactionCreatedAt",
-            "transactionmodifiedat" or "modifiedat" => "TransactionModifiedAt",
-            "raisedat" or "startedat" or _ => "InstanceStartedAtUtc"
+            "requestno" or "referencenumber" => "\"ReferenceNumber\"",
+            "stagename" => "\"StageName\"",
+            "activityid" => "\"ActivityId\"",
+            "transactioncreatedat" or "createdat" => "\"TransactionCreatedAt\"",
+            "transactionmodifiedat" or "modifiedat" => "\"TransactionModifiedAt\"",
+            "raisedat" or "startedat" or _ => "\"InstanceStartedAtUtc\""
         };
     }
 
     private async Task<FormIdentityResult> TryGetFormIdentityAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowFormsTable,
         string processFormTable,
         string workflowAttachmentsTable,
@@ -1105,16 +1116,17 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         int? formEntryId = null;
         string? formGuid = null;
 
-        // Prefer processForm (same FormEntryId path as ezfb filter join).
+        // Prefer process_form (same FormEntryId path as ezfb filter join).
         try
         {
             var processSql = $"""
-                SELECT TOP 1 WFormId, FormEntryId
+                SELECT w_form_id, form_entry_id
                 FROM {processFormTable}
-                WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-                ORDER BY Id DESC;
+                WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+                ORDER BY id DESC
+                LIMIT 1;
                 """;
-            await using var cmd = new SqlCommand(processSql, connection);
+            await using var cmd = new NpgsqlCommand(processSql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -1128,7 +1140,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 }
             }
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
         }
 
@@ -1137,12 +1149,13 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             try
             {
                 var formsSql = $"""
-                    SELECT TOP 1 FormEntryId
+                    SELECT form_entry_id
                     FROM {workflowFormsTable}
-                    WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-                    ORDER BY CreatedAtUtc DESC;
+                    WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+                    ORDER BY created_at_utc DESC
+                    LIMIT 1;
                     """;
-                await using var cmd = new SqlCommand(formsSql, connection);
+                await using var cmd = new NpgsqlCommand(formsSql, connection);
                 cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
@@ -1152,7 +1165,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                         formEntryId = entryId;
                 }
             }
-            catch (SqlException)
+            catch (PostgresException)
             {
             }
         }
@@ -1162,17 +1175,18 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             try
             {
                 var attachmentSql = $"""
-                    SELECT TOP 1 FormJsonId
+                    SELECT form_json_id
                     FROM {workflowAttachmentsTable}
-                    WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-                    ORDER BY ISNULL(ModifiedAtUtc, CreatedAtUtc) DESC, CreatedAtUtc DESC;
+                    WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+                    ORDER BY COALESCE(modified_at_utc, created_at_utc) DESC, created_at_utc DESC
+                    LIMIT 1;
                     """;
-                await using var cmd = new SqlCommand(attachmentSql, connection);
+                await using var cmd = new NpgsqlCommand(attachmentSql, connection);
                 cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
                 var value = await cmd.ExecuteScalarAsync(cancellationToken);
                 formGuid = value == null || value == DBNull.Value ? null : Convert.ToString(value)?.Trim();
             }
-            catch (SqlException)
+            catch (PostgresException)
             {
             }
         }
@@ -1195,15 +1209,15 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     }
 
     private static async Task<RepoIds> TryGetRepositoryDataAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowAttachmentsTable,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
         try
         {
-            var sql = $"SELECT TOP 1 RepositoryId, ItemId FROM {workflowAttachmentsTable} WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0 ORDER BY CreatedAtUtc DESC;";
-            await using var cmd = new SqlCommand(sql, connection);
+            var sql = $"SELECT repository_id, item_id FROM {workflowAttachmentsTable} WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false ORDER BY created_at_utc DESC LIMIT 1;";
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -1213,7 +1227,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                     reader.IsDBNull(1) ? null : reader.GetGuid(1));
             }
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
         }
 
@@ -1221,26 +1235,26 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     }
 
     private static async Task<int?> TryGetCommentsCountAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowCommentsTable,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
         try
         {
-            var sql = $"SELECT COUNT(1) FROM {workflowCommentsTable} WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0;";
-            await using var cmd = new SqlCommand(sql, connection);
+            var sql = $"SELECT COUNT(1) FROM {workflowCommentsTable} WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false;";
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
             return null;
         }
     }
 
     private static async Task<AgentValidationResult> TryGetAgentValidationAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string agentDataValidationTable,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
@@ -1248,13 +1262,14 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         try
         {
             var sql = $"""
-                SELECT TOP 1 WorkflowId, AgentResponse, AgentHtmlResponse
+                SELECT workflow_id, agent_response, agent_html_response
                 FROM {agentDataValidationTable}
-                WHERE IsDeleted = 0
-                  AND ProcessId = @ProcessId
-                ORDER BY CreatedAt DESC, Id DESC;
+                WHERE is_deleted = false
+                  AND process_id = @ProcessId
+                ORDER BY created_at DESC, id DESC
+                LIMIT 1;
                 """;
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@ProcessId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -1265,14 +1280,14 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                     reader.IsDBNull(2) ? null : reader.GetString(2));
             }
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
         }
 
         return new AgentValidationResult(null, null, null);
     }
 
-    private static string EscapeColumn(string column) => column.Replace("]", "]]", StringComparison.Ordinal);
+    private static string EscapeColumn(string column) => column.Replace("\"", "\"\"", StringComparison.Ordinal);
 
     private static string InferDataType(string? controlType)
     {

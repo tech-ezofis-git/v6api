@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Services;
@@ -107,18 +107,19 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
         var suffix = workflowId.ToString("N")[..8];
-        var table = $"workflow.[WorkflowAttachments_{suffix}]";
+        var table = $"workflow.workflow_attachments_{suffix}";
 
         var sql = $"""
-            SELECT TOP 1 Id
+            SELECT id
             FROM {table}
-            WHERE WorkflowInstanceId = @InstanceId AND ItemId = @ItemId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC;
+            WHERE workflow_instance_id = @InstanceId AND item_id = @ItemId AND is_deleted = false
+            ORDER BY created_at_utc DESC
+            LIMIT 1;
             """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);

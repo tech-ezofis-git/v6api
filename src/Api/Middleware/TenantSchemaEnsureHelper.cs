@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.Api.Middleware;
 
@@ -21,7 +21,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "workflow",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'Workflows' AND schema_id = SCHEMA_ID(N'workflow')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'Workflows' AND table_schema = 'workflow'",
             applySchema,
             cancellationToken);
 
@@ -34,7 +34,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "dms",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'Repository' AND schema_id = SCHEMA_ID(N'dms')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'Repository' AND table_schema = 'dms'",
             applySchema,
             cancellationToken);
 
@@ -47,7 +47,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "repository",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'Repositories' AND schema_id = SCHEMA_ID(N'repository')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'Repositories' AND table_schema = 'repository'",
             applySchema,
             cancellationToken);
 
@@ -60,7 +60,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "activitylog",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'ApiAccessLogs' AND schema_id = SCHEMA_ID(N'activitylog')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'ApiAccessLogs' AND table_schema = 'activitylog'",
             applySchema,
             cancellationToken);
 
@@ -73,7 +73,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "activitylog-eventlogs",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'EventLogs' AND schema_id = SCHEMA_ID(N'activitylog')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'EventLogs' AND table_schema = 'activitylog'",
             applySchema,
             cancellationToken);
 
@@ -86,7 +86,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "users-permission-categories",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'PermissionCategories' AND schema_id = SCHEMA_ID(N'users')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'PermissionCategories' AND table_schema = 'users'",
             applySchema,
             cancellationToken);
 
@@ -99,7 +99,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "users-menus",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'Menus' AND schema_id = SCHEMA_ID(N'users')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'Menus' AND table_schema = 'users'",
             applySchema,
             cancellationToken);
 
@@ -112,7 +112,7 @@ internal static class TenantSchemaEnsureHelper
             tenantId,
             "users-role-menus",
             connectionString,
-            "SELECT 1 FROM sys.tables WHERE name = N'RoleMenus' AND schema_id = SCHEMA_ID(N'users')",
+            "SELECT 1 FROM information_schema.tables WHERE table_name = 'RoleMenus' AND table_schema = 'users'",
             applySchema,
             cancellationToken);
 
@@ -127,14 +127,14 @@ internal static class TenantSchemaEnsureHelper
             connectionString,
             """
             SELECT 1
-            WHERE COL_LENGTH('users.Users', 'PasswordExpiryDays') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'AccountExpiryDate') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'ForcePasswordResetOnLogin') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'EmployeeId') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'BusinessUnit') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'Location') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'GroupName') IS NOT NULL
-              AND COL_LENGTH('users.Users', 'MfaMethods') IS NOT NULL
+            WHERE EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'PasswordExpiryDays')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'AccountExpiryDate')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'ForcePasswordResetOnLogin')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'EmployeeId')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'BusinessUnit')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'Location')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'GroupName')
+              AND EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'users' AND table_name = 'Users' AND column_name = 'MfaMethods')
             """,
             applySchema,
             cancellationToken);
@@ -154,8 +154,8 @@ internal static class TenantSchemaEnsureHelper
             connectionString,
             """
             SELECT 1
-            FROM [users].[Roles]
-            WHERE [Name] = N'Admin' AND [IsDeleted] = 0
+            FROM users."Roles"
+            WHERE "Name" = 'Admin' AND "IsDeleted" = false
             """,
             applySchema,
             cancellationToken);
@@ -205,9 +205,9 @@ internal static class TenantSchemaEnsureHelper
         string existsSql,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(existsSql, connection) { CommandTimeout = 5 };
+        await using var cmd = new NpgsqlCommand(existsSql, connection) { CommandTimeout = 5 };
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result != null && result != DBNull.Value;
     }

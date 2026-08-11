@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
@@ -30,19 +30,19 @@ public sealed class WorkflowProcessAddonService : IWorkflowProcessAddonService
         await _tableCreator.CreateWorkflowTablesAsync(workflowId, connectionString, cancellationToken);
 
         var suffix = workflowId.ToString("N")[..8];
-        var table = $"workflow.[processAddon_{suffix}]";
+        var table = $"workflow.process_addon_{suffix}";
 
         var sql = $"""
             INSERT INTO {table}
-                (ProcessId, RepositoryId, ItemId, FileName, TransactionId, CreatedAt, CreatedBy, IsDeleted)
-            OUTPUT INSERTED.Id
+                (process_id, repository_id, item_id, file_name, transaction_id, created_at, created_by, is_deleted)
             VALUES
-                (@ProcessId, @RepositoryId, @ItemId, @FileName, @TransactionId, SYSUTCDATETIME(), @CreatedBy, 0);
+                (@ProcessId, @RepositoryId, @ItemId, @FileName, @TransactionId, now(), @CreatedBy, false)
+            RETURNING id;
             """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ProcessId", processId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
@@ -61,22 +61,22 @@ public sealed class WorkflowProcessAddonService : IWorkflowProcessAddonService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
         var suffix = workflowId.ToString("N")[..8];
-        var table = $"processAddon_{suffix}";
+        var table = $"process_addon_{suffix}";
 
         if (!await TableExistsAsync(connectionString, table, cancellationToken))
             return Array.Empty<WorkflowProcessAddonRow>();
 
         var sql = $"""
-            SELECT Id, ProcessId, RepositoryId, ItemId, FileName, TransactionId, CreatedAt, CreatedBy
-            FROM workflow.[{table}]
-            WHERE ProcessId = @ProcessId AND IsDeleted = 0
-            ORDER BY CreatedAt DESC, Id DESC;
+            SELECT id, process_id, repository_id, item_id, file_name, transaction_id, created_at, created_by
+            FROM workflow.{table}
+            WHERE process_id = @ProcessId AND is_deleted = false
+            ORDER BY created_at DESC, id DESC;
             """;
 
         var rows = new List<WorkflowProcessAddonRow>();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ProcessId", processId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -102,13 +102,12 @@ public sealed class WorkflowProcessAddonService : IWorkflowProcessAddonService
     {
         const string sql = """
             SELECT 1
-            FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'workflow' AND t.name = @TableName;
+            FROM information_schema.tables
+            WHERE table_schema = 'workflow' AND table_name = @TableName;
             """;
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         return await cmd.ExecuteScalarAsync(cancellationToken) != null;
     }

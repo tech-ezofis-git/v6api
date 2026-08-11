@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
@@ -8,7 +8,7 @@ namespace SaaSApp.Catalog;
 
 public sealed class UserTenantRegistry : IUserTenantRegistry
 {
-    private const int SqlErrorInvalidObjectName = 208;
+    private const string SqlErrorInvalidObjectName = PostgresErrorCodes.UndefinedTable;
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -69,7 +69,7 @@ public sealed class UserTenantRegistry : IUserTenantRegistry
             });
             await context.SaveChangesAsync(cancellationToken);
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == SqlErrorInvalidObjectName)
         {
             // catalog.UserTenants table not created yet; run migration or scripts/AddUserTenantsPreQuestionsJson.sql
         }
@@ -93,7 +93,7 @@ public sealed class UserTenantRegistry : IUserTenantRegistry
                 tenantId,
                 DeserializeQuestions(row.PreQuestionsJson));
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == SqlErrorInvalidObjectName)
         {
             return null;
         }
@@ -151,7 +151,7 @@ public sealed class UserTenantRegistry : IUserTenantRegistry
             await context.SaveChangesAsync(cancellationToken);
             return true;
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == SqlErrorInvalidObjectName)
         {
             return false;
         }

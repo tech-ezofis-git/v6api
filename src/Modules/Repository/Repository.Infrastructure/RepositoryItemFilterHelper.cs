@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -39,7 +39,9 @@ internal static class RepositoryItemFilterHelper
 
         foreach (var col in BuiltInOperationalColumns)
         {
-            if (tableColumns is null || tableColumns.Contains(col))
+            // tableColumns holds physical names (snake_case for reserved) -- normalize before
+            // checking membership, same reasoning as RepositoryItemTableColumns.Has.
+            if (tableColumns is null || tableColumns.Contains(RepositorySqlHelper.ToPhysicalName(col)))
                 set.Add(col);
         }
 
@@ -124,11 +126,11 @@ internal static class RepositoryItemFilterHelper
                     }
                     catch (JsonException)
                     {
-                        // fall through — treat as a single literal value
+                        // fall through -- treat as a single literal value
                     }
                 }
 
-                // Do NOT split on commas — supplier names often contain commas ("Acme, Inc.").
+                // Do NOT split on commas -- supplier names often contain commas ("Acme, Inc.").
                 values.Add(raw);
                 break;
 
@@ -198,7 +200,7 @@ internal static class RepositoryItemFilterHelper
 
     public static void ApplyEqualityFilters(
         ICollection<string> where,
-        IList<SqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         IReadOnlyDictionary<string, string> filters,
         HashSet<string> allowedColumns,
         RepositoryDetailDto repo,
@@ -213,7 +215,7 @@ internal static class RepositoryItemFilterHelper
 
     public static void ApplyEqualityFilters(
         ICollection<string> where,
-        IList<SqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         IReadOnlyDictionary<string, IReadOnlyList<string>> filters,
         HashSet<string> allowedColumns,
         RepositoryDetailDto repo,
@@ -223,6 +225,7 @@ internal static class RepositoryItemFilterHelper
         foreach (var (key, values) in filters)
         {
             var col = ResolveFilterColumn(key, allowedColumns, repo);
+            var colRef = RepositorySqlHelper.ColumnRef(col);
             var prefix = string.IsNullOrEmpty(tableAlias) ? string.Empty : $"{tableAlias}.";
             var cleaned = values
                 .Where(v => !string.IsNullOrWhiteSpace(v))
@@ -236,8 +239,8 @@ internal static class RepositoryItemFilterHelper
             {
                 var param = $"@F{index++}";
                 // Trim DB side so trailing spaces do not hide matches.
-                where.Add($"LTRIM(RTRIM(CAST({prefix}[{col}] AS NVARCHAR(4000)))) = {param}");
-                parameters.Add(new SqlParameter(param, cleaned[0]));
+                where.Add($"TRIM(CAST({prefix}{colRef} AS varchar(4000))) = {param}");
+                parameters.Add(new NpgsqlParameter(param, cleaned[0]));
                 continue;
             }
 
@@ -246,11 +249,11 @@ internal static class RepositoryItemFilterHelper
             {
                 var param = $"@F{index++}";
                 paramNames.Add(param);
-                parameters.Add(new SqlParameter(param, value));
+                parameters.Add(new NpgsqlParameter(param, value));
             }
 
             where.Add(
-                $"LTRIM(RTRIM(CAST({prefix}[{col}] AS NVARCHAR(4000)))) IN ({string.Join(", ", paramNames)})");
+                $"TRIM(CAST({prefix}{colRef} AS varchar(4000))) IN ({string.Join(", ", paramNames)})");
         }
     }
 
@@ -293,7 +296,7 @@ internal static class RepositoryItemFilterHelper
     /// </summary>
     public static void ApplyDisplayStatusFilter(
         ICollection<string> where,
-        IList<SqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         IReadOnlyList<string> statusValues,
         IReadOnlyList<Guid> matchingWorkflowInstanceIds,
         HashSet<string> tableColumns,
@@ -313,7 +316,7 @@ internal static class RepositoryItemFilterHelper
         {
             var param = $"@StatusF{i}";
             paramNames.Add(param);
-            parameters.Add(new SqlParameter(param, cleaned[i]));
+            parameters.Add(new NpgsqlParameter(param, cleaned[i]));
         }
 
         var inList = string.Join(", ", paramNames);
@@ -323,17 +326,14 @@ internal static class RepositoryItemFilterHelper
         {
             if (!RepositoryItemTableColumns.Has(tableColumns, col))
                 continue;
-            orParts.Add($"LTRIM(RTRIM(CAST({prefix}[{col}] AS NVARCHAR(4000)))) IN ({inList})");
+            orParts.Add($"TRIM(CAST({prefix}{RepositorySqlHelper.ColumnRef(col)} AS varchar(4000))) IN ({inList})");
         }
 
         if (matchingWorkflowInstanceIds.Count > 0
             && RepositoryItemTableColumns.Has(tableColumns, "WorkflowInstanceId"))
         {
-            orParts.Add(
-                $"{prefix}[WorkflowInstanceId] IN (SELECT CAST([value] AS uniqueidentifier) FROM OPENJSON(@StatusWfIds))");
-            parameters.Add(new SqlParameter(
-                "@StatusWfIds",
-                "[" + string.Join(",", matchingWorkflowInstanceIds.Select(id => $"\"{id:D}\"")) + "]"));
+            orParts.Add($"{prefix}workflow_instance_id = ANY(@StatusWfIds)");
+            parameters.Add(new NpgsqlParameter("@StatusWfIds", matchingWorkflowInstanceIds.ToArray()));
         }
 
         if (orParts.Count == 0)
@@ -350,7 +350,7 @@ internal static class RepositoryItemFilterHelper
         {
             if (!allowedColumns.Contains(col))
                 continue;
-            if (tableColumns != null && !tableColumns.Contains(col))
+            if (tableColumns != null && !tableColumns.Contains(RepositorySqlHelper.ToPhysicalName(col)))
                 continue;
 
             return col;

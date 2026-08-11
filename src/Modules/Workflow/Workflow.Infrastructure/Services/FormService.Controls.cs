@@ -1,5 +1,5 @@
 using System.Globalization;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Forms;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
@@ -15,7 +15,7 @@ public sealed partial class FormService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await TableExistsAsync(connection, "wFormControl", cancellationToken))
@@ -24,16 +24,13 @@ public sealed partial class FormService
         if (!await FormExistsAsync(connection, normalizedFormId, cancellationToken))
             return null;
 
-        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
-        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
-        if (controls.Count == 0 && !Equals(wFormIdValue, normalizedFormId))
-            controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
+        var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
 
         return new FormControlsResult(normalizedFormId, controls.Count, controls);
     }
 
     private static async Task<bool> FormExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
@@ -41,46 +38,47 @@ public sealed partial class FormService
             return true;
 
         const string sql = """
-            SELECT TOP 1 1
-            FROM dbo.wForm
-            WHERE id = @FormId AND isDeleted = 0
+            SELECT 1
+            FROM dbo."wForm"
+            WHERE id = @FormId AND "isDeleted" = false
+            LIMIT 1
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", formId);
         return await cmd.ExecuteScalarAsync(cancellationToken) != null;
     }
 
     private static async Task<List<FormControlItem>> LoadFormControlsAsync(
-        SqlConnection connection,
-        object wFormIdValue,
+        NpgsqlConnection connection,
+        string formId,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT
                 id,
-                wFormId,
-                jsonId,
+                "wFormId",
+                "jsonId",
                 name,
                 type,
-                isMandatory,
-                parentId,
-                createdAt,
-                modifiedAt,
-                createdBy,
-                modifiedBy,
-                isDeleted,
-                activityBy,
-                activityOn,
-                activityId,
-                validationJson
-            FROM dbo.wFormControl
-            WHERE wFormId = @FormId AND isDeleted = 0
-            ORDER BY parentId, id
+                "isMandatory",
+                "parentId",
+                "createdAt",
+                "modifiedAt",
+                "createdBy",
+                "modifiedBy",
+                "isDeleted",
+                "activityBy",
+                "activityOn",
+                "activityId",
+                "validationJson"
+            FROM dbo."wFormControl"
+            WHERE "wFormId" = @FormId AND "isDeleted" = false
+            ORDER BY "parentId", id
             """;
 
         var controls = new List<FormControlItem>();
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@FormId", formId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -104,32 +102,5 @@ public sealed partial class FormService
         }
 
         return controls;
-    }
-
-    private static async Task<object> ResolveWFormIdParameterAsync(
-        SqlConnection connection,
-        string formId,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'wFormControl' AND COLUMN_NAME = N'wFormId'
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        var type = (await cmd.ExecuteScalarAsync(cancellationToken))?.ToString()?.ToLowerInvariant();
-        if (type is "int" or "bigint" or "smallint" or "tinyint")
-        {
-            if (int.TryParse(formId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                return n;
-
-            var hex = new string(formId.Where(Uri.IsHexDigit).ToArray());
-            if (hex.Length > 8)
-                hex = hex[..8];
-            if (uint.TryParse(hex.PadLeft(8, '0'), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var u))
-                return unchecked((int)u);
-        }
-
-        return formId;
     }
 }

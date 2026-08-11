@@ -1,6 +1,6 @@
 using System.Text;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Domain.Entities;
@@ -151,10 +151,10 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
             : null;
 
         var suffix = workflowId.ToString("N")[..8];
-        var table = $"workflow.[transaction_{suffix}]";
-        var instancesTable = $"workflow.[WorkflowInstances_{suffix}]";
-        var workflowFormsTable = $"workflow.WorkflowForms_{suffix}";
-        var workflowAttachmentsTable = $"workflow.WorkflowAttachments_{suffix}";
+        var table = $"workflow.transaction_{suffix}";
+        var instancesTable = $"workflow.workflow_instances_{suffix}";
+        var workflowFormsTable = $"workflow.workflow_forms_{suffix}";
+        var workflowAttachmentsTable = $"workflow.workflow_attachments_{suffix}";
 
         int actionStatus = 1;
         if (!string.IsNullOrEmpty(review) &&
@@ -165,7 +165,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
             actionStatus = 2;
         }
 
-        await using var connection = new SqlConnection(conn);
+        await using var connection = new NpgsqlConnection(conn);
         await connection.OpenAsync(cancellationToken);
 
         // Ensure per-workflow dynamic tables exist (instances/transaction/forms/attachments/etc.)
@@ -232,15 +232,14 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
             }
 
             var tenantId = _tenantProvider.GetTenantId() ?? Guid.Empty;
-            var insertInstanceSql = $@"
-IF NOT EXISTS (SELECT 1 FROM {instancesTable} WHERE Id = @Id)
-BEGIN
-    INSERT INTO {instancesTable}
-        (Id, TenantId, WorkflowId, WorkflowName, WorkflowVersion, Status, CreatedAtUtc, StartedAtUtc, StartedBy, ReferenceNumber, Priority, ViewCount, IsArchived)
-    VALUES
-        (@Id, @TenantId, @WorkflowId, @WorkflowName, @WorkflowVersion, @Status, SYSUTCDATETIME(), SYSUTCDATETIME(), @StartedBy, @ReferenceNumber, 1, 0, 0);
-END";
-            await using (var insInst = new SqlCommand(insertInstanceSql, connection))
+            var insertInstanceSql = $"""
+                INSERT INTO {instancesTable}
+                    (id, tenant_id, workflow_id, workflow_name, workflow_version, status, created_at_utc, started_at_utc, started_by, reference_number, priority, view_count, is_archived)
+                VALUES
+                    (@Id, @TenantId, @WorkflowId, @WorkflowName, @WorkflowVersion, @Status, now(), now(), @StartedBy, @ReferenceNumber, 1, 0, false)
+                ON CONFLICT (id) DO NOTHING;
+                """;
+            await using (var insInst = new NpgsqlCommand(insertInstanceSql, connection))
             {
                 insInst.Parameters.AddWithValue("@Id", newWorkflowInstanceId);
                 insInst.Parameters.AddWithValue("@TenantId", tenantId);
@@ -276,16 +275,17 @@ END";
             if (body.TryGetProperty("activityGroupId", out var agEl) && agEl.ValueKind == JsonValueKind.Number)
                 activityGroupId = agEl.GetInt32();
 
-            var insertTransactionSql = $@"
-INSERT INTO {table}
-    (WorkflowInstanceId, ActivityId, RuleId, StageType, StageName, Review, ActionStatus, ActivityUserId, ActivityGroupId, CreatedAt, CreatedBy, IsDeleted, TransactionGuid)
-OUTPUT INSERTED.Id, INSERTED.TransactionGuid
-VALUES
-    (@WorkflowInstanceId, @ActivityId, @RuleId, @StageType, @StageName, @Review, 0, @ActivityUserId, @ActivityGroupId, SYSUTCDATETIME(), @CreatedBy, 0, NEWID());";
+            var insertTransactionSql = $"""
+                INSERT INTO {table}
+                    (workflow_instance_id, activity_id, rule_id, stage_type, stage_name, review, action_status, activity_user_id, activity_group_id, created_at, created_by, is_deleted, transaction_guid)
+                VALUES
+                    (@WorkflowInstanceId, @ActivityId, @RuleId, @StageType, @StageName, @Review, 0, @ActivityUserId, @ActivityGroupId, now(), @CreatedBy, false, gen_random_uuid())
+                RETURNING id, transaction_guid;
+                """;
 
             int newTransactionId;
             Guid newTransactionGuid;
-            await using (var insTran = new SqlCommand(insertTransactionSql, connection))
+            await using (var insTran = new NpgsqlCommand(insertTransactionSql, connection))
             {
                 insTran.Parameters.AddWithValue("@WorkflowInstanceId", newWorkflowInstanceId);
                 insTran.Parameters.AddWithValue("@ActivityId", (object?)activityId ?? DBNull.Value);
@@ -313,12 +313,13 @@ VALUES
             await EnsureEzfbItemsTableAsync(connection, suffix, cancellationToken).ConfigureAwait(false);
             var ezfbFormEntryId = await InsertEzfbItemAsync(connection, suffix, createdBy, cancellationToken).ConfigureAwait(false);
 
-            var insFormSql = $@"
-INSERT INTO {workflowFormsTable}
-    (Id, TenantId, WorkflowInstanceId, WFormId, FormEntryId, CreatedAtUtc, CreatedBy, IsDeleted)
-VALUES
-    (NEWID(), @TenantId, @WorkflowInstanceId, @WFormId, @FormEntryId, SYSUTCDATETIME(), @CreatedBy, 0);";
-            await using (var insForm = new SqlCommand(insFormSql, connection))
+            var insFormSql = $"""
+                INSERT INTO {workflowFormsTable}
+                    (id, tenant_id, workflow_instance_id, w_form_id, form_entry_id, created_at_utc, created_by, is_deleted)
+                VALUES
+                    (gen_random_uuid(), @TenantId, @WorkflowInstanceId, @WFormId, @FormEntryId, now(), @CreatedBy, false);
+                """;
+            await using (var insForm = new NpgsqlCommand(insFormSql, connection))
             {
                 insForm.Parameters.AddWithValue("@TenantId", tenantId);
                 insForm.Parameters.AddWithValue("@WorkflowInstanceId", newWorkflowInstanceId);
@@ -331,12 +332,13 @@ VALUES
             string? formJsonId = body.TryGetProperty("formJsonId", out var fjEl) && fjEl.ValueKind == JsonValueKind.String ? fjEl.GetString() : null;
             if (!string.IsNullOrWhiteSpace(formJsonId))
             {
-                var insAttachSql = $@"
-INSERT INTO {workflowAttachmentsTable}
-    (Id, TenantId, WorkflowInstanceId, FormJsonId, FileName, FilePath, CreatedAtUtc, CreatedBy, IsDeleted)
-VALUES
-    (NEWID(), @TenantId, @WorkflowInstanceId, @FormJsonId, @FileName, @FilePath, SYSUTCDATETIME(), @CreatedBy, 0);";
-                await using var insAttach = new SqlCommand(insAttachSql, connection);
+                var insAttachSql = $"""
+                    INSERT INTO {workflowAttachmentsTable}
+                        (id, tenant_id, workflow_instance_id, form_json_id, file_name, file_path, created_at_utc, created_by, is_deleted)
+                    VALUES
+                        (gen_random_uuid(), @TenantId, @WorkflowInstanceId, @FormJsonId, @FileName, @FilePath, now(), @CreatedBy, false);
+                    """;
+                await using var insAttach = new NpgsqlCommand(insAttachSql, connection);
                 insAttach.Parameters.AddWithValue("@TenantId", tenantId);
                 insAttach.Parameters.AddWithValue("@WorkflowInstanceId", newWorkflowInstanceId);
                 insAttach.Parameters.AddWithValue("@FormJsonId", formJsonId!.Trim());
@@ -363,7 +365,7 @@ VALUES
 
         Guid workflowInstanceId;
         string? currentActivityId;
-        await using (var getProc = new SqlCommand($"SELECT WorkflowInstanceId, ActivityId FROM {table} WHERE Id = @Tid AND IsDeleted = 0", connection))
+        await using (var getProc = new NpgsqlCommand($"SELECT workflow_instance_id, activity_id FROM {table} WHERE id = @Tid AND is_deleted = false", connection))
         {
             getProc.Parameters.AddWithValue("@Tid", transactionIntId);
             await using var r = await getProc.ExecuteReaderAsync(cancellationToken).ConfigureAwait(false);
@@ -395,18 +397,24 @@ VALUES
             ? (int?)slaEl.GetInt32()
             : null;
 
-        var updateSql = $@"
-UPDATE {table}
-SET Review = @Review,
-    ActionStatus = @ActionStatus,
-    ModifiedAt = SYSUTCDATETIME(),
-    ModifiedBy = @ModifiedBy,
-    UserIds = CASE WHEN COL_LENGTH('{table.Trim('[',']')}', 'UserIds') IS NULL THEN UserIds ELSE @UserIds END,
-    GroupIds = CASE WHEN COL_LENGTH('{table.Trim('[',']')}', 'GroupIds') IS NULL THEN GroupIds ELSE @GroupIds END,
-    SlaTransactionId = CASE WHEN COL_LENGTH('{table.Trim('[',']')}', 'SlaTransactionId') IS NULL THEN SlaTransactionId ELSE @SlaTransactionId END
-WHERE Id = @Tid AND IsDeleted = 0;";
+        // PHASE 4: workflow.transaction_{suffix} always has user_ids/group_ids/sla_transaction_id
+        // as fixed columns from day one (see WorkflowTableCreator.cs's
+        // GenerateLegacyTransactionTableScript) -- no cross-install column-presence drift to guard
+        // against with a COL_LENGTH-style check the way SQL Server needed, so the CASE WHEN
+        // COL_LENGTH(...) IS NULL fallback was dropped and these columns are updated directly.
+        var updateSql = $"""
+            UPDATE {table}
+            SET review = @Review,
+                action_status = @ActionStatus,
+                modified_at = now(),
+                modified_by = @ModifiedBy,
+                user_ids = @UserIds,
+                group_ids = @GroupIds,
+                sla_transaction_id = @SlaTransactionId
+            WHERE id = @Tid AND is_deleted = false;
+            """;
 
-        await using (var upd = new SqlCommand(updateSql, connection))
+        await using (var upd = new NpgsqlCommand(updateSql, connection))
         {
             upd.Parameters.AddWithValue("@Review", (object?)review ?? DBNull.Value);
             upd.Parameters.AddWithValue("@ActionStatus", actionStatus);
@@ -457,8 +465,8 @@ WHERE Id = @Tid AND IsDeleted = 0;";
         if (nextStepId == null)
         {
             // No next step -> complete the workflow instance.
-            await using (var updInst = new SqlCommand(
-                $"UPDATE {instancesTable} SET Status = @Status, CompletedAtUtc = SYSUTCDATETIME(), LastActivityAtUtc = SYSUTCDATETIME() WHERE Id = @WorkflowInstanceId",
+            await using (var updInst = new NpgsqlCommand(
+                $"UPDATE {instancesTable} SET status = @Status, completed_at_utc = now(), last_activity_at_utc = now() WHERE id = @WorkflowInstanceId",
                 connection))
             {
                 updInst.Parameters.AddWithValue("@Status", (int)WorkflowInstanceStatus.Completed);
@@ -496,16 +504,17 @@ WHERE Id = @Tid AND IsDeleted = 0;";
         }
 
         var nextActivityUserId = nextStep.AssignedToUserId;
-        var insertNextSql = $@"
-INSERT INTO {table}
-    (WorkflowInstanceId, ActivityId, RuleId, StageType, StageName, Review, ActionStatus, ActivityUserId, ActivityGroupId, CreatedAt, CreatedBy, IsDeleted, TransactionGuid)
-OUTPUT INSERTED.Id, INSERTED.TransactionGuid
-VALUES
-    (@WorkflowInstanceId, @ActivityId, NULL, @StageType, @StageName, NULL, 0, @ActivityUserId, NULL, SYSUTCDATETIME(), @CreatedBy, 0, NEWID());";
+        var insertNextSql = $"""
+            INSERT INTO {table}
+                (workflow_instance_id, activity_id, rule_id, stage_type, stage_name, review, action_status, activity_user_id, activity_group_id, created_at, created_by, is_deleted, transaction_guid)
+            VALUES
+                (@WorkflowInstanceId, @ActivityId, NULL, @StageType, @StageName, NULL, 0, @ActivityUserId, NULL, now(), @CreatedBy, false, gen_random_uuid())
+            RETURNING id, transaction_guid;
+            """;
 
         int nextTransactionId;
         Guid nextTransactionGuid;
-        await using (var insNext = new SqlCommand(insertNextSql, connection))
+        await using (var insNext = new NpgsqlCommand(insertNextSql, connection))
         {
             insNext.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             insNext.Parameters.AddWithValue("@ActivityId", (object?)nextStep.Id.ToString("D") ?? DBNull.Value);
@@ -535,33 +544,34 @@ VALUES
         return (201, "application/json", ok);
     }
 
-    private static async Task EnsureEzfbItemsTableAsync(SqlConnection connection, string suffix, CancellationToken cancellationToken)
+    /// <summary>Minimal fallback shape matching FormService.cs's ezfb_{suffix}_items system columns (snake_case).</summary>
+    private static async Task EnsureEzfbItemsTableAsync(NpgsqlConnection connection, string suffix, CancellationToken cancellationToken)
     {
-        var table = $"dbo.[ezfb_{suffix}_items]";
-        var sql = $@"
-IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'ezfb_{suffix}_items' AND schema_id = SCHEMA_ID('dbo'))
-BEGIN
-    CREATE TABLE {table} (
-        ItemId INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        CreatedBy UNIQUEIDENTIFIER NULL,
-        ModifiedAt DATETIME2 NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END";
-        await using var cmd = new SqlCommand(sql, connection);
+        var table = $"dbo.ezfb_{suffix}_items";
+        var sql = $"""
+            CREATE SCHEMA IF NOT EXISTS dbo;
+            CREATE TABLE IF NOT EXISTS {table} (
+                item_id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                created_by uuid NULL,
+                modified_at timestamptz NULL,
+                modified_by uuid NULL,
+                is_deleted boolean NOT NULL DEFAULT false
+            );
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<int> InsertEzfbItemAsync(SqlConnection connection, string suffix, Guid? createdBy, CancellationToken cancellationToken)
+    private static async Task<int> InsertEzfbItemAsync(NpgsqlConnection connection, string suffix, Guid? createdBy, CancellationToken cancellationToken)
     {
-        var table = $"dbo.[ezfb_{suffix}_items]";
-        var sql = $@"
-INSERT INTO {table} (CreatedAt, CreatedBy, IsDeleted)
-OUTPUT INSERTED.ItemId
-VALUES (SYSUTCDATETIME(), @CreatedBy, 0);";
-        await using var cmd = new SqlCommand(sql, connection);
+        var table = $"dbo.ezfb_{suffix}_items";
+        var sql = $"""
+            INSERT INTO {table} (created_at, created_by, is_deleted)
+            VALUES (now(), @CreatedBy, false)
+            RETURNING item_id;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@CreatedBy", (object?)createdBy ?? DBNull.Value);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
     }
@@ -586,11 +596,11 @@ VALUES (SYSUTCDATETIME(), @CreatedBy, 0);";
         if (!raw.Contains("@", StringComparison.OrdinalIgnoreCase))
             return null;
 
-        await using var connection = new SqlConnection(tenantConnectionString);
+        await using var connection = new NpgsqlConnection(tenantConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var lookupSql = "SELECT TOP 1 Id FROM users.Users WHERE TenantId = @TenantId AND Email = @Email AND IsDeleted = 0 ORDER BY CreatedAtUtc DESC;";
-        await using (var lookup = new SqlCommand(lookupSql, connection))
+        var lookupSql = """SELECT "Id" FROM users."Users" WHERE "TenantId" = @TenantId AND "Email" = @Email AND "IsDeleted" = false ORDER BY "CreatedAtUtc" DESC LIMIT 1;""";
+        await using (var lookup = new NpgsqlCommand(lookupSql, connection))
         {
             lookup.Parameters.AddWithValue("@TenantId", tenantId.Value);
             lookup.Parameters.AddWithValue("@Email", raw);
@@ -600,10 +610,11 @@ VALUES (SYSUTCDATETIME(), @CreatedBy, 0);";
         }
 
         var newId = Guid.NewGuid();
-        var insertSql = @"
-INSERT INTO users.Users (Id, TenantId, Email, DisplayName, Role, CreatedAtUtc, IsDeleted)
-VALUES (@Id, @TenantId, @Email, @DisplayName, @Role, SYSUTCDATETIME(), 0);";
-        await using (var ins = new SqlCommand(insertSql, connection))
+        const string insertSql = """
+            INSERT INTO users."Users" ("Id", "TenantId", "Email", "DisplayName", "Role", "CreatedAtUtc", "IsDeleted")
+            VALUES (@Id, @TenantId, @Email, @DisplayName, @Role, now(), false);
+            """;
+        await using (var ins = new NpgsqlCommand(insertSql, connection))
         {
             ins.Parameters.AddWithValue("@Id", newId);
             ins.Parameters.AddWithValue("@TenantId", tenantId.Value);
@@ -681,13 +692,13 @@ VALUES (@Id, @TenantId, @Email, @DisplayName, @Role, SYSUTCDATETIME(), 0);";
     }
 
     private static async Task<(bool Ok, int Id, string? Log)> ResolveTransactionIntIdByGuidAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string table,
         Guid transactionGuid,
         CancellationToken cancellationToken)
     {
-        await using var cmd = new SqlCommand(
-            $"SELECT TOP (1) Id FROM {table} WHERE TransactionGuid = @g AND IsDeleted = 0 ORDER BY Id DESC",
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT id FROM {table} WHERE transaction_guid = @g AND is_deleted = false ORDER BY id DESC LIMIT 1",
             connection);
         cmd.Parameters.AddWithValue("@g", transactionGuid);
         var o = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
@@ -698,13 +709,13 @@ VALUES (@Id, @TenantId, @Email, @DisplayName, @Role, SYSUTCDATETIME(), 0);";
     }
 
     private static async Task<Guid?> TryGetTransactionGuidForRowAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string table,
         int transactionIntId,
         CancellationToken cancellationToken)
     {
-        await using var cmd = new SqlCommand(
-            $"SELECT TransactionGuid FROM {table} WHERE Id = @id AND IsDeleted = 0",
+        await using var cmd = new NpgsqlCommand(
+            $"SELECT transaction_guid FROM {table} WHERE id = @id AND is_deleted = false",
             connection);
         cmd.Parameters.AddWithValue("@id", transactionIntId);
         var o = await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);

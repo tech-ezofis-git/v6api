@@ -1,5 +1,5 @@
 using System.Globalization;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Storage;
@@ -63,9 +63,12 @@ internal static class RepositoryItemListReader
             ["Department"] = "Department",
         };
 
+    // Postgres port: SELECT reserved columns AS "PascalName" (physical is now snake_case)
+    // so every reader.GetOrdinal("PascalName") call below keeps working unmodified. Custom
+    // columns alias to their own (already original-case) name.
     public static string BuildSelectList(HashSet<string> tableColumns, RepositoryDetailDto? repository = null)
     {
-        var parts = new List<string> { "i.Id", "i.FileName" };
+        var parts = new List<string> { "i.id AS \"Id\"", "i.file_name AS \"FileName\"" };
         var added = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { "Id", "FileName" };
 
         void AddColumn(string column)
@@ -73,7 +76,7 @@ internal static class RepositoryItemListReader
             if (!RepositoryItemTableColumns.Has(tableColumns, column) || !added.Add(column))
                 return;
 
-            parts.Add($"i.[{column}]");
+            parts.Add($"i.{RepositorySqlHelper.ColumnRef(column)} AS \"{column}\"");
         }
 
         foreach (var col in OptionalListColumns)
@@ -90,13 +93,13 @@ internal static class RepositoryItemListReader
 
         if (repository != null)
         {
-            // Always select this repository's configured fields (HR, custom, AP, …).
+            // Always select this repository's configured fields (HR, custom, AP, ...).
             foreach (var field in repository.Fields)
                 AddColumn(field.SqlColumnName);
         }
 
-        parts.Add("i.StorageProviderId");
-        parts.Add("sp.Code");
+        parts.Add("i.storage_provider_id AS \"StorageProviderId\"");
+        parts.Add("sp.\"Code\" AS \"Code\"");
         AddColumn("FilePath");
         AddColumn("WorkflowInstanceId");
         AddColumn("CreatedBy");
@@ -105,7 +108,7 @@ internal static class RepositoryItemListReader
     }
 
     public static RepositoryItemListDto ReadRow(
-        SqlDataReader reader,
+        NpgsqlDataReader reader,
         HashSet<string> tableColumns,
         RepositoryDetailDto? repository = null)
     {
@@ -172,9 +175,9 @@ internal static class RepositoryItemListReader
         return RepositoryItemListMetadataEnricher.Enrich(row, ocrJson, summaryJson, repository, reader, tableColumns);
     }
 
-    /// <summary>Repository-configured field values for list grid — camelCase sqlColumnName keys only.</summary>
+    /// <summary>Repository-configured field values for list grid -- camelCase sqlColumnName keys only.</summary>
     public static IReadOnlyDictionary<string, object?> BuildRepositoryFields(
-        SqlDataReader reader,
+        NpgsqlDataReader reader,
         HashSet<string> tableColumns,
         RepositoryDetailDto? repository)
     {
@@ -203,7 +206,7 @@ internal static class RepositoryItemListReader
     /// Keeps <c>createdByUserId</c> for ACL.
     /// </summary>
     public static async Task ResolveCreatedByEmailsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IList<RepositoryItemListDto> items,
         CancellationToken cancellationToken = default)
     {
@@ -287,7 +290,7 @@ internal static class RepositoryItemListReader
         return null;
     }
 
-    private static string? CoalesceString(SqlDataReader reader, HashSet<string> columns, params string[] names)
+    private static string? CoalesceString(NpgsqlDataReader reader, HashSet<string> columns, params string[] names)
     {
         foreach (var name in names)
         {
@@ -299,7 +302,7 @@ internal static class RepositoryItemListReader
         return null;
     }
 
-    private static DateTime? CoalesceDateTime(SqlDataReader reader, HashSet<string> columns, params string[] names)
+    private static DateTime? CoalesceDateTime(NpgsqlDataReader reader, HashSet<string> columns, params string[] names)
     {
         foreach (var name in names)
         {
@@ -311,7 +314,7 @@ internal static class RepositoryItemListReader
         return null;
     }
 
-    private static decimal? CoalesceDecimal(SqlDataReader reader, HashSet<string> columns, params string[] names)
+    private static decimal? CoalesceDecimal(NpgsqlDataReader reader, HashSet<string> columns, params string[] names)
     {
         foreach (var name in names)
         {
@@ -323,7 +326,7 @@ internal static class RepositoryItemListReader
         return null;
     }
 
-    private static byte? CoalesceByte(SqlDataReader reader, HashSet<string> columns, params string[] names)
+    private static byte? CoalesceByte(NpgsqlDataReader reader, HashSet<string> columns, params string[] names)
     {
         foreach (var name in names)
         {
@@ -335,7 +338,7 @@ internal static class RepositoryItemListReader
         return null;
     }
 
-    private static string? GetString(SqlDataReader reader, string column)
+    private static string? GetString(NpgsqlDataReader reader, string column)
     {
         var ordinal = reader.GetOrdinal(column);
         if (reader.IsDBNull(ordinal))
@@ -348,10 +351,10 @@ internal static class RepositoryItemListReader
         return Convert.ToString(value, CultureInfo.InvariantCulture);
     }
 
-    private static string? GetString(SqlDataReader reader, HashSet<string> columns, string column) =>
+    private static string? GetString(NpgsqlDataReader reader, HashSet<string> columns, string column) =>
         RepositoryItemTableColumns.Has(columns, column) && HasColumn(reader, column) ? GetString(reader, column) : null;
 
-    private static DateTime? GetDateTime(SqlDataReader reader, HashSet<string> columns, string column)
+    private static DateTime? GetDateTime(NpgsqlDataReader reader, HashSet<string> columns, string column)
     {
         if (!RepositoryItemTableColumns.Has(columns, column))
             return null;
@@ -365,7 +368,7 @@ internal static class RepositoryItemListReader
         return TryToDateTime(reader.GetValue(ordinal));
     }
 
-    private static decimal? GetDecimal(SqlDataReader reader, HashSet<string> columns, string column)
+    private static decimal? GetDecimal(NpgsqlDataReader reader, HashSet<string> columns, string column)
     {
         if (!RepositoryItemTableColumns.Has(columns, column))
             return null;
@@ -379,7 +382,7 @@ internal static class RepositoryItemListReader
         return TryToDecimal(reader.GetValue(ordinal));
     }
 
-    private static byte? GetByte(SqlDataReader reader, HashSet<string> columns, string column)
+    private static byte? GetByte(NpgsqlDataReader reader, HashSet<string> columns, string column)
     {
         if (!RepositoryItemTableColumns.Has(columns, column))
             return null;
@@ -393,7 +396,7 @@ internal static class RepositoryItemListReader
         return TryToByte(reader.GetValue(ordinal));
     }
 
-    private static int? GetInt32(SqlDataReader reader, HashSet<string> columns, string column)
+    private static int? GetInt32(NpgsqlDataReader reader, HashSet<string> columns, string column)
     {
         if (!RepositoryItemTableColumns.Has(columns, column))
             return null;
@@ -466,7 +469,7 @@ internal static class RepositoryItemListReader
         return decimal.TryParse(text, NumberStyles.Any, CultureInfo.CurrentCulture, out parsed);
     }
 
-    private static bool HasColumn(SqlDataReader reader, string columnName)
+    private static bool HasColumn(NpgsqlDataReader reader, string columnName)
     {
         for (var i = 0; i < reader.FieldCount; i++)
         {

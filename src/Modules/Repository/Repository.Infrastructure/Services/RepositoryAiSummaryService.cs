@@ -1,5 +1,5 @@
 using System.Net.Http.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SaaSApp.MultiTenancy;
@@ -49,16 +49,16 @@ public sealed class RepositoryAiSummaryService : IRepositoryAiSummaryService
 
         string? filePath;
         string? summaryJson;
-        await using (var connection = new SqlConnection(connectionString))
+        await using (var connection = new NpgsqlConnection(connectionString))
         {
             await connection.OpenAsync(cancellationToken);
             var selectSql = $"""
-                SELECT FilePath, SummaryJson
+                SELECT file_path, summary_json
                 FROM {table}
-                WHERE Id = @ItemId AND RepositoryId = @RepositoryId AND IsDeleted = 0;
+                WHERE id = @ItemId AND repository_id = @RepositoryId AND is_deleted = false;
                 """;
 
-            await using var command = new SqlCommand(selectSql, connection);
+            await using var command = new NpgsqlCommand(selectSql, connection);
             command.Parameters.AddWithValue("@ItemId", itemId);
             command.Parameters.AddWithValue("@RepositoryId", repositoryId);
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -108,16 +108,16 @@ public sealed class RepositoryAiSummaryService : IRepositoryAiSummaryService
         if (string.IsNullOrWhiteSpace(responseBody))
             throw new HttpRequestException("AI summary API returned an empty response.");
 
-        await using (var connection = new SqlConnection(connectionString))
+        await using (var connection = new NpgsqlConnection(connectionString))
         {
             await connection.OpenAsync(cancellationToken);
             var updateSql = $"""
                 UPDATE {table}
-                SET SummaryJson = @SummaryJson, ModifiedAtUtc = SYSUTCDATETIME()
-                WHERE Id = @ItemId AND RepositoryId = @RepositoryId AND IsDeleted = 0;
+                SET summary_json = @SummaryJson, modified_at_utc = now()
+                WHERE id = @ItemId AND repository_id = @RepositoryId AND is_deleted = false;
                 """;
 
-            await using var command = new SqlCommand(updateSql, connection);
+            await using var command = new NpgsqlCommand(updateSql, connection);
             command.Parameters.AddWithValue("@SummaryJson", responseBody);
             command.Parameters.AddWithValue("@ItemId", itemId);
             command.Parameters.AddWithValue("@RepositoryId", repositoryId);

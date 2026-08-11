@@ -206,10 +206,10 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
             throw new InvalidOperationException("Tenant connection string not found.");
 
         var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-        optionsBuilder.UseSqlServer(connectionString, sql =>
+        optionsBuilder.UseNpgsql(connectionString, npgsql =>
         {
-            sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-            sql.EnableRetryOnFailure(5, TimeSpan.FromSeconds(30), null);
+            npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+            npgsql.EnableRetryOnFailure(5, TimeSpan.FromSeconds(30), null);
         });
 
         return new UsersDbContext(optionsBuilder.Options, new StaticTenantProvider(tenantId));

@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
@@ -12,8 +12,6 @@ namespace SaaSApp.Api.Controllers;
 [Authorize]
 public sealed class MeController : ControllerBase
 {
-    private const int SqlErrorInvalidObjectName = 208;
-
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
 
     public MeController(IDbContextFactory<CatalogDbContext> catalogFactory) =>
@@ -47,7 +45,7 @@ public sealed class MeController : ControllerBase
 
             return Ok(new MyTenantsResponse(items));
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             return Ok(new MyTenantsResponse(Array.Empty<MyTenantItem>()));
         }

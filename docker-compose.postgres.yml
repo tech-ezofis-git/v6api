@@ -1,0 +1,34 @@
+# Scratch PostgreSQL instance for the SQL Server -> PostgreSQL migration (see docs/).
+# NOT for production or any real tenant data — dev/test only.
+#
+# Usage:
+#   docker compose -f docker-compose.postgres.yml up -d
+#   docker compose -f docker-compose.postgres.yml down          # stop, keep data
+#   docker compose -f docker-compose.postgres.yml down -v       # stop, wipe data volume
+#
+# Connects on localhost:5433 (NOT the default 5432 -- that's already bound on this
+# dev machine by an unrelated container) with user/password postgres/postgres
+# (scratch-only creds). The `postgres` maintenance database is what
+# TenantDatabaseCreator.cs will target in Phase 1 (replacing SQL Server's `master`).
+
+services:
+  postgres:
+    image: postgres:16
+    container_name: ezsaas-postgres-scratch
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_DB: postgres
+    ports:
+      - "5433:5432"
+    volumes:
+      - ezsaas_postgres_scratch_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  ezsaas_postgres_scratch_data:

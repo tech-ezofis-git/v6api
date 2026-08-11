@@ -17,13 +17,13 @@ public sealed class UsersDbContextFactory : IDesignTimeDbContextFactory<UsersDbC
                 "Set ConnectionStrings__DefaultConnection or TenantConnectionString before running EF tools.");
 
         var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-        optionsBuilder.UseSqlServer(connectionString, sql =>
+        optionsBuilder.UseNpgsql(connectionString, npgsql =>
         {
-            sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-            sql.EnableRetryOnFailure(
+            npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+            npgsql.EnableRetryOnFailure(
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(30),
-                errorNumbersToAdd: null);
+                errorCodesToAdd: null);
         });
 
         return new UsersDbContext(optionsBuilder.Options, new StaticTenantProvider(Guid.Empty));

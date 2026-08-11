@@ -1,12 +1,29 @@
 using System.Collections.Concurrent;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
 /// <summary>
 /// Creates dynamic tables for each workflow.
-/// When a workflow is published, creates dedicated tables: Comments_X, Attachments_X, etc.
+/// When a workflow is published, creates dedicated tables: comments_x, attachments_x, etc.
+///
+/// PHASE 4 PORT NOTE: unlike the rest of this migration (Phases 2-3), which quotes and
+/// preserves the original PascalCase identifiers throughout, this file's dynamically
+/// created per-workflow tables and columns use plain lowercase snake_case, per Decision 1's
+/// explicit guidance ("dynamic DDL emits lowercase directly") and the Phase 4 prompt's own
+/// emphasis that this specific file is where inconsistent casing does the most damage.
+/// This is a deliberate, localized exception: every OTHER file in this migration that reads/
+/// writes these same dynamic tables (FormService.cs, WorkflowInstanceStore.cs,
+/// DynamicTableRepository.cs, etc. -- ported later in Phase 4) must use the same lowercase
+/// names this file establishes. No cross-schema FK exists from these dynamic tables to the
+/// PascalCase-quoted static tables from Phase 2/3 (e.g. workflow."Workflows"), so there is no
+/// referential-integrity conflict between the two conventions, but any raw SQL elsewhere that
+/// joins across both needs to know which convention applies to which table.
+///
+/// Postgres's native CREATE TABLE IF NOT EXISTS / CREATE INDEX IF NOT EXISTS / ADD COLUMN IF
+/// NOT EXISTS replace the SQL Server sys.tables/sys.columns/sys.indexes existence-check
+/// ceremony throughout -- no functional change, just far less boilerplate.
 /// </summary>
 public sealed class WorkflowTableCreator : IWorkflowTableCreator
 {
@@ -19,21 +36,19 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
         CancellationToken cancellationToken = default)
     {
         var suffix = workflowId.ToString("N")[..8];
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT CASE WHEN EXISTS (
-                SELECT 1
-                FROM sys.tables t
-                INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-                WHERE s.name = N'workflow' AND t.name = @TableName
-            ) THEN 1 ELSE 0 END;
+            SELECT EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'workflow' AND table_name = @TableName
+            );
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@TableName", $"WorkflowInstances_{suffix}");
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) == 1;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TableName", $"workflow_instances_{suffix}");
+        return (bool)(await cmd.ExecuteScalarAsync(cancellationToken))!;
     }
 
     /// <summary>
@@ -61,13 +76,10 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
         var workflowIdDashed = workflowId.ToString("D");
         var suffix = workflowIdStr.Substring(0, 8); // Use first 8 chars as suffix
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using (var schemaCmd = new SqlCommand("""
-IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
-    EXEC(N'CREATE SCHEMA workflow');
-""", connection))
+        await using (var schemaCmd = new NpgsqlCommand("CREATE SCHEMA IF NOT EXISTS workflow;", connection))
         {
             schemaCmd.CommandTimeout = 120;
             await schemaCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -96,13 +108,13 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
 
         foreach (var script in tables)
         {
-            await using var command = new SqlCommand(script, connection);
+            await using var command = new NpgsqlCommand(script, connection);
             command.CommandTimeout = 120;
             try
             {
                 await command.ExecuteNonQueryAsync(cancellationToken);
             }
-            catch (SqlException ex)
+            catch (PostgresException ex)
             {
                 throw new InvalidOperationException(
                     $"Failed creating workflow tables for suffix '{suffix}' (workflow {workflowIdDashed}): {ex.Message}",
@@ -117,14 +129,14 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
         LegacyMailboxSchemaEnsured.TryAdd(suffix, 0);
     }
 
-    /// <summary>Creates or upgrades workflow.transaction_{suffix} (TransactionGuid column + index).</summary>
+    /// <summary>Creates or upgrades workflow.transaction_{suffix} (transaction_guid column + index).</summary>
     public async Task EnsureLegacyTransactionTableAsync(
         Guid workflowId,
         string connectionString,
         CancellationToken cancellationToken = default)
     {
         var suffix = workflowId.ToString("N")[..8];
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await EnsureLegacyTransactionTableAsync(connection, suffix, cancellationToken);
     }
@@ -135,7 +147,7 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
         CancellationToken cancellationToken = default)
     {
         var suffix = workflowId.ToString("N")[..8];
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await EnsureLegacyMailboxTablesAsync(connection, suffix, cancellationToken);
     }
@@ -146,9 +158,9 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
         CancellationToken cancellationToken = default)
     {
         var suffix = workflowId.ToString("N")[..8];
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(GenerateAgentDataValidationTableScript(suffix), connection)
+        await using var cmd = new NpgsqlCommand(GenerateAgentDataValidationTableScript(suffix), connection)
         {
             CommandTimeout = 120
         };
@@ -156,46 +168,32 @@ IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'workflow')
     }
 
     private static async Task EnsureLegacyTransactionTableAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         CancellationToken cancellationToken)
     {
         if (LegacyTransactionSchemaEnsured.ContainsKey(suffix))
             return;
 
-        await using (var cmd = new SqlCommand(GenerateLegacyTransactionTableScript(suffix), connection))
+        await using (var cmd = new NpgsqlCommand(GenerateLegacyTransactionTableScript(suffix), connection))
         {
             cmd.CommandTimeout = 120;
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var tableFullName = $"workflow.transaction_{suffix}";
-        var alterSql = $@"
-IF COL_LENGTH('{tableFullName}', 'TransactionGuid') IS NULL
-BEGIN
-    ALTER TABLE workflow.[transaction_{suffix}] ADD TransactionGuid UNIQUEIDENTIFIER NULL;
-END";
-        await using (var alterCmd = new SqlCommand(alterSql, connection))
+        var tableName = $"transaction_{suffix}";
+        var alterSql = $@"ALTER TABLE workflow.{tableName} ADD COLUMN IF NOT EXISTS transaction_guid uuid NULL;";
+        await using (var alterCmd = new NpgsqlCommand(alterSql, connection))
         {
             alterCmd.CommandTimeout = 120;
             await alterCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         var idx = suffix.Replace("-", "_");
-        var indexSql = $@"
-IF COL_LENGTH('{tableFullName}', 'TransactionGuid') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.indexes i
-    INNER JOIN sys.tables t ON i.object_id = t.object_id
-    INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-    WHERE s.name = N'workflow' AND t.name = N'transaction_{suffix}'
-      AND i.name = N'IX_transaction_{idx}_TransactionGuid')
-BEGIN
-    EXEC(N'CREATE UNIQUE NONCLUSTERED INDEX [IX_transaction_{idx}_TransactionGuid]
-        ON workflow.[transaction_{suffix}](TransactionGuid)
-        WHERE TransactionGuid IS NOT NULL');
-END";
-        await using (var indexCmd = new SqlCommand(indexSql, connection))
+        var indexSql = $@"CREATE UNIQUE INDEX IF NOT EXISTS ix_transaction_{idx}_transaction_guid
+            ON workflow.{tableName} (transaction_guid)
+            WHERE transaction_guid IS NOT NULL;";
+        await using (var indexCmd = new NpgsqlCommand(indexSql, connection))
         {
             indexCmd.CommandTimeout = 120;
             await indexCmd.ExecuteNonQueryAsync(cancellationToken);
@@ -206,56 +204,67 @@ END";
     }
 
     private static async Task MigrateTransactionWorkflowInstanceIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         CancellationToken cancellationToken)
     {
-        var tableFullName = $"workflow.transaction_{suffix}";
+        var tableName = $"transaction_{suffix}";
         var idx = suffix.Replace("-", "_");
-        var migrateSql = $@"
-IF COL_LENGTH('{tableFullName}', 'WorkflowInstanceId') IS NULL
-BEGIN
-    ALTER TABLE workflow.[transaction_{suffix}] ADD WorkflowInstanceId UNIQUEIDENTIFIER NULL;
-END";
 
-        await using (var cmd = new SqlCommand(migrateSql, connection) { CommandTimeout = 120 })
+        // ADD COLUMN IF NOT EXISTS is idempotent -- the SQL Server COL_LENGTH-guarded
+        // ALTER ADD becomes a single unconditional statement.
+        await using (var cmd = new NpgsqlCommand(
+            $"ALTER TABLE workflow.{tableName} ADD COLUMN IF NOT EXISTS workflow_instance_id uuid NULL;",
+            connection) { CommandTimeout = 120 })
             await cmd.ExecuteNonQueryAsync(cancellationToken);
 
-        var finalizeSql = $@"
-IF COL_LENGTH('{tableFullName}', 'ProcessId') IS NOT NULL
-BEGIN
-    IF EXISTS (
-        SELECT 1 FROM sys.indexes i
-        INNER JOIN sys.tables t ON i.object_id = t.object_id
-        INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-        WHERE s.name = N'workflow' AND t.name = N'transaction_{suffix}'
-          AND i.name = N'IX_transaction_{idx}_ProcessId_IsDeleted')
-    BEGIN
-        DROP INDEX [IX_transaction_{idx}_ProcessId_IsDeleted] ON workflow.[transaction_{suffix}];
-    END
-END
-IF COL_LENGTH('{tableFullName}', 'ProcessId') IS NOT NULL
-   AND COL_LENGTH('{tableFullName}', 'WorkflowInstanceId') IS NOT NULL
-BEGIN
-    ALTER TABLE workflow.[transaction_{suffix}] DROP COLUMN ProcessId;
-END";
+        // Drop the legacy process_id column and its index, if present (one-time migration
+        // step -- checked defensively via information_schema since Postgres errors on
+        // DROP COLUMN/DROP INDEX against a column/index that doesn't exist, unlike SQL
+        // Server's COL_LENGTH/sys.indexes checks which just evaluate to false).
+        // Note: the existence checks run as plain parameterized queries in C#, not inside a
+        // DO $do$ ... $do$ block -- Npgsql treats dollar-quoted text as a literal string and
+        // never rewrites @-parameters that appear inside it, so a parameter referenced only
+        // inside a DO block reaches Postgres as the literal text "@TableName", which Postgres
+        // parses as the "@" (absolute value) prefix operator applied to an identifier, not as
+        // a bind variable (confirmed empirically: caused "column tablename does not exist").
+        var indexName = $"ix_transaction_{idx}_process_id_is_deleted";
 
-        await using (var finalizeCmd = new SqlCommand(finalizeSql, connection) { CommandTimeout = 120 })
-            await finalizeCmd.ExecuteNonQueryAsync(cancellationToken);
+        async Task<bool> HasColumnAsync(string columnName)
+        {
+            await using var cmd = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'workflow' AND table_name = @TableName AND column_name = @ColumnName);",
+                connection);
+            cmd.Parameters.AddWithValue("TableName", tableName);
+            cmd.Parameters.AddWithValue("ColumnName", columnName);
+            return (bool)(await cmd.ExecuteScalarAsync(cancellationToken))!;
+        }
 
-        var indexSql = $@"
-IF COL_LENGTH('{tableFullName}', 'WorkflowInstanceId') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.indexes i
-    INNER JOIN sys.tables t ON i.object_id = t.object_id
-    INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-    WHERE s.name = N'workflow' AND t.name = N'transaction_{suffix}'
-      AND i.name = N'IX_transaction_{idx}_WorkflowInstanceId_IsDeleted')
-BEGIN
-    EXEC(N'CREATE NONCLUSTERED INDEX [IX_transaction_{idx}_WorkflowInstanceId_IsDeleted]
-        ON workflow.[transaction_{suffix}](WorkflowInstanceId, IsDeleted)');
-END";
-        await using var indexCmd = new SqlCommand(indexSql, connection) { CommandTimeout = 120 };
+        if (await HasColumnAsync("process_id"))
+        {
+            await using (var idxCmd = new NpgsqlCommand(
+                "SELECT EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname = 'workflow' AND indexname = @IdxName);",
+                connection))
+            {
+                idxCmd.Parameters.AddWithValue("IdxName", indexName);
+                var hasIndex = (bool)(await idxCmd.ExecuteScalarAsync(cancellationToken))!;
+                if (hasIndex)
+                {
+                    await using var dropIdxCmd = new NpgsqlCommand($"DROP INDEX workflow.{indexName};", connection) { CommandTimeout = 120 };
+                    await dropIdxCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+
+            if (await HasColumnAsync("workflow_instance_id"))
+            {
+                await using var dropColCmd = new NpgsqlCommand($"ALTER TABLE workflow.{tableName} DROP COLUMN process_id;", connection) { CommandTimeout = 120 };
+                await dropColCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
+
+        var indexSql = $@"CREATE INDEX IF NOT EXISTS ix_transaction_{idx}_workflow_instance_id_is_deleted
+            ON workflow.{tableName} (workflow_instance_id, is_deleted);";
+        await using var indexCmd = new NpgsqlCommand(indexSql, connection) { CommandTimeout = 120 };
         await indexCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -264,12 +273,12 @@ END";
         var workflowIdStr = workflowId.ToString("N");
         var suffix = workflowIdStr.Substring(0, 8);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         // Remove lookup rows for this workflow's instances before dropping tables
-        var deleteLookup = "DELETE FROM workflow.WorkflowInstanceLookup WHERE WorkflowId = @WorkflowId";
-        await using (var cmd = new SqlCommand(deleteLookup, connection))
+        const string deleteLookup = "DELETE FROM workflow.\"WorkflowInstanceLookup\" WHERE \"WorkflowId\" = @WorkflowId";
+        await using (var cmd = new NpgsqlCommand(deleteLookup, connection))
         {
             cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
             await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -277,59 +286,55 @@ END";
 
         var tableNames = new[]
         {
-            $"WorkflowInstanceSlas_{suffix}",
-            $"WorkflowStepInstances_{suffix}",
-            $"WorkflowInstances_{suffix}",
-            $"WorkflowInstanceUserState_{suffix}",
+            $"workflow_instance_slas_{suffix}",
+            $"workflow_step_instances_{suffix}",
+            $"workflow_instances_{suffix}",
+            $"workflow_instance_user_state_{suffix}",
             $"transaction_{suffix}",
-            $"processForm_{suffix}",
-            $"processAddon_{suffix}",
-            $"Inbox_{suffix}",
-            $"Sent_{suffix}",
-            $"Completed_{suffix}",
-            $"Inbox_{workflowIdStr}",
-            $"Sent_{workflowIdStr}",
-            $"Completed_{workflowIdStr}",
-            $"WorkflowComments_{suffix}",
-            $"WorkflowAttachments_{suffix}",
-            $"WorkflowForms_{suffix}",
-            $"WorkflowTasks_{suffix}",
-            $"WorkflowSignatures_{suffix}",
-            $"WorkflowDocuments_{suffix}",
-            $"WorkflowEmails_{suffix}",
-            $"WorkflowAiValidations_{suffix}",
-            $"agentDataValidation_{suffix}",
-            $"WorkflowPdfAnnotations_{suffix}"
+            $"process_form_{suffix}",
+            $"process_addon_{suffix}",
+            $"inbox_{suffix}",
+            $"sent_{suffix}",
+            $"completed_{suffix}",
+            $"inbox_{workflowIdStr}",
+            $"sent_{workflowIdStr}",
+            $"completed_{workflowIdStr}",
+            $"workflow_comments_{suffix}",
+            $"workflow_attachments_{suffix}",
+            $"workflow_forms_{suffix}",
+            $"workflow_tasks_{suffix}",
+            $"workflow_signatures_{suffix}",
+            $"workflow_documents_{suffix}",
+            $"workflow_emails_{suffix}",
+            $"workflow_ai_validations_{suffix}",
+            $"agent_data_validation_{suffix}",
+            $"workflow_pdf_annotations_{suffix}"
         };
 
         foreach (var tableName in tableNames)
         {
-            var script = $@"
-                IF EXISTS (SELECT * FROM sys.tables WHERE name = '{tableName}' AND schema_id = SCHEMA_ID('workflow'))
-                BEGIN
-                    DROP TABLE workflow.[{tableName}];
-                END";
+            var script = $"DROP TABLE IF EXISTS workflow.{tableName};";
 
-            await using var command = new SqlCommand(script, connection);
+            await using var command = new NpgsqlCommand(script, connection);
             command.CommandTimeout = 120;
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
     private static async Task EnsureLegacyMailboxTablesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowKey,
         CancellationToken cancellationToken)
     {
         if (!LegacyMailboxSchemaEnsured.ContainsKey(workflowKey))
         {
-            var inbox = GenerateLegacyMailboxTableScript("Inbox", workflowKey);
-            var sent = GenerateLegacyMailboxTableScript("Sent", workflowKey);
-            var completed = GenerateLegacyMailboxTableScript("Completed", workflowKey);
+            var inbox = GenerateLegacyMailboxTableScript("inbox", workflowKey);
+            var sent = GenerateLegacyMailboxTableScript("sent", workflowKey);
+            var completed = GenerateLegacyMailboxTableScript("completed", workflowKey);
 
             foreach (var script in new[] { inbox, sent, completed })
             {
-                await using var cmd = new SqlCommand(script, connection);
+                await using var cmd = new NpgsqlCommand(script, connection);
                 cmd.CommandTimeout = 120;
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
@@ -344,678 +349,554 @@ END";
     }
 
     private static async Task EnsureLegacyTransactionMailboxIndexesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowKey,
         CancellationToken cancellationToken)
     {
         var table = $"transaction_{workflowKey}";
-        var idx = $"IX_{table}_Instance_Status";
+        var idx = $"ix_{table}_instance_status";
         var sql = $@"
-IF EXISTS (SELECT 1 FROM sys.tables WHERE name = N'{table}' AND schema_id = SCHEMA_ID(N'workflow'))
-   AND NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{idx}' AND object_id = OBJECT_ID(N'workflow.[{table}]'))
-    CREATE NONCLUSTERED INDEX [{idx}]
-    ON workflow.[{table}] (WorkflowInstanceId, IsDeleted, ActionStatus)
-    INCLUDE (ActivityUserId, CreatedBy, StageType, ActivityGroupId);";
-        await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+DO $do$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'workflow' AND table_name = '{table}') THEN
+        CREATE INDEX IF NOT EXISTS {idx}
+            ON workflow.{table} (workflow_instance_id, is_deleted, action_status)
+            INCLUDE (activity_user_id, created_by, stage_type, activity_group_id);
+    END IF;
+END
+$do$;";
+        await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task EnsureLegacyMailboxIndexesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowKey,
         CancellationToken cancellationToken)
     {
-        foreach (var prefix in new[] { "Inbox", "Sent", "Completed" })
+        foreach (var prefix in new[] { "inbox", "sent", "completed" })
         {
             var table = $"{prefix}_{workflowKey}";
-            var idxInstance = $"IX_{table}_Instance_Created";
-            var idxUser = $"IX_{table}_User_Created";
+            var idxInstance = $"ix_{table}_instance_created";
+            var idxUser = $"ix_{table}_user_created";
             var sql = $@"
-IF EXISTS (SELECT 1 FROM sys.tables WHERE name = N'{table}' AND schema_id = SCHEMA_ID(N'workflow'))
+DO $do$
 BEGIN
-    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{idxInstance}' AND object_id = OBJECT_ID(N'workflow.[{table}]'))
-        CREATE NONCLUSTERED INDEX [{idxInstance}]
-        ON workflow.[{table}] (workflowInstanceId, transaction_createdAt DESC, id DESC)
-        INCLUDE (userId, transaction_createdBy, transactionId, name, referenceNumber, stage, review);
-    IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name = N'{idxUser}' AND object_id = OBJECT_ID(N'workflow.[{table}]'))
-        CREATE NONCLUSTERED INDEX [{idxUser}]
-        ON workflow.[{table}] (userId, transaction_createdAt DESC, id DESC)
-        INCLUDE (transaction_createdBy, workflowInstanceId, transactionId, name, referenceNumber);
-END";
-            await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'workflow' AND table_name = '{table}') THEN
+        CREATE INDEX IF NOT EXISTS {idxInstance}
+            ON workflow.{table} (workflow_instance_id, transaction_created_at DESC, id DESC)
+            INCLUDE (user_id, transaction_created_by, transaction_id, name, reference_number, stage, review);
+        CREATE INDEX IF NOT EXISTS {idxUser}
+            ON workflow.{table} (user_id, transaction_created_at DESC, id DESC)
+            INCLUDE (transaction_created_by, workflow_instance_id, transaction_id, name, reference_number);
+    END IF;
+END
+$do$;";
+            await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
     private static async Task MigrateLegacyMailboxInstanceColumnsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowKey,
         CancellationToken cancellationToken)
     {
-        foreach (var prefix in new[] { "Inbox", "Sent", "Completed" })
+        foreach (var prefix in new[] { "inbox", "sent", "completed" })
         {
-            var tableFullName = $"workflow.{prefix}_{workflowKey}";
+            var table = $"{prefix}_{workflowKey}";
             var sql = $@"
-IF EXISTS (SELECT 1 FROM sys.tables WHERE name = '{prefix}_{workflowKey}' AND schema_id = SCHEMA_ID('workflow'))
+DO $do$
 BEGIN
-    IF COL_LENGTH('{tableFullName}', 'workflowInstanceId') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD workflowInstanceId nvarchar(255) NULL;
-    IF COL_LENGTH('{tableFullName}', 'referenceNumber') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD referenceNumber nvarchar(128) NULL;
-    IF COL_LENGTH('{tableFullName}', 'createdAtUtc') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD createdAtUtc datetime2 NULL;
-    IF COL_LENGTH('{tableFullName}', 'startedAtUtc') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD startedAtUtc datetime2 NULL;
-    IF COL_LENGTH('{tableFullName}', 'completedAtUtc') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD completedAtUtc datetime2 NULL;
-    IF COL_LENGTH('{tableFullName}', 'context') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD context nvarchar(4000) NULL;
-    IF COL_LENGTH('{tableFullName}', 'repositoryId') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD repositoryId nvarchar(255) NULL;
-    IF COL_LENGTH('{tableFullName}', 'itemId') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD itemId nvarchar(255) NULL;
-    IF COL_LENGTH('{tableFullName}', 'formId') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD formId nvarchar(255) NULL;
-    IF COL_LENGTH('{tableFullName}', 'formEntryId') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD formEntryId nvarchar(255) NULL;
-    IF COL_LENGTH('{tableFullName}', 'formData') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD formData nvarchar(max) NULL;
-    ELSE IF EXISTS (
-        SELECT 1
-        FROM INFORMATION_SCHEMA.COLUMNS
-        WHERE TABLE_SCHEMA = N'workflow'
-          AND TABLE_NAME = N'{prefix}_{workflowKey}'
-          AND COLUMN_NAME = N'formData'
-          AND CHARACTER_MAXIMUM_LENGTH <> -1
-    )
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ALTER COLUMN formData nvarchar(max) NULL;
-    IF COL_LENGTH('{tableFullName}', 'action') IS NULL
-        ALTER TABLE workflow.[{prefix}_{workflowKey}] ADD [action] int NOT NULL
-            CONSTRAINT [DF_{prefix}_{workflowKey}_action] DEFAULT (1);
-END";
-            await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+    IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'workflow' AND table_name = '{table}') THEN
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS workflow_instance_id varchar(255) NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS reference_number varchar(128) NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS created_at_utc timestamptz NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS started_at_utc timestamptz NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS completed_at_utc timestamptz NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS context varchar(4000) NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS repository_id varchar(255) NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS item_id varchar(255) NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS form_id varchar(255) NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS form_entry_id varchar(255) NULL;
+        -- SQL Server's original also ALTERed formData from a shorter type to nvarchar(max)
+        -- if some minimal bootstrap path had created it smaller; text has no length variant
+        -- to migrate away from on Postgres, so ADD COLUMN IF NOT EXISTS alone covers both cases.
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS form_data text NULL;
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS ""action"" integer NOT NULL DEFAULT 1;
+    END IF;
+END
+$do$;";
+            await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
     private static string GenerateLegacyMailboxTableScript(string prefix, string workflowKey)
     {
-        // Based on provided schema; kept identical across Inbox/Sent/Completed.
+        // Based on provided schema; kept identical across inbox/sent/completed.
+        // "action" is a reserved-adjacent word in Postgres, quoted defensively (it isn't
+        // actually reserved, but quoting avoids any doubt).
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{prefix}_{workflowKey}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.[{prefix}_{workflowKey}] (
-        id int IDENTITY(1,1) NOT NULL,
-        userId nvarchar(100) NULL,
-        groupId int NULL,
-        workflowId nvarchar(255) NULL,
-        name nvarchar(255) NULL,
-        workflowInstanceId nvarchar(255) NULL,
-        referenceNumber nvarchar(128) NULL,
-        createdAtUtc datetime2 NULL,
-        startedAtUtc datetime2 NULL,
-        completedAtUtc datetime2 NULL,
-        context nvarchar(4000) NULL,
-        transactionId nvarchar(255) NULL,
-        activityId nvarchar(255) NULL,
-        ruleId nvarchar(255) NULL,
-        stageType nvarchar(255) NULL,
-        stage nvarchar(255) NULL,
-        review nvarchar(255) NULL,
-        transaction_createdAt datetime NULL,
-        transaction_createdBy nvarchar(255) NULL,
-        transaction_createdByEmail nvarchar(255) NULL,
-        repositoryId nvarchar(255) NULL,
-        itemId nvarchar(255) NULL,
-        formId nvarchar(255) NULL,
-        formEntryId nvarchar(255) NULL,
-        mlPrediction nvarchar(255) NULL,
-        transaction_modifiedAt datetime NULL,
-        transaction_modifiedBy nvarchar(255) NULL,
-        mlCondition nvarchar(255) NULL,
-        userType nvarchar(255) NULL,
-        jiraIssueJson nvarchar(max) NULL,
-        createdByName nvarchar(255) NULL,
-        jiraIssueInfo nvarchar(max) NULL,
-        lastActionStageType varchar(50) NULL,
-        lastActionStageName varchar(50) NULL,
-        lastAction varchar(50) NULL,
-        formData nvarchar(max) NULL,
-        commentsCount int NULL,
-        attachmentCount int NULL,
-        itemData nvarchar(max) NULL,
-        activityUserEmail nvarchar(max) NULL,
-        activityGroupName nvarchar(max) NULL,
-        [action] int NOT NULL CONSTRAINT [DF_{prefix}_{workflowKey}_action] DEFAULT (1),
-        PRIMARY KEY CLUSTERED (id ASC)
-    ) ON [PRIMARY] TEXTIMAGE_ON [PRIMARY]
-END";
+CREATE TABLE IF NOT EXISTS workflow.{prefix}_{workflowKey} (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    user_id varchar(100) NULL,
+    group_id integer NULL,
+    workflow_id varchar(255) NULL,
+    name varchar(255) NULL,
+    workflow_instance_id varchar(255) NULL,
+    reference_number varchar(128) NULL,
+    created_at_utc timestamptz NULL,
+    started_at_utc timestamptz NULL,
+    completed_at_utc timestamptz NULL,
+    context varchar(4000) NULL,
+    transaction_id varchar(255) NULL,
+    activity_id varchar(255) NULL,
+    rule_id varchar(255) NULL,
+    stage_type varchar(255) NULL,
+    stage varchar(255) NULL,
+    review varchar(255) NULL,
+    transaction_created_at timestamptz NULL,
+    transaction_created_by varchar(255) NULL,
+    transaction_created_by_email varchar(255) NULL,
+    repository_id varchar(255) NULL,
+    item_id varchar(255) NULL,
+    form_id varchar(255) NULL,
+    form_entry_id varchar(255) NULL,
+    ml_prediction varchar(255) NULL,
+    transaction_modified_at timestamptz NULL,
+    transaction_modified_by varchar(255) NULL,
+    ml_condition varchar(255) NULL,
+    user_type varchar(255) NULL,
+    jira_issue_json text NULL,
+    created_by_name varchar(255) NULL,
+    jira_issue_info text NULL,
+    last_action_stage_type varchar(50) NULL,
+    last_action_stage_name varchar(50) NULL,
+    last_action varchar(50) NULL,
+    form_data text NULL,
+    comments_count integer NULL,
+    attachment_count integer NULL,
+    item_data text NULL,
+    activity_user_email text NULL,
+    activity_group_name text NULL,
+    ""action"" integer NOT NULL DEFAULT 1
+);";
     }
 
     private static string GenerateWorkflowInstancesTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInstances_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowInstances_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowName NVARCHAR(256) NOT NULL,
-        WorkflowVersion INT NOT NULL,
-        Status INT NOT NULL,
-        CurrentStepInstanceId UNIQUEIDENTIFIER NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        StartedAtUtc DATETIME2 NULL,
-        CompletedAtUtc DATETIME2 NULL,
-        StartedBy UNIQUEIDENTIFIER NOT NULL,
-        Context NVARCHAR(4000) NULL,
-        ErrorMessage NVARCHAR(2000) NULL,
-        ReferenceNumber NVARCHAR(128) NULL,
-        CustomerName NVARCHAR(256) NULL,
-        CustomerEmail NVARCHAR(256) NULL,
-        CustomerPhone NVARCHAR(64) NULL,
-        Department NVARCHAR(128) NULL,
-        Category NVARCHAR(128) NULL,
-        Priority INT NOT NULL DEFAULT 1,
-        Tags NVARCHAR(1000) NULL,
-        CustomFieldsJson NVARCHAR(4000) NULL,
-        AssignedToUserId UNIQUEIDENTIFIER NULL,
-        AssignedToGroupId UNIQUEIDENTIFIER NULL,
-        LastActivityAtUtc DATETIME2 NULL,
-        ViewCount INT NOT NULL DEFAULT 0,
-        IsArchived BIT NOT NULL DEFAULT 0,
-        ArchivedAtUtc DATETIME2 NULL,
-        SourceType NVARCHAR(64) NULL,
-        SourceId NVARCHAR(256) NULL,
-        LastViewedAtUtc DATETIME2 NULL,
-        LastViewedBy UNIQUEIDENTIFIER NULL
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowInstances_{suffix}", $"IX_WorkflowInstances_{suffix}_TenantId_WorkflowId", "TenantId, WorkflowId")}
-{EnsureNonClusteredIndex($"workflow.WorkflowInstances_{suffix}", $"IX_WorkflowInstances_{suffix}_TenantId_Status_IsArchived", "TenantId, Status, IsArchived")}
-{EnsureNonClusteredIndex($"workflow.WorkflowInstances_{suffix}", $"IX_WorkflowInstances_{suffix}_ReferenceNumber", "ReferenceNumber")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_instances_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_id uuid NOT NULL,
+    workflow_name varchar(256) NOT NULL,
+    workflow_version integer NOT NULL,
+    status integer NOT NULL,
+    current_step_instance_id uuid NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    started_at_utc timestamptz NULL,
+    completed_at_utc timestamptz NULL,
+    started_by uuid NOT NULL,
+    context varchar(4000) NULL,
+    error_message varchar(2000) NULL,
+    reference_number varchar(128) NULL,
+    customer_name varchar(256) NULL,
+    customer_email varchar(256) NULL,
+    customer_phone varchar(64) NULL,
+    department varchar(128) NULL,
+    category varchar(128) NULL,
+    priority integer NOT NULL DEFAULT 1,
+    tags varchar(1000) NULL,
+    custom_fields_json varchar(4000) NULL,
+    assigned_to_user_id uuid NULL,
+    assigned_to_group_id uuid NULL,
+    last_activity_at_utc timestamptz NULL,
+    view_count integer NOT NULL DEFAULT 0,
+    is_archived boolean NOT NULL DEFAULT false,
+    archived_at_utc timestamptz NULL,
+    source_type varchar(64) NULL,
+    source_id varchar(256) NULL,
+    last_viewed_at_utc timestamptz NULL,
+    last_viewed_by uuid NULL
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_instances_{suffix}_tenant_id_workflow_id ON workflow.workflow_instances_{suffix} (tenant_id, workflow_id);
+CREATE INDEX IF NOT EXISTS ix_workflow_instances_{suffix}_tenant_id_status_is_archived ON workflow.workflow_instances_{suffix} (tenant_id, status, is_archived);
+CREATE INDEX IF NOT EXISTS ix_workflow_instances_{suffix}_reference_number ON workflow.workflow_instances_{suffix} (reference_number);";
     }
 
     private static string GenerateWorkflowStepInstancesTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowStepInstances_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowStepInstances_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowStepId UNIQUEIDENTIFIER NOT NULL,
-        StepName NVARCHAR(256) NOT NULL,
-        StepType INT NOT NULL,
-        [Order] INT NOT NULL,
-        Status INT NOT NULL,
-        AssignedToUserId UNIQUEIDENTIFIER NULL,
-        AssignedToRole NVARCHAR(64) NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        StartedAtUtc DATETIME2 NULL,
-        CompletedAtUtc DATETIME2 NULL,
-        CompletedBy UNIQUEIDENTIFIER NULL,
-        Result NVARCHAR(4000) NULL,
-        ErrorMessage NVARCHAR(2000) NULL,
-        ActivityId NVARCHAR(128) NULL,
-        StageType NVARCHAR(64) NULL,
-        CONSTRAINT FK_WorkflowStepInstances_{suffix}_WorkflowInstance FOREIGN KEY (WorkflowInstanceId) REFERENCES workflow.WorkflowInstances_{suffix}(Id) ON DELETE CASCADE
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowStepInstances_{suffix}", $"IX_WorkflowStepInstances_{suffix}_WorkflowInstanceId_Order", "WorkflowInstanceId, [Order]")}
-IF OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}', N'U') IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}') AND name = N'ActivityId')
-BEGIN
-    ALTER TABLE workflow.WorkflowStepInstances_{suffix} ADD ActivityId NVARCHAR(128) NULL;
-END
-IF OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}', N'U') IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}') AND name = N'StageType')
-BEGIN
-    ALTER TABLE workflow.WorkflowStepInstances_{suffix} ADD StageType NVARCHAR(64) NULL;
-END";
+CREATE TABLE IF NOT EXISTS workflow.workflow_step_instances_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_instance_id uuid NOT NULL REFERENCES workflow.workflow_instances_{suffix} (id) ON DELETE CASCADE,
+    workflow_step_id uuid NOT NULL,
+    step_name varchar(256) NOT NULL,
+    step_type integer NOT NULL,
+    ""order"" integer NOT NULL,
+    status integer NOT NULL,
+    assigned_to_user_id uuid NULL,
+    assigned_to_role varchar(64) NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    started_at_utc timestamptz NULL,
+    completed_at_utc timestamptz NULL,
+    completed_by uuid NULL,
+    result varchar(4000) NULL,
+    error_message varchar(2000) NULL,
+    activity_id varchar(128) NULL,
+    stage_type varchar(64) NULL
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_step_instances_{suffix}_workflow_instance_id_order ON workflow.workflow_step_instances_{suffix} (workflow_instance_id, ""order"");
+ALTER TABLE workflow.workflow_step_instances_{suffix} ADD COLUMN IF NOT EXISTS activity_id varchar(128) NULL;
+ALTER TABLE workflow.workflow_step_instances_{suffix} ADD COLUMN IF NOT EXISTS stage_type varchar(64) NULL;";
     }
 
     private static string GenerateWorkflowInstanceSlasTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInstanceSlas_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowInstanceSlas_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        Priority INT NOT NULL,
-        ResponseDeadline DATETIME2 NOT NULL,
-        ResolutionDeadline DATETIME2 NOT NULL,
-        EscalationDeadline DATETIME2 NULL,
-        ResponseAchievedAt DATETIME2 NULL,
-        ResolutionAchievedAt DATETIME2 NULL,
-        ResponseStatus INT NOT NULL,
-        ResolutionStatus INT NOT NULL,
-        IsEscalated BIT NOT NULL DEFAULT 0,
-        EscalatedAt DATETIME2 NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        CONSTRAINT FK_WorkflowInstanceSlas_{suffix}_WorkflowInstance FOREIGN KEY (WorkflowInstanceId) REFERENCES workflow.WorkflowInstances_{suffix}(Id) ON DELETE CASCADE,
-        CONSTRAINT UQ_WorkflowInstanceSlas_{suffix}_WorkflowInstanceId UNIQUE (WorkflowInstanceId)
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowInstanceSlas_{suffix}", $"IX_WorkflowInstanceSlas_{suffix}_ResponseStatus_ResolutionStatus", "ResponseStatus, ResolutionStatus")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_instance_slas_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_instance_id uuid NOT NULL REFERENCES workflow.workflow_instances_{suffix} (id) ON DELETE CASCADE,
+    priority integer NOT NULL,
+    response_deadline timestamptz NOT NULL,
+    resolution_deadline timestamptz NOT NULL,
+    escalation_deadline timestamptz NULL,
+    response_achieved_at timestamptz NULL,
+    resolution_achieved_at timestamptz NULL,
+    response_status integer NOT NULL,
+    resolution_status integer NOT NULL,
+    is_escalated boolean NOT NULL DEFAULT false,
+    escalated_at timestamptz NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_workflow_instance_slas_{suffix}_workflow_instance_id UNIQUE (workflow_instance_id)
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_instance_slas_{suffix}_response_status_resolution_status ON workflow.workflow_instance_slas_{suffix} (response_status, resolution_status);";
     }
 
     private static string GenerateWorkflowInstanceUserStateTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInstanceUserState_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowInstanceUserState_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        UserId UNIQUEIDENTIFIER NOT NULL,
-        IsRead BIT NOT NULL DEFAULT 0,
-        ReadAtUtc DATETIME2 NULL,
-        IsActioned BIT NOT NULL DEFAULT 0,
-        ActionedAtUtc DATETIME2 NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME()
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowInstanceUserState_{suffix}", $"IX_WorkflowInstanceUserState_{suffix}_WorkflowInstanceId_UserId", "WorkflowInstanceId, UserId")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_instance_user_state_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    workflow_instance_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    is_read boolean NOT NULL DEFAULT false,
+    read_at_utc timestamptz NULL,
+    is_actioned boolean NOT NULL DEFAULT false,
+    actioned_at_utc timestamptz NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_instance_user_state_{suffix}_workflow_instance_id_user_id ON workflow.workflow_instance_user_state_{suffix} (workflow_instance_id, user_id);";
     }
 
     private static string GenerateLegacyTransactionTableScript(string suffix)
     {
         var idx = suffix.Replace("-", "_");
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'transaction_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.[transaction_{suffix}] (
-        Id INT IDENTITY(1,1) PRIMARY KEY,
-        TransactionGuid UNIQUEIDENTIFIER NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        ActivityId NVARCHAR(128) NULL,
-        RuleId NVARCHAR(128) NULL,
-        StageType NVARCHAR(64) NULL,
-        StageName NVARCHAR(256) NULL,
-        Review NVARCHAR(64) NULL,
-        ActionStatus INT NOT NULL DEFAULT 0,
-        ActivityUserId UNIQUEIDENTIFIER NULL,
-        ActivityGroupId INT NULL,
-        UserIds NVARCHAR(MAX) NULL,        -- v5 parity (comma-separated legacy ids)
-        GroupIds NVARCHAR(MAX) NULL,       -- v5 parity (comma-separated legacy ids)
-        SlaTransactionId INT NULL,         -- v5 parity
-        InputFrom NVARCHAR(64) NULL,
-        LevelId INT NULL,
-        UserType NVARCHAR(64) NULL,
-        JiraIssueJson NVARCHAR(MAX) NULL,
-        MlPrediction NVARCHAR(MAX) NULL,
-        MlCondition NVARCHAR(MAX) NULL,
-        TicketLockedBy UNIQUEIDENTIFIER NULL,
-        CreatedAt DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        CreatedBy UNIQUEIDENTIFIER NULL,
-        ModifiedAt DATETIME2 NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.[transaction_{suffix}]", $"IX_transaction_{idx}_WorkflowInstanceId_IsDeleted", "WorkflowInstanceId, IsDeleted")}
-{EnsureNonClusteredIndex($"workflow.[transaction_{suffix}]", $"IX_transaction_{idx}_ActivityUser_ActionStatus", "ActivityUserId, ActionStatus")}
-{EnsureNonClusteredIndex($"workflow.[transaction_{suffix}]", $"IX_transaction_{idx}_Instance_Status", "WorkflowInstanceId, IsDeleted, ActionStatus", "ActivityUserId, CreatedBy, StageType, ActivityGroupId")}";
+CREATE TABLE IF NOT EXISTS workflow.transaction_{suffix} (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    transaction_guid uuid NULL,
+    workflow_instance_id uuid NOT NULL,
+    activity_id varchar(128) NULL,
+    rule_id varchar(128) NULL,
+    stage_type varchar(64) NULL,
+    stage_name varchar(256) NULL,
+    review varchar(64) NULL,
+    action_status integer NOT NULL DEFAULT 0,
+    activity_user_id uuid NULL,
+    activity_group_id integer NULL,
+    user_ids text NULL,        -- v5 parity (comma-separated legacy ids)
+    group_ids text NULL,       -- v5 parity (comma-separated legacy ids)
+    sla_transaction_id integer NULL,  -- v5 parity
+    input_from varchar(64) NULL,
+    level_id integer NULL,
+    user_type varchar(64) NULL,
+    jira_issue_json text NULL,
+    ml_prediction text NULL,
+    ml_condition text NULL,
+    ticket_locked_by uuid NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by uuid NULL,
+    modified_at timestamptz NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_transaction_{idx}_workflow_instance_id_is_deleted ON workflow.transaction_{suffix} (workflow_instance_id, is_deleted);
+CREATE INDEX IF NOT EXISTS ix_transaction_{idx}_activity_user_action_status ON workflow.transaction_{suffix} (activity_user_id, action_status);
+CREATE INDEX IF NOT EXISTS ix_transaction_{idx}_instance_status ON workflow.transaction_{suffix} (workflow_instance_id, is_deleted, action_status) INCLUDE (activity_user_id, created_by, stage_type, activity_group_id);";
     }
 
     private static string GenerateCommentsTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowComments_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowComments_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        Comments NVARCHAR(4000) NOT NULL,
-        ExternalCommentsBy NVARCHAR(256) NULL,
-        ShowTo INT NOT NULL DEFAULT 0,
-        EmbedJson NVARCHAR(4000) NULL,
-        EmbedStatus BIT NOT NULL DEFAULT 0,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowComments_{suffix}", $"IX_WorkflowComments_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_comments_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    comments varchar(4000) NOT NULL,
+    external_comments_by varchar(256) NULL,
+    show_to integer NOT NULL DEFAULT 0,
+    embed_json varchar(4000) NULL,
+    embed_status boolean NOT NULL DEFAULT false,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_comments_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_comments_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 
     private static string GenerateAttachmentsTableScript(string suffix)
     {
-        var tableName = $"WorkflowAttachments_{suffix}";
-        var tableFull = $"workflow.[WorkflowAttachments_{suffix}]";
-        var tableQualified = $"workflow.{tableName}";
+        var tableName = $"workflow_attachments_{suffix}";
 
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = '{tableName}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE {tableFull} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        RepositoryId UNIQUEIDENTIFIER NULL,
-        ItemId UNIQUEIDENTIFIER NULL,
-        FormJsonId NVARCHAR(128) NULL,
-        FileName NVARCHAR(512) NULL,
-        FilePath NVARCHAR(1024) NULL,
-        FileSize BIGINT NULL,
-        ContentType NVARCHAR(128) NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex(tableFull, $"IX_{tableName}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}
-ELSE
-BEGIN
-    IF COL_LENGTH('{tableQualified}', 'RepositoryGuid') IS NOT NULL
-        ALTER TABLE {tableFull} DROP COLUMN RepositoryGuid;
-    IF COL_LENGTH('{tableQualified}', 'ItemGuid') IS NOT NULL
-        ALTER TABLE {tableFull} DROP COLUMN ItemGuid;
-
-    IF COL_LENGTH('{tableQualified}', 'RepositoryId') IS NULL
-        ALTER TABLE {tableFull} ADD RepositoryId UNIQUEIDENTIFIER NULL;
-    ELSE IF EXISTS (
-        SELECT 1 FROM sys.columns c
-        INNER JOIN sys.types ty ON ty.user_type_id = c.user_type_id
-        INNER JOIN sys.tables t ON t.object_id = c.object_id
-        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE s.name = N'workflow' AND t.name = N'{tableName}'
-          AND c.name = N'RepositoryId' AND ty.name IN (N'int', N'bigint', N'smallint'))
-    BEGIN
-        ALTER TABLE {tableFull} DROP COLUMN RepositoryId;
-        ALTER TABLE {tableFull} ADD RepositoryId UNIQUEIDENTIFIER NULL;
-    END
-
-    IF COL_LENGTH('{tableQualified}', 'ItemId') IS NULL
-        ALTER TABLE {tableFull} ADD ItemId UNIQUEIDENTIFIER NULL;
-    ELSE IF EXISTS (
-        SELECT 1 FROM sys.columns c
-        INNER JOIN sys.types ty ON ty.user_type_id = c.user_type_id
-        INNER JOIN sys.tables t ON t.object_id = c.object_id
-        INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-        WHERE s.name = N'workflow' AND t.name = N'{tableName}'
-          AND c.name = N'ItemId' AND ty.name IN (N'int', N'bigint', N'smallint'))
-    BEGIN
-        ALTER TABLE {tableFull} DROP COLUMN ItemId;
-        ALTER TABLE {tableFull} ADD ItemId UNIQUEIDENTIFIER NULL;
-    END
-END";
+CREATE TABLE IF NOT EXISTS workflow.{tableName} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    repository_id uuid NULL,
+    item_id uuid NULL,
+    form_json_id varchar(128) NULL,
+    file_name varchar(512) NULL,
+    file_path varchar(1024) NULL,
+    file_size bigint NULL,
+    content_type varchar(128) NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_{tableName}_tenant_id_workflow_instance_id ON workflow.{tableName} (tenant_id, workflow_instance_id, is_deleted);
+-- Legacy INT->GUID upgrade path (repository_guid/item_guid mistaken columns, repository_id/
+-- item_id typed int) is not carried over: this table is always created with uuid columns
+-- from the start on Postgres (Phase 3 confirmed no Postgres tenant will ever have the
+-- legacy int-typed shape), so the defensive ALTER/DROP dance the SQL Server version needed
+-- has nothing to do here.";
     }
 
-    /// <summary>Legacy v5 processForm_{suffix}: WorkflowInstanceId + ezfb itemId as FormEntryId (no ProcessId).</summary>
+    /// <summary>Legacy v5 process_form_{suffix}: workflow_instance_id + ezfb itemId as form_entry_id (no process_id).</summary>
     private static string GenerateProcessFormTableScript(string suffix)
     {
-        var idx = suffix.Replace("-", "_");
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'processForm_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.processForm_{suffix} (
-        Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        WFormId NVARCHAR(64) NOT NULL,
-        FormEntryId INT NOT NULL,
-        CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_processForm_{idx}_CreatedAt DEFAULT SYSUTCDATETIME(),
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        IsDeleted BIT NOT NULL CONSTRAINT DF_processForm_{idx}_IsDeleted DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.processForm_{suffix}", $"IX_processForm_{idx}_WorkflowInstanceId_IsDeleted", "WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.process_form_{suffix} (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workflow_instance_id uuid NOT NULL,
+    w_form_id varchar(64) NOT NULL,
+    form_entry_id integer NOT NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    created_by uuid NOT NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_process_form_{suffix}_workflow_instance_id_is_deleted ON workflow.process_form_{suffix} (workflow_instance_id, is_deleted);";
     }
 
-    /// <summary>Legacy v5 processAddon_{suffix}: process (instance) → repository item link for attachments.</summary>
+    /// <summary>Legacy v5 process_addon_{suffix}: process (instance) -> repository item link for attachments.</summary>
     private static string GenerateProcessAddonTableScript(string suffix)
     {
-        var idx = suffix.Replace("-", "_");
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'processAddon_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.processAddon_{suffix} (
-        Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        ProcessId UNIQUEIDENTIFIER NOT NULL,
-        RepositoryId UNIQUEIDENTIFIER NOT NULL,
-        ItemId UNIQUEIDENTIFIER NOT NULL,
-        FileName NVARCHAR(512) NULL,
-        TransactionId INT NULL,
-        CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_processAddon_{idx}_CreatedAt DEFAULT SYSUTCDATETIME(),
-        ModifiedAt DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL CONSTRAINT DF_processAddon_{idx}_IsDeleted DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.processAddon_{suffix}", $"IX_processAddon_{idx}_ProcessId_IsDeleted", "ProcessId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.process_addon_{suffix} (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    process_id uuid NOT NULL,
+    repository_id uuid NOT NULL,
+    item_id uuid NOT NULL,
+    file_name varchar(512) NULL,
+    transaction_id integer NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    modified_at timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_process_addon_{suffix}_process_id_is_deleted ON workflow.process_addon_{suffix} (process_id, is_deleted);";
     }
 
     private static string GenerateFormsTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowForms_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowForms_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        WFormId INT NOT NULL,
-        FormEntryId INT NOT NULL,
-        FormData NVARCHAR(4000) NULL,
-        HasFormPdf BIT NOT NULL DEFAULT 0,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowForms_{suffix}", $"IX_WorkflowForms_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_forms_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    w_form_id integer NOT NULL,
+    form_entry_id integer NOT NULL,
+    form_data varchar(4000) NULL,
+    has_form_pdf boolean NOT NULL DEFAULT false,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_forms_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_forms_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 
     private static string GenerateTasksTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowTasks_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowTasks_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        WFormId INT NOT NULL,
-        FormEntryId INT NOT NULL,
-        TaskName NVARCHAR(256) NULL,
-        TaskDescription NVARCHAR(2000) NULL,
-        AssignedToUserId UNIQUEIDENTIFIER NULL,
-        DueDate DATETIME2 NULL,
-        IsCompleted BIT NOT NULL DEFAULT 0,
-        CompletedAt DATETIME2 NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowTasks_{suffix}", $"IX_WorkflowTasks_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}
-{EnsureNonClusteredIndex($"workflow.WorkflowTasks_{suffix}", $"IX_WorkflowTasks_{suffix}_TenantId_AssignedToUserId", "TenantId, AssignedToUserId, IsCompleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_tasks_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    w_form_id integer NOT NULL,
+    form_entry_id integer NOT NULL,
+    task_name varchar(256) NULL,
+    task_description varchar(2000) NULL,
+    assigned_to_user_id uuid NULL,
+    due_date timestamptz NULL,
+    is_completed boolean NOT NULL DEFAULT false,
+    completed_at timestamptz NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_tasks_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_tasks_{suffix} (tenant_id, workflow_instance_id, is_deleted);
+CREATE INDEX IF NOT EXISTS ix_workflow_tasks_{suffix}_tenant_id_assigned_to_user_id ON workflow.workflow_tasks_{suffix} (tenant_id, assigned_to_user_id, is_completed);";
     }
 
     private static string GenerateSignaturesTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowSignatures_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowSignatures_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        FileName NVARCHAR(512) NOT NULL,
-        FilePath NVARCHAR(1024) NULL,
-        SignedBy UNIQUEIDENTIFIER NOT NULL,
-        SignedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        SignatureData NVARCHAR(4000) NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowSignatures_{suffix}", $"IX_WorkflowSignatures_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_signatures_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    file_name varchar(512) NOT NULL,
+    file_path varchar(1024) NULL,
+    signed_by uuid NOT NULL,
+    signed_at_utc timestamptz NOT NULL DEFAULT now(),
+    signature_data varchar(4000) NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_signatures_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_signatures_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 
     private static string GenerateDocumentsTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowDocuments_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowDocuments_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NULL,
-        FileName NVARCHAR(512) NOT NULL,
-        Description NVARCHAR(2000) NULL,
-        Type NVARCHAR(64) NULL,
-        Status INT NOT NULL DEFAULT 0,
-        IsMandatory BIT NOT NULL DEFAULT 0,
-        FilePath NVARCHAR(1024) NULL,
-        UploadedAt DATETIME2 NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowDocuments_{suffix}", $"IX_WorkflowDocuments_{suffix}_TenantId_WorkflowId", "TenantId, WorkflowId, IsDeleted")}
-{EnsureNonClusteredIndex($"workflow.WorkflowDocuments_{suffix}", $"IX_WorkflowDocuments_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_documents_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_id uuid NOT NULL,
+    workflow_instance_id uuid NULL,
+    file_name varchar(512) NOT NULL,
+    description varchar(2000) NULL,
+    type varchar(64) NULL,
+    status integer NOT NULL DEFAULT 0,
+    is_mandatory boolean NOT NULL DEFAULT false,
+    file_path varchar(1024) NULL,
+    uploaded_at timestamptz NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_documents_{suffix}_tenant_id_workflow_id ON workflow.workflow_documents_{suffix} (tenant_id, workflow_id, is_deleted);
+CREATE INDEX IF NOT EXISTS ix_workflow_documents_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_documents_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 
     private static string GenerateEmailsTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowEmails_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowEmails_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        EmailType NVARCHAR(64) NOT NULL,
-        EzMailId INT NULL,
-        MsgFileName NVARCHAR(512) NULL,
-        Email NVARCHAR(256) NOT NULL,
-        Subject NVARCHAR(512) NULL,
-        Body NVARCHAR(4000) NULL,
-        AttachmentCount INT NOT NULL DEFAULT 0,
-        AttachmentJson NVARCHAR(4000) NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowEmails_{suffix}", $"IX_WorkflowEmails_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_emails_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    email_type varchar(64) NOT NULL,
+    ez_mail_id integer NULL,
+    msg_file_name varchar(512) NULL,
+    email varchar(256) NOT NULL,
+    subject varchar(512) NULL,
+    body varchar(4000) NULL,
+    attachment_count integer NOT NULL DEFAULT 0,
+    attachment_json varchar(4000) NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_emails_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_emails_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 
-    /// <summary>Legacy AP agent OCR/validation store (agentDataValidation_{workflow8}).</summary>
+    /// <summary>Legacy AP agent OCR/validation store (agent_data_validation_{workflow8}).</summary>
     private static string GenerateAgentDataValidationTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'agentDataValidation_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.agentDataValidation_{suffix} (
-        Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        WorkflowId UNIQUEIDENTIFIER NOT NULL,
-        ProcessId UNIQUEIDENTIFIER NOT NULL,
-        TransactionId NVARCHAR(256) NULL,
-        Type NVARCHAR(64) NULL,
-        AgentResponse NVARCHAR(MAX) NULL,
-        AgentHtmlResponse NVARCHAR(MAX) NULL,
-        CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_agentDataValidation_{suffix}_CreatedAt DEFAULT SYSUTCDATETIME(),
-        ModifiedAt DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL CONSTRAINT DF_agentDataValidation_{suffix}_IsDeleted DEFAULT 0
-    );
-END";
+CREATE TABLE IF NOT EXISTS workflow.agent_data_validation_{suffix} (
+    id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    workflow_id uuid NOT NULL,
+    process_id uuid NOT NULL,
+    transaction_id varchar(256) NULL,
+    type varchar(64) NULL,
+    agent_response text NULL,
+    agent_html_response text NULL,
+    created_at timestamptz NOT NULL DEFAULT now(),
+    modified_at timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);";
     }
 
     private static string GenerateAiValidationsTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowAiValidations_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowAiValidations_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        Type NVARCHAR(64) NOT NULL,
-        AgentResponse NVARCHAR(4000) NULL,
-        FieldName NVARCHAR(256) NULL,
-        FormValue NVARCHAR(1000) NULL,
-        OcrValue NVARCHAR(1000) NULL,
-        ValidationStatus NVARCHAR(64) NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowAiValidations_{suffix}", $"IX_WorkflowAiValidations_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
+CREATE TABLE IF NOT EXISTS workflow.workflow_ai_validations_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    type varchar(64) NOT NULL,
+    agent_response varchar(4000) NULL,
+    field_name varchar(256) NULL,
+    form_value varchar(1000) NULL,
+    ocr_value varchar(1000) NULL,
+    validation_status varchar(64) NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_ai_validations_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_ai_validations_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 
     private static string GeneratePdfAnnotationsTableScript(string suffix)
     {
         return $@"
-IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowPdfAnnotations_{suffix}' AND schema_id = SCHEMA_ID('workflow'))
-BEGIN
-    CREATE TABLE workflow.WorkflowPdfAnnotations_{suffix} (
-        Id UNIQUEIDENTIFIER PRIMARY KEY DEFAULT NEWID(),
-        TenantId UNIQUEIDENTIFIER NOT NULL,
-        WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-        StepInstanceId UNIQUEIDENTIFIER NULL,
-        RepositoryId INT NULL,
-        ItemId INT NULL,
-        AnnotationStatus INT NOT NULL DEFAULT 0,
-        SettingsJson NVARCHAR(4000) NULL,
-        CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-        ModifiedAtUtc DATETIME2 NULL,
-        CreatedBy UNIQUEIDENTIFIER NOT NULL,
-        ModifiedBy UNIQUEIDENTIFIER NULL,
-        IsDeleted BIT NOT NULL DEFAULT 0
-    );
-END
-{EnsureNonClusteredIndex($"workflow.WorkflowPdfAnnotations_{suffix}", $"IX_WorkflowPdfAnnotations_{suffix}_TenantId_WorkflowInstanceId", "TenantId, WorkflowInstanceId, IsDeleted")}";
-    }
-
-    /// <summary>Separate CREATE INDEX (inline INDEX in CREATE TABLE fails on SQL Server &lt; 2014).</summary>
-    private static string EnsureNonClusteredIndex(
-        string tableObjectName,
-        string indexName,
-        string columnList,
-        string? includeColumns = null)
-    {
-        var include = string.IsNullOrWhiteSpace(includeColumns) ? "" : $" INCLUDE ({includeColumns})";
-        return $@"
-IF OBJECT_ID(N'{tableObjectName}', N'U') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.indexes i
-    WHERE i.name = N'{indexName}' AND i.object_id = OBJECT_ID(N'{tableObjectName}'))
-    CREATE NONCLUSTERED INDEX [{indexName}] ON {tableObjectName} ({columnList}){include};";
+CREATE TABLE IF NOT EXISTS workflow.workflow_pdf_annotations_{suffix} (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id uuid NOT NULL,
+    workflow_instance_id uuid NOT NULL,
+    step_instance_id uuid NULL,
+    repository_id integer NULL,
+    item_id integer NULL,
+    annotation_status integer NOT NULL DEFAULT 0,
+    settings_json varchar(4000) NULL,
+    created_at_utc timestamptz NOT NULL DEFAULT now(),
+    modified_at_utc timestamptz NULL,
+    created_by uuid NOT NULL,
+    modified_by uuid NULL,
+    is_deleted boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS ix_workflow_pdf_annotations_{suffix}_tenant_id_workflow_instance_id ON workflow.workflow_pdf_annotations_{suffix} (tenant_id, workflow_instance_id, is_deleted);";
     }
 }

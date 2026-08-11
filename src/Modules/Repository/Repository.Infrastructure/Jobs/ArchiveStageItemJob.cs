@@ -1,6 +1,6 @@
 using Hangfire;
 using Hangfire.Server;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SaaSApp.MultiTenancy;
@@ -62,7 +62,7 @@ public sealed class ArchiveStageItemJob
             var repo = await provisioner.GetRepositoryAsync(args.RepositoryId, args.TenantId, default)
                 ?? throw new InvalidOperationException("Repository not found.");
 
-            await using var connection = new SqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync();
 
             var row = await RepositoryStageStore.GetAsync(connection, repo, args.TenantId, args.StageId, default)

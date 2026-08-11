@@ -1,0 +1,17 @@
+-- Migrate workflow.WorkflowAttachments_{suffix} RepositoryId/ItemId INT -> UUID -- Postgres
+-- Ported from scripts/Alter_WorkflowAttachments_IntToUniqueIdentifier.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL SCRIPT. This is a one-time, manual, per-workflow repair
+-- tool for a historical SQL Server bug: some WorkflowAttachments_{suffix} tables were
+-- originally created with INT RepositoryId/ItemId columns before the app settled on
+-- GUID columns for these. Confirmed via Create_WorkflowAttachments_OnWorkflowCreate.sql's
+-- own header ("same as API on CREATE / PUBLISH / START workflow -- Code:
+-- WorkflowTableCreator.GenerateAttachmentsTableScript ... RepositoryId, ItemId =
+-- UNIQUEIDENTIFIER (GUID) -- NOT int") that WorkflowTableCreator.cs -- the real,
+-- current source of truth for these tables, Phase 4's #1 priority file -- already
+-- creates them with GUID/uuid columns from the start. No Postgres tenant will ever
+-- have the legacy int-typed table this script exists to fix, since nothing on
+-- Postgres ever creates that shape. Same reasoning applies to
+-- Alter_WorkflowAttachments_RepositoryId_ItemId_ToGuid.sql,
+-- Create_WorkflowAttachments_OnWorkflowCreate.sql, and
+-- WorkflowAttachments_RepositoryItem_Guid.sql -- none of the four are ported.

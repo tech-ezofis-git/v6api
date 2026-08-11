@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure;
@@ -18,7 +18,7 @@ internal static class RepositoryItemWorkflowStatusEnricher
     private const int InstanceCancelled = 5;
 
     public static async Task EnrichListAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IList<RepositoryItemListDto> items,
         CancellationToken cancellationToken)
     {
@@ -53,7 +53,7 @@ internal static class RepositoryItemWorkflowStatusEnricher
     }
 
     public static async Task<string?> ResolveStatusAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
@@ -66,7 +66,7 @@ internal static class RepositoryItemWorkflowStatusEnricher
     /// <paramref name="displayStatuses"/> (case-insensitive).
     /// </summary>
     public static async Task<IReadOnlyList<Guid>> FindInstanceIdsWithDisplayStatusAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IReadOnlyList<Guid> candidateInstanceIds,
         IReadOnlyList<string> displayStatuses,
         CancellationToken cancellationToken)
@@ -92,13 +92,13 @@ internal static class RepositoryItemWorkflowStatusEnricher
 
     /// <summary>Display Status for each instance (same values as list enrichment).</summary>
     public static Task<Dictionary<Guid, string>> GetDisplayStatusMapAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IReadOnlyList<Guid> candidateInstanceIds,
         CancellationToken cancellationToken) =>
         ResolveStatusesAsync(connection, candidateInstanceIds, cancellationToken);
 
     private static async Task<Dictionary<Guid, string>> ResolveStatusesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IReadOnlyList<Guid> instanceIds,
         CancellationToken cancellationToken)
     {
@@ -116,8 +116,10 @@ internal static class RepositoryItemWorkflowStatusEnricher
         foreach (var group in lookups.GroupBy(x => x.WorkflowId))
         {
             var suffix = group.Key.ToString("N")[..8];
+            // transaction_{suffix} is created by the dynamic DDL engine (WorkflowTableCreator.cs,
+            // ported earlier in Phase 4) with snake_case unquoted columns.
             var transactionTable = $"transaction_{suffix}";
-            if (!await TableExistsAsync(connection, transactionTable, cancellationToken))
+            if (!await TableExistsAsync(connection, transactionTable, cancellationToken, schema: "workflow"))
             {
                 foreach (var row in group)
                     result[row.InstanceId] = MapInstanceStatus(row.Status);
@@ -149,19 +151,19 @@ internal static class RepositoryItemWorkflowStatusEnricher
     }
 
     private static async Task<List<(Guid InstanceId, Guid WorkflowId, int Status)>> LoadLookupsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IReadOnlyList<Guid> instanceIds,
         CancellationToken cancellationToken)
     {
         var list = new List<(Guid, Guid, int)>();
         const string sql = """
-            SELECT InstanceId, WorkflowId, Status
-            FROM workflow.WorkflowInstanceLookup
-            WHERE InstanceId IN (SELECT value FROM OPENJSON(@Ids));
+            SELECT "InstanceId", "WorkflowId", "Status"
+            FROM workflow."WorkflowInstanceLookup"
+            WHERE "InstanceId" = ANY(@Ids);
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Ids", ToJsonGuidArray(instanceIds));
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Ids", instanceIds.ToArray());
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             list.Add((reader.GetGuid(0), reader.GetGuid(1), reader.GetInt32(2)));
@@ -170,46 +172,46 @@ internal static class RepositoryItemWorkflowStatusEnricher
     }
 
     private static async Task<Dictionary<Guid, string>> LoadCurrentStagesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTableName,
         IReadOnlyList<Guid> instanceIds,
         CancellationToken cancellationToken)
     {
         var map = new Dictionary<Guid, string>();
-        var table = $"workflow.[{transactionTableName}]";
+        var table = $"workflow.{transactionTableName}";
 
         var sql = $"""
             WITH ranked AS (
                 SELECT
-                    WorkflowInstanceId,
-                    StageName,
-                    Review,
-                    ActionStatus,
+                    workflow_instance_id,
+                    stage_name,
+                    review,
+                    action_status,
                     ROW_NUMBER() OVER (
-                        PARTITION BY WorkflowInstanceId
+                        PARTITION BY workflow_instance_id
                         ORDER BY
-                            CASE WHEN ActionStatus = 0 AND UPPER(LTRIM(RTRIM(ISNULL(StageType, N'')))) <> N'END' THEN 0 ELSE 1 END,
-                            Id DESC
+                            CASE WHEN action_status = 0 AND UPPER(TRIM(COALESCE(stage_type, ''))) <> 'END' THEN 0 ELSE 1 END,
+                            id DESC
                     ) AS rn
                 FROM {table}
-                WHERE IsDeleted = 0
-                  AND WorkflowInstanceId IN (SELECT value FROM OPENJSON(@Ids))
+                WHERE is_deleted = false
+                  AND workflow_instance_id = ANY(@Ids)
             )
             SELECT
-                WorkflowInstanceId,
+                workflow_instance_id,
                 CASE
-                    WHEN ActionStatus = 0 AND NULLIF(LTRIM(RTRIM(StageName)), N'') IS NOT NULL THEN StageName
-                    WHEN NULLIF(LTRIM(RTRIM(Review)), N'') IS NOT NULL
-                         AND UPPER(LTRIM(RTRIM(Review))) <> N'END' THEN Review
-                    WHEN NULLIF(LTRIM(RTRIM(StageName)), N'') IS NOT NULL THEN StageName
+                    WHEN action_status = 0 AND NULLIF(TRIM(stage_name), '') IS NOT NULL THEN stage_name
+                    WHEN NULLIF(TRIM(review), '') IS NOT NULL
+                         AND UPPER(TRIM(review)) <> 'END' THEN review
+                    WHEN NULLIF(TRIM(stage_name), '') IS NOT NULL THEN stage_name
                     ELSE NULL
-                END AS DisplayStatus
+                END AS display_status
             FROM ranked
             WHERE rn = 1;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Ids", ToJsonGuidArray(instanceIds));
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Ids", instanceIds.ToArray());
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -235,21 +237,19 @@ internal static class RepositoryItemWorkflowStatusEnricher
             _ => "Active"
         };
 
-    private static string ToJsonGuidArray(IReadOnlyList<Guid> ids) =>
-        "[" + string.Join(",", ids.Select(id => $"\"{id:D}\"")) + "]";
-
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string schema = "workflow")
     {
         const string sql = """
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @Name AND s.name = N'workflow';
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = @Name AND table_schema = @Schema;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Name", tableName);
+        cmd.Parameters.AddWithValue("@Schema", schema);
         return await cmd.ExecuteScalarAsync(cancellationToken) is not null;
     }
 }

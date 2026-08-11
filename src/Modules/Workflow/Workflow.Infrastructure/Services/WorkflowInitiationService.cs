@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows.Commands.CreateWorkflow;
@@ -59,7 +59,7 @@ public sealed class WorkflowInitiationService : IWorkflowInitiationService
         }
 
         // Handle Master Form initiation
-        if (startBlock.Settings?.InitiateBy != null && 
+        if (startBlock.Settings?.InitiateBy != null &&
             (startBlock.Settings.InitiateBy.Contains("MASTER_FORM") || startBlock.Settings.InitiateBy.Contains("DOCUMENT")))
         {
             var initiateInfo = new
@@ -78,15 +78,16 @@ public sealed class WorkflowInitiationService : IWorkflowInitiationService
 
             var inputJson = JsonSerializer.Serialize(initiateInfo);
 
-            await using var connection = new SqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
 
-            var sql = @"
-                INSERT INTO workflow.WorkflowInitiateInfo 
-                (TenantId, WorkflowId, InputType, InputJson, Status, Remarks, CreatedBy, CreatedAtUtc, RepositoryId)
-                VALUES (@TenantId, @WorkflowId, @InputType, @InputJson, 0, '', @CreatedBy, @CreatedAt, @RepositoryId)";
+            const string sql = """
+                INSERT INTO workflow."WorkflowInitiateInfo"
+                ("TenantId", "WorkflowId", "InputType", "InputJson", "Status", "Remarks", "CreatedBy", "CreatedAtUtc", "RepositoryId")
+                VALUES (@TenantId, @WorkflowId, @InputType, @InputJson, 0, '', @CreatedBy, @CreatedAt, @RepositoryId)
+                """;
 
-            await using var command = new SqlCommand(sql, connection);
+            await using var command = new NpgsqlCommand(sql, connection);
             command.Parameters.AddWithValue("@TenantId", tenantId.Value);
             command.Parameters.AddWithValue("@WorkflowId", workflowId);
             command.Parameters.AddWithValue("@InputType", string.Join(",", startBlock.Settings.InitiateBy ?? Array.Empty<string>()));
@@ -108,15 +109,16 @@ public sealed class WorkflowInitiationService : IWorkflowInitiationService
                 mailInitiate = mailInitiate with { Review = review };
                 var inputJson = JsonSerializer.Serialize(mailInitiate);
 
-                await using var connection = new SqlConnection(connectionString);
+                await using var connection = new NpgsqlConnection(connectionString);
                 await connection.OpenAsync(cancellationToken);
 
-                var sql = @"
-                    INSERT INTO workflow.WorkflowInitiateInfo 
-                    (TenantId, WorkflowId, InputType, InputJson, Status, Remarks, CreatedBy, CreatedAtUtc, RepositoryId)
-                    VALUES (@TenantId, @WorkflowId, @InputType, @InputJson, 0, '', @CreatedBy, @CreatedAt, @RepositoryId)";
+                const string sql = """
+                    INSERT INTO workflow."WorkflowInitiateInfo"
+                    ("TenantId", "WorkflowId", "InputType", "InputJson", "Status", "Remarks", "CreatedBy", "CreatedAtUtc", "RepositoryId")
+                    VALUES (@TenantId, @WorkflowId, @InputType, @InputJson, 0, '', @CreatedBy, @CreatedAt, @RepositoryId)
+                    """;
 
-                await using var command = new SqlCommand(sql, connection);
+                await using var command = new NpgsqlCommand(sql, connection);
                 command.Parameters.AddWithValue("@TenantId", tenantId.Value);
                 command.Parameters.AddWithValue("@WorkflowId", workflowId);
                 command.Parameters.AddWithValue("@InputType", string.Join(",", startBlock.Settings.InitiateBy));
@@ -134,27 +136,25 @@ public sealed class WorkflowInitiationService : IWorkflowInitiationService
     private static async Task EnsureWorkflowInitiateInfoTableAsync(string connectionString, CancellationToken cancellationToken)
     {
         const string sql = """
-            IF NOT EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInitiateInfo' AND schema_id = SCHEMA_ID('workflow'))
-            BEGIN
-                CREATE TABLE workflow.WorkflowInitiateInfo (
-                    Id INT IDENTITY(1,1) PRIMARY KEY,
-                    TenantId UNIQUEIDENTIFIER NOT NULL,
-                    WorkflowId UNIQUEIDENTIFIER NOT NULL,
-                    InputType NVARCHAR(256) NOT NULL,
-                    InputJson NVARCHAR(MAX) NULL,
-                    Status INT NOT NULL DEFAULT 0,
-                    Remarks NVARCHAR(2000) NOT NULL DEFAULT '',
-                    CreatedBy UNIQUEIDENTIFIER NOT NULL,
-                    CreatedAtUtc DATETIME2 NOT NULL DEFAULT SYSUTCDATETIME(),
-                    RepositoryId INT NULL
-                );
-                CREATE INDEX IX_WorkflowInitiateInfo_WorkflowId ON workflow.WorkflowInitiateInfo (WorkflowId);
-            END
+            CREATE SCHEMA IF NOT EXISTS workflow;
+            CREATE TABLE IF NOT EXISTS workflow."WorkflowInitiateInfo" (
+                "Id" bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                "TenantId" uuid NOT NULL,
+                "WorkflowId" uuid NOT NULL,
+                "InputType" varchar(256) NOT NULL,
+                "InputJson" text NULL,
+                "Status" integer NOT NULL DEFAULT 0,
+                "Remarks" varchar(2000) NOT NULL DEFAULT '',
+                "CreatedBy" uuid NOT NULL,
+                "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+                "RepositoryId" integer NULL
+            );
+            CREATE INDEX IF NOT EXISTS "IX_WorkflowInitiateInfo_WorkflowId" ON workflow."WorkflowInitiateInfo" ("WorkflowId");
             """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+        await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -168,4 +168,3 @@ public sealed class WorkflowInitiationService : IWorkflowInitiationService
         return null;
     }
 }
-

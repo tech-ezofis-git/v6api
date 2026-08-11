@@ -1,0 +1,10 @@
+-- Optional: remove Review from workflow.WorkflowSteps -- Postgres
+-- Ported from scripts/DropWorkflowStepsReview.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL SCRIPT. Checked scripts/postgres/CreateWorkflowSchemaComplete.sql
+-- (the current, authoritative WorkflowSteps definition, matching the SQL Server
+-- original it was ported from) -- neither the Postgres port nor the SQL Server source
+-- script it came from define a "Review" column on workflow.WorkflowSteps. This DROP
+-- script exists to clean up a column added by some even-older, no-longer-present
+-- migration; nothing on Postgres will ever create that column, so there's nothing to
+-- drop.

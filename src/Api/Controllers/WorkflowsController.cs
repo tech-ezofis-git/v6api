@@ -1,5 +1,5 @@
 using MediatR;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SaaSApp.Api.Services;
@@ -302,31 +302,31 @@ public sealed class WorkflowsController : ControllerBase
 
         var whereParts = new List<string>
         {
-            includeDeleted ? "w.IsDeleted = 1" : "w.IsDeleted = 0"
+            includeDeleted ? "w.\"IsDeleted\" = true" : "w.\"IsDeleted\" = false"
         };
-        var parameters = new List<SqlParameter>();
+        var parameters = new List<NpgsqlParameter>();
 
         if (request.HasSecurity && userId != null && !isAdmin)
         {
             whereParts.Add("""
                 (
-                    EXISTS (SELECT 1 FROM workflow.WorkflowSecurity s WHERE s.WorkflowId = w.Id AND s.UserId = @CurrentUserId AND s.IsDeleted = 0)
-                    OR EXISTS (SELECT 1 FROM workflow.WorkflowUsers u WHERE u.WorkflowId = w.Id AND u.UserId = @CurrentUserId AND u.IsDeleted = 0)
-                    OR (w.CreatedBy = @CurrentUserId)
+                    EXISTS (SELECT 1 FROM workflow."WorkflowSecurity" s WHERE s."WorkflowId" = w."Id" AND s."UserId" = @CurrentUserId AND s."IsDeleted" = false)
+                    OR EXISTS (SELECT 1 FROM workflow."WorkflowUsers" u WHERE u."WorkflowId" = w."Id" AND u."UserId" = @CurrentUserId AND u."IsDeleted" = false)
+                    OR (w."CreatedBy" = @CurrentUserId)
                 )
                 """);
-            whereParts.Add("NOT (w.Status = 0 AND w.CreatedBy <> @CurrentUserId)");
-            parameters.Add(new SqlParameter("@CurrentUserId", userId.Value));
+            whereParts.Add("NOT (w.\"Status\" = 0 AND w.\"CreatedBy\" <> @CurrentUserId)");
+            parameters.Add(new NpgsqlParameter("@CurrentUserId", userId.Value));
         }
         else if (request.HasReport && userId != null)
         {
             whereParts.Add("""
                 (
-                    EXISTS (SELECT 1 FROM workflow.WorkflowUsers u WHERE u.WorkflowId = w.Id AND u.UserId = @CurrentUserId AND u.IsDeleted = 0)
-                    OR (w.CreatedBy = @CurrentUserId)
+                    EXISTS (SELECT 1 FROM workflow."WorkflowUsers" u WHERE u."WorkflowId" = w."Id" AND u."UserId" = @CurrentUserId AND u."IsDeleted" = false)
+                    OR (w."CreatedBy" = @CurrentUserId)
                 )
                 """);
-            parameters.Add(new SqlParameter("@CurrentUserId", userId.Value));
+            parameters.Add(new NpgsqlParameter("@CurrentUserId", userId.Value));
         }
 
         foreach (var filter in (request.FilterBy ?? new List<WorkflowAllFilterGroup>()).SelectMany(g => g.Filters ?? new List<WorkflowAllFilter>()))
@@ -340,40 +340,40 @@ public sealed class WorkflowsController : ControllerBase
         }
 
         var whereSql = string.Join(" AND ", whereParts);
-        var countSql = $"SELECT COUNT(*) FROM workflow.Workflows w WHERE {whereSql};";
+        var countSql = $"""SELECT COUNT(*) FROM workflow."Workflows" w WHERE {whereSql};""";
         var selectSql = $"""
             SELECT
-                w.Id,
-                w.Name,
-                w.Description,
-                w.Status,
-                w.CreatedBy,
-                w.ModifiedBy,
-                w.CreatedAtUtc,
-                w.ModifiedAtUtc,
-                cb.Email AS CreatedByName,
-                COALESCE(mb.Email, cb.Email) AS ModifiedByName
-            FROM workflow.Workflows w
-            LEFT JOIN users.Users cb ON cb.Id = w.CreatedBy AND cb.IsDeleted = 0
-            LEFT JOIN users.Users mb ON mb.Id = w.ModifiedBy AND mb.IsDeleted = 0
+                w."Id",
+                w."Name",
+                w."Description",
+                w."Status",
+                w."CreatedBy",
+                w."ModifiedBy",
+                w."CreatedAtUtc",
+                w."ModifiedAtUtc",
+                cb."Email" AS "CreatedByName",
+                COALESCE(mb."Email", cb."Email") AS "ModifiedByName"
+            FROM workflow."Workflows" w
+            LEFT JOIN users."Users" cb ON cb."Id" = w."CreatedBy" AND cb."IsDeleted" = false
+            LEFT JOIN users."Users" mb ON mb."Id" = w."ModifiedBy" AND mb."IsDeleted" = false
             WHERE {whereSql}
             ORDER BY {sortColumn} {sortOrder}
             OFFSET @Skip ROWS
             FETCH NEXT @Take ROWS ONLY;
             """;
 
-        await using var connection = new SqlConnection(conn);
+        await using var connection = new NpgsqlConnection(conn);
         await connection.OpenAsync(cancellationToken);
 
         int totalItems;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
-            countCmd.Parameters.AddRange(parameters.Select(p => new SqlParameter(p.ParameterName, p.Value)).ToArray());
+            countCmd.Parameters.AddRange(parameters.Select(p => new NpgsqlParameter(p.ParameterName, p.Value)).ToArray());
             totalItems = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
         }
 
         var items = new List<WorkflowAllItem>();
-        await using (var listCmd = new SqlCommand(selectSql, connection))
+        await using (var listCmd = new NpgsqlCommand(selectSql, connection))
         {
             listCmd.Parameters.AddRange(parameters.ToArray());
             listCmd.Parameters.AddWithValue("@Skip", Math.Max(skip, 0));
@@ -415,22 +415,22 @@ public sealed class WorkflowsController : ControllerBase
         if (currentUserId == null)
             return Unauthorized(new { error = "User context is required." });
 
-        await using var connection = new SqlConnection(conn);
+        await using var connection = new NpgsqlConnection(conn);
         await connection.OpenAsync(cancellationToken);
 
         var whereSql = """
-            w.IsDeleted = 0
-            AND w.Status = 1
+            w."IsDeleted" = false
+            AND w."Status" = 1
             """;
-        var parameters = new List<SqlParameter>
+        var parameters = new List<NpgsqlParameter>
         {
             new("@CurrentUserId", currentUserId.Value)
         };
 
         if (Guid.TryParse(wId, out var workflowId) && workflowId != Guid.Empty)
         {
-            whereSql += " AND w.Id = @WorkflowId";
-            parameters.Add(new SqlParameter("@WorkflowId", workflowId));
+            whereSql += " AND w.\"Id\" = @WorkflowId";
+            parameters.Add(new NpgsqlParameter("@WorkflowId", workflowId));
         }
         else
         {
@@ -438,36 +438,36 @@ public sealed class WorkflowsController : ControllerBase
             // In new schema: "public" is approximated as no rows in WorkflowUsers/WorkflowSecurity.
             whereSql += """
                 AND (
-                    NOT EXISTS (SELECT 1 FROM workflow.WorkflowUsers wu WHERE wu.WorkflowId = w.Id AND wu.IsDeleted = 0)
-                    AND NOT EXISTS (SELECT 1 FROM workflow.WorkflowSecurity ws WHERE ws.WorkflowId = w.Id AND ws.IsDeleted = 0)
-                    OR EXISTS (SELECT 1 FROM workflow.WorkflowUsers wu WHERE wu.WorkflowId = w.Id AND wu.UserId = @CurrentUserId AND wu.IsDeleted = 0)
-                    OR EXISTS (SELECT 1 FROM workflow.WorkflowSecurity ws WHERE ws.WorkflowId = w.Id AND ws.UserId = @CurrentUserId AND ws.IsDeleted = 0)
-                    OR w.CreatedBy = @CurrentUserId
+                    NOT EXISTS (SELECT 1 FROM workflow."WorkflowUsers" wu WHERE wu."WorkflowId" = w."Id" AND wu."IsDeleted" = false)
+                    AND NOT EXISTS (SELECT 1 FROM workflow."WorkflowSecurity" ws WHERE ws."WorkflowId" = w."Id" AND ws."IsDeleted" = false)
+                    OR EXISTS (SELECT 1 FROM workflow."WorkflowUsers" wu WHERE wu."WorkflowId" = w."Id" AND wu."UserId" = @CurrentUserId AND wu."IsDeleted" = false)
+                    OR EXISTS (SELECT 1 FROM workflow."WorkflowSecurity" ws WHERE ws."WorkflowId" = w."Id" AND ws."UserId" = @CurrentUserId AND ws."IsDeleted" = false)
+                    OR w."CreatedBy" = @CurrentUserId
                 )
                 """;
         }
 
         var sql = $"""
             SELECT
-                w.Id,
-                w.Name,
-                w.Description,
-                w.CreatedAtUtc,
-                w.ModifiedAtUtc,
-                CONVERT(NVARCHAR(36), w.CreatedBy) AS CreatedBy,
-                CONVERT(NVARCHAR(36), w.ModifiedBy) AS ModifiedBy,
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup l WHERE l.WorkflowId = w.Id AND l.AssignedToUserId = @CurrentUserId AND l.Status IN (0,1) AND l.IsArchived = 0) AS InboxCount,
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup l WHERE l.WorkflowId = w.Id AND l.StartedBy = @CurrentUserId AND l.IsArchived = 0) AS ProcessCount,
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup l WHERE l.WorkflowId = w.Id AND (l.StartedBy = @CurrentUserId OR l.AssignedToUserId = @CurrentUserId) AND l.Status = 3) AS CompletedCount,
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup l WHERE l.WorkflowId = w.Id AND l.AssignedToUserId = @CurrentUserId AND l.Status IN (0,1) AND l.IsArchived = 0 AND l.CurrentStepInstanceId IS NOT NULL) AS RunningCount,
-                0 AS PaymentProcessCount
-            FROM workflow.Workflows w
+                w."Id",
+                w."Name",
+                w."Description",
+                w."CreatedAtUtc",
+                w."ModifiedAtUtc",
+                CAST(w."CreatedBy" AS varchar(36)) AS "CreatedBy",
+                CAST(w."ModifiedBy" AS varchar(36)) AS "ModifiedBy",
+                CAST((SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" l WHERE l."WorkflowId" = w."Id" AND l."AssignedToUserId" = @CurrentUserId AND l."Status" IN (0,1) AND l."IsArchived" = false) AS integer) AS "InboxCount",
+                CAST((SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" l WHERE l."WorkflowId" = w."Id" AND l."StartedBy" = @CurrentUserId AND l."IsArchived" = false) AS integer) AS "ProcessCount",
+                CAST((SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" l WHERE l."WorkflowId" = w."Id" AND (l."StartedBy" = @CurrentUserId OR l."AssignedToUserId" = @CurrentUserId) AND l."Status" = 3) AS integer) AS "CompletedCount",
+                CAST((SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" l WHERE l."WorkflowId" = w."Id" AND l."AssignedToUserId" = @CurrentUserId AND l."Status" IN (0,1) AND l."IsArchived" = false AND l."CurrentStepInstanceId" IS NOT NULL) AS integer) AS "RunningCount",
+                0 AS "PaymentProcessCount"
+            FROM workflow."Workflows" w
             WHERE {whereSql}
-            ORDER BY w.Name ASC;
+            ORDER BY w."Name" ASC;
             """;
 
         var result = new List<WorkflowByUserItem>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddRange(parameters.ToArray());
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -617,24 +617,24 @@ public sealed class WorkflowsController : ControllerBase
             return Unauthorized(new { error = "User context is required." });
 
         var suffix = workflowId.ToString("N")[..8];
-        var instancesTable = $"workflow.[WorkflowInstances_{suffix}]";
-        var transactionTable = $"workflow.[transaction_{suffix}]";
-        var workflowFormsTable = $"workflow.WorkflowForms_{suffix}";
-        var workflowAttachmentsTable = $"workflow.WorkflowAttachments_{suffix}";
-        var workflowCommentsTable = $"workflow.WorkflowComments_{suffix}";
-        var processFormTable = $"workflow.processForm_{suffix}";
+        var instancesTable = $"workflow.workflow_instances_{suffix}";
+        var transactionTable = $"workflow.transaction_{suffix}";
+        var workflowFormsTable = $"workflow.workflow_forms_{suffix}";
+        var workflowAttachmentsTable = $"workflow.workflow_attachments_{suffix}";
+        var workflowCommentsTable = $"workflow.workflow_comments_{suffix}";
+        var processFormTable = $"workflow.process_form_{suffix}";
 
-        await using var connection = new SqlConnection(conn);
+        await using var connection = new NpgsqlConnection(conn);
         await connection.OpenAsync(cancellationToken);
 
         // Safety: return empty when workflow dynamic tables are not present yet.
         var tableCheckSql = """
-            SELECT COUNT(*) FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = 'workflow' AND TABLE_NAME IN (@InstancesName, @TransactionName)
+            SELECT COUNT(*) FROM information_schema.tables
+            WHERE table_schema = 'workflow' AND table_name IN (@InstancesName, @TransactionName)
             """;
-        await using (var check = new SqlCommand(tableCheckSql, connection))
+        await using (var check = new NpgsqlCommand(tableCheckSql, connection))
         {
-            check.Parameters.AddWithValue("@InstancesName", $"WorkflowInstances_{suffix}");
+            check.Parameters.AddWithValue("@InstancesName", $"workflow_instances_{suffix}");
             check.Parameters.AddWithValue("@TransactionName", $"transaction_{suffix}");
             var found = Convert.ToInt32(await check.ExecuteScalarAsync(cancellationToken));
             if (found < 2)
@@ -650,52 +650,55 @@ public sealed class WorkflowsController : ControllerBase
         var sortOrder = string.Equals(request.SortBy?.Order, "ASC", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
 
         var inboxTableExists = false;
-        await using (var inboxCheck = new SqlCommand(
+        await using (var inboxCheck = new NpgsqlCommand(
             """
-            SELECT CASE WHEN OBJECT_ID(@InboxFull, N'U') IS NOT NULL
-                         AND COL_LENGTH(@InboxFull, 'action') IS NOT NULL
-                        THEN 1 ELSE 0 END
+            SELECT 1 FROM information_schema.columns
+            WHERE table_schema = 'workflow' AND table_name = @InboxTable AND column_name = 'action'
             """,
             connection))
         {
-            inboxCheck.Parameters.AddWithValue("@InboxFull", $"workflow.Inbox_{suffix}");
-            inboxTableExists = Convert.ToInt32(await inboxCheck.ExecuteScalarAsync(cancellationToken)) == 1;
+            inboxCheck.Parameters.AddWithValue("@InboxTable", $"inbox_{suffix}");
+            inboxTableExists = await inboxCheck.ExecuteScalarAsync(cancellationToken) != null;
         }
 
+        // ib.workflow_instance_id is stored as varchar(255) (legacy mailbox table shape); guard
+        // the uuid comparison the same way TryCastUuid does elsewhere in this migration.
         var actionSelectSql = inboxTableExists
-            ? $"""
-                ISNULL((
-                    SELECT TOP 1 ISNULL(ib.[action], 1)
-                    FROM workflow.[Inbox_{suffix}] ib
-                    WHERE TRY_CONVERT(UNIQUEIDENTIFIER, ib.workflowInstanceId) = t.WorkflowInstanceId
+            ? $$"""
+                COALESCE((
+                    SELECT COALESCE(ib."action", 1)
+                    FROM workflow.inbox_{{suffix}} ib
+                    WHERE (CASE WHEN ib.workflow_instance_id ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                                THEN ib.workflow_instance_id::uuid ELSE NULL END) = t.workflow_instance_id
                       AND (
-                            ib.userId = CONVERT(NVARCHAR(100), @CurrentUserId)
-                         OR ib.transaction_modifiedBy = CONVERT(NVARCHAR(255), @CurrentUserId)
+                            ib.user_id = CAST(@CurrentUserId AS varchar(100))
+                         OR ib.transaction_modified_by = CAST(@CurrentUserId AS varchar(255))
                       )
                     ORDER BY ib.id DESC
+                    LIMIT 1
                 ), 1)
                 """
             : "1";
 
         var whereParts = new List<string>
         {
-            "t.IsDeleted = 0",
-            "wi.Status = @RunningStatus",
-            "t.ActionStatus = 0",
+            "t.is_deleted = false",
+            "wi.status = @RunningStatus",
+            "t.action_status = 0",
             """
             (
-                t.ActivityUserId = @CurrentUserId
-                OR t.ModifiedBy = @CurrentUserId
+                t.activity_user_id = @CurrentUserId
+                OR t.modified_by = @CurrentUserId
                 OR EXISTS (
-                    SELECT 1 FROM workflow.groupUser gu
-                    WHERE gu.GroupId = t.ActivityGroupId
-                      AND gu.UserId = @CurrentUserId
-                      AND gu.IsDeleted = 0
+                    SELECT 1 FROM workflow."groupUser" gu
+                    WHERE gu."GroupId" = t.activity_group_id
+                      AND gu."UserId" = @CurrentUserId
+                      AND gu."IsDeleted" = false
                 )
             )
             """
         };
-        var parameters = new List<SqlParameter>
+        var parameters = new List<NpgsqlParameter>
         {
             new("@CurrentUserId", currentUserId.Value),
             new("@RunningStatus", (int)SaaSApp.Workflow.Domain.Enums.WorkflowInstanceStatus.Running)
@@ -715,44 +718,44 @@ public sealed class WorkflowsController : ControllerBase
         var countSql = $"""
             SELECT COUNT(*)
             FROM {transactionTable} t
-            INNER JOIN {instancesTable} wi ON wi.Id = t.WorkflowInstanceId
+            INNER JOIN {instancesTable} wi ON wi.id = t.workflow_instance_id
             WHERE {whereSql};
             """;
         var dataSql = $"""
             SELECT
-                t.Id AS TransactionId,
-                t.WorkflowInstanceId,
-                wi.ReferenceNumber,
-                wi.Status AS InstanceStatus,
-                wi.StartedAtUtc AS InstanceStartedAtUtc,
-                wi.StartedBy AS RaisedByUserId,
-                t.ActivityId,
-                t.RuleId,
-                t.StageType,
-                t.StageName,
-                t.Review,
-                t.CreatedAt AS TransactionCreatedAt,
-                t.CreatedBy AS TransactionCreatedBy,
-                t.ModifiedAt AS TransactionModifiedAt,
-                t.ActivityUserId,
-                t.ActivityGroupId,
-                {actionSelectSql} AS [Action]
+                t.id AS "TransactionId",
+                t.workflow_instance_id AS "WorkflowInstanceId",
+                wi.reference_number AS "ReferenceNumber",
+                wi.status AS "InstanceStatus",
+                wi.started_at_utc AS "InstanceStartedAtUtc",
+                wi.started_by AS "RaisedByUserId",
+                t.activity_id AS "ActivityId",
+                t.rule_id AS "RuleId",
+                t.stage_type AS "StageType",
+                t.stage_name AS "StageName",
+                t.review AS "Review",
+                t.created_at AS "TransactionCreatedAt",
+                t.created_by AS "TransactionCreatedBy",
+                t.modified_at AS "TransactionModifiedAt",
+                t.activity_user_id AS "ActivityUserId",
+                t.activity_group_id AS "ActivityGroupId",
+                {actionSelectSql} AS "Action"
             FROM {transactionTable} t
-            INNER JOIN {instancesTable} wi ON wi.Id = t.WorkflowInstanceId
+            INNER JOIN {instancesTable} wi ON wi.id = t.workflow_instance_id
             WHERE {whereSql}
             ORDER BY {sortColumn} {sortOrder}
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
             """;
 
         int totalItems;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
-            countCmd.Parameters.AddRange(parameters.Select(p => new SqlParameter(p.ParameterName, p.Value)).ToArray());
+            countCmd.Parameters.AddRange(parameters.Select(p => new NpgsqlParameter(p.ParameterName, p.Value)).ToArray());
             totalItems = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
         }
 
         var items = new List<WorkflowInboxItem>();
-        await using (var cmd = new SqlCommand(dataSql, connection))
+        await using (var cmd = new NpgsqlCommand(dataSql, connection))
         {
             cmd.Parameters.AddRange(parameters.ToArray());
             cmd.Parameters.AddWithValue("@Offset", offset);
@@ -1511,13 +1514,13 @@ public sealed class WorkflowsController : ControllerBase
         {
             return BadRequest(new { error = ex.Message });
         }
-        catch (SqlException ex)
+        catch (PostgresException ex)
         {
             return StatusCode(StatusCodes.Status500InternalServerError, new
             {
                 error = "Database error while applying AP agent metadata.",
                 detail = ex.Message,
-                number = ex.Number
+                sqlState = ex.SqlState
             });
         }
         catch (Exception ex)
@@ -1707,17 +1710,18 @@ public sealed class WorkflowsController : ControllerBase
         CancellationToken cancellationToken)
     {
         var suffix = workflowId.ToString("N")[..8];
-        var table = $"workflow.WorkflowForms_{suffix}";
+        var table = $"workflow.workflow_forms_{suffix}";
         var sql = $"""
-            SELECT TOP 1 FormData
+            SELECT form_data
             FROM {table}
-            WHERE WorkflowInstanceId = @InstanceId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC
+            WHERE workflow_instance_id = @InstanceId AND is_deleted = false
+            ORDER BY created_at_utc DESC
+            LIMIT 1
             """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
         if (value == null || value == DBNull.Value)
@@ -1878,14 +1882,14 @@ public sealed class WorkflowsController : ControllerBase
         var c = (criteria ?? "modifiedAt").Trim().ToLowerInvariant();
         return c switch
         {
-            "name" => "w.Name",
-            "description" => "w.Description",
-            "createdby" => "w.CreatedBy",
-            "createdat" => "w.CreatedAtUtc",
-            "modifiedby" => "w.ModifiedBy",
-            "modifiedat" => "w.ModifiedAtUtc",
-            "flowstatus" => "w.Status",
-            _ => "ISNULL(w.ModifiedAtUtc, w.CreatedAtUtc)"
+            "name" => "w.\"Name\"",
+            "description" => "w.\"Description\"",
+            "createdby" => "w.\"CreatedBy\"",
+            "createdat" => "w.\"CreatedAtUtc\"",
+            "modifiedby" => "w.\"ModifiedBy\"",
+            "modifiedat" => "w.\"ModifiedAtUtc\"",
+            "flowstatus" => "w.\"Status\"",
+            _ => "COALESCE(w.\"ModifiedAtUtc\", w.\"CreatedAtUtc\")"
         };
     }
 
@@ -1912,7 +1916,7 @@ public sealed class WorkflowsController : ControllerBase
         return groups.Select(x => new WorkflowAllGroup(x.Key, x.ToList())).ToList();
     }
 
-    private static bool TryBuildFilterCondition(WorkflowAllFilter filter, out string conditionSql, out SqlParameter? parameter)
+    private static bool TryBuildFilterCondition(WorkflowAllFilter filter, out string conditionSql, out NpgsqlParameter? parameter)
     {
         conditionSql = string.Empty;
         parameter = null;
@@ -1921,11 +1925,11 @@ public sealed class WorkflowsController : ControllerBase
 
         var col = filter.Criteria.Trim().ToLowerInvariant() switch
         {
-            "name" => "w.Name",
-            "description" => "w.Description",
-            "flowstatus" => "w.Status",
-            "createdby" => "CONVERT(NVARCHAR(36), w.CreatedBy)",
-            "modifiedby" => "CONVERT(NVARCHAR(36), w.ModifiedBy)",
+            "name" => "w.\"Name\"",
+            "description" => "w.\"Description\"",
+            "flowstatus" => "w.\"Status\"",
+            "createdby" => "CAST(w.\"CreatedBy\" AS varchar(36))",
+            "modifiedby" => "CAST(w.\"ModifiedBy\" AS varchar(36))",
             _ => string.Empty
         };
         if (string.IsNullOrEmpty(col))
@@ -1936,19 +1940,19 @@ public sealed class WorkflowsController : ControllerBase
         if (cond is "contains" or "like")
         {
             conditionSql = $"{col} LIKE {paramName}";
-            parameter = new SqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
+            parameter = new NpgsqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
             return true;
         }
         if (cond is "eq" or "=" or "equal")
         {
             conditionSql = $"{col} = {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
         if (cond is "neq" or "!=" or "notequal")
         {
             conditionSql = $"{col} <> {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
         return false;
@@ -1959,15 +1963,15 @@ public sealed class WorkflowsController : ControllerBase
         var c = (criteria ?? "transaction_createdAt").Trim().ToLowerInvariant();
         return c switch
         {
-            "requestno" => "wi.ReferenceNumber",
-            "stagename" => "t.StageName",
-            "raisedat" => "wi.StartedAtUtc",
-            "transaction_createdat" => "t.CreatedAt",
-            _ => "t.CreatedAt"
+            "requestno" => "wi.reference_number",
+            "stagename" => "t.stage_name",
+            "raisedat" => "wi.started_at_utc",
+            "transaction_createdat" => "t.created_at",
+            _ => "t.created_at"
         };
     }
 
-    private static bool TryBuildInboxFilterCondition(WorkflowAllFilter filter, out string conditionSql, out SqlParameter? parameter)
+    private static bool TryBuildInboxFilterCondition(WorkflowAllFilter filter, out string conditionSql, out NpgsqlParameter? parameter)
     {
         conditionSql = string.Empty;
         parameter = null;
@@ -1976,12 +1980,12 @@ public sealed class WorkflowsController : ControllerBase
 
         var column = filter.Criteria.Trim().ToLowerInvariant() switch
         {
-            "requestno" => "wi.ReferenceNumber",
-            "stagename" => "t.StageName",
-            "activityid" => "t.ActivityId",
-            "review" => "t.Review",
-            "processid" => "CONVERT(NVARCHAR(36), t.WorkflowInstanceId)",
-            "workflowinstanceid" => "CONVERT(NVARCHAR(36), t.WorkflowInstanceId)",
+            "requestno" => "wi.reference_number",
+            "stagename" => "t.stage_name",
+            "activityid" => "t.activity_id",
+            "review" => "t.review",
+            "processid" => "CAST(t.workflow_instance_id AS varchar(36))",
+            "workflowinstanceid" => "CAST(t.workflow_instance_id AS varchar(36))",
             _ => string.Empty
         };
         if (string.IsNullOrWhiteSpace(column))
@@ -1992,26 +1996,26 @@ public sealed class WorkflowsController : ControllerBase
         if (cond is "contains" or "like")
         {
             conditionSql = $"{column} LIKE {paramName}";
-            parameter = new SqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
+            parameter = new NpgsqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
             return true;
         }
         if (cond is "eq" or "=" or "equal")
         {
             conditionSql = $"{column} = {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
         if (cond is "neq" or "!=" or "notequal")
         {
             conditionSql = $"{column} <> {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
         return false;
     }
 
     private async Task<WorkflowInboxFormData?> TryGetFormDataAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowFormsTable,
         string processFormTable,
         string workflowAttachmentsTable,
@@ -2023,10 +2027,10 @@ public sealed class WorkflowsController : ControllerBase
         int? formEntryId = null;
         string? storedFormData = null;
 
-        var formsSql = $"SELECT TOP 1 WFormId, FormEntryId, FormData FROM {workflowFormsTable} WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0 ORDER BY CreatedAtUtc DESC;";
+        var formsSql = $"SELECT w_form_id, form_entry_id, form_data FROM {workflowFormsTable} WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false ORDER BY created_at_utc DESC LIMIT 1;";
         try
         {
-            await using var cmd = new SqlCommand(formsSql, connection);
+            await using var cmd = new NpgsqlCommand(formsSql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
@@ -2036,39 +2040,43 @@ public sealed class WorkflowsController : ControllerBase
                 storedFormData = reader.IsDBNull(2) ? null : reader.GetString(2);
             }
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
             // Table may not exist in older tenant DBs.
         }
 
         string? formGuid = null;
 
-        var attachmentSql = $@"
-SELECT TOP 1 FormJsonId
-FROM {workflowAttachmentsTable}
-WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-ORDER BY ISNULL(ModifiedAtUtc, CreatedAtUtc) DESC, CreatedAtUtc DESC;";
+        var attachmentSql = $"""
+            SELECT form_json_id
+            FROM {workflowAttachmentsTable}
+            WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+            ORDER BY COALESCE(modified_at_utc, created_at_utc) DESC, created_at_utc DESC
+            LIMIT 1;
+            """;
         try
         {
-            await using var cmd = new SqlCommand(attachmentSql, connection);
+            await using var cmd = new NpgsqlCommand(attachmentSql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             var value = await cmd.ExecuteScalarAsync(cancellationToken);
             formGuid = value == null || value == DBNull.Value ? null : Convert.ToString(value)?.Trim();
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
         }
 
         if (string.IsNullOrWhiteSpace(formGuid))
         {
-            var processSql = $@"
-SELECT TOP 1 WFormId, FormEntryId
-FROM {processFormTable}
-WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-ORDER BY Id DESC;";
+            var processSql = $"""
+                SELECT w_form_id, form_entry_id
+                FROM {processFormTable}
+                WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+                ORDER BY id DESC
+                LIMIT 1;
+                """;
             try
             {
-                await using var cmd = new SqlCommand(processSql, connection);
+                await using var cmd = new NpgsqlCommand(processSql, connection);
                 cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
                 if (await reader.ReadAsync(cancellationToken))
@@ -2078,22 +2086,22 @@ ORDER BY Id DESC;";
                         formEntryId = reader.GetInt32(1);
                 }
             }
-            catch (SqlException)
+            catch (PostgresException)
             {
             }
         }
 
         if (string.IsNullOrWhiteSpace(formGuid))
         {
-            const string wfSql = "SELECT FormId FROM workflow.Workflows WHERE Id = @WorkflowId AND IsDeleted = 0;";
+            const string wfSql = """SELECT "FormId" FROM workflow."Workflows" WHERE "Id" = @WorkflowId AND "IsDeleted" = false;""";
             try
             {
-                await using var cmd = new SqlCommand(wfSql, connection);
+                await using var cmd = new NpgsqlCommand(wfSql, connection);
                 cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
                 var value = await cmd.ExecuteScalarAsync(cancellationToken);
                 formGuid = value == null || value == DBNull.Value ? null : Convert.ToString(value)?.Trim();
             }
-            catch (SqlException)
+            catch (PostgresException)
             {
             }
         }
@@ -2117,23 +2125,23 @@ ORDER BY Id DESC;";
             fieldsJson);
     }
 
-    private static async Task<WorkflowInboxRepositoryData?> TryGetRepositoryDataAsync(SqlConnection connection, string workflowAttachmentsTable, Guid workflowInstanceId, CancellationToken cancellationToken)
+    private static async Task<WorkflowInboxRepositoryData?> TryGetRepositoryDataAsync(NpgsqlConnection connection, string workflowAttachmentsTable, Guid workflowInstanceId, CancellationToken cancellationToken)
     {
-        var sql = $"SELECT TOP 1 RepositoryId, ItemId, FormJsonId FROM {workflowAttachmentsTable} WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0 ORDER BY CreatedAtUtc DESC;";
+        var sql = $"SELECT repository_id, item_id, form_json_id FROM {workflowAttachmentsTable} WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false ORDER BY created_at_utc DESC LIMIT 1;";
         try
         {
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             if (await reader.ReadAsync(cancellationToken))
             {
                 return new WorkflowInboxRepositoryData(
-                    reader.IsDBNull(0) ? null : reader.GetInt32(0),
-                    reader.IsDBNull(1) ? null : reader.GetInt32(1),
+                    reader.IsDBNull(0) ? null : reader.GetGuid(0),
+                    reader.IsDBNull(1) ? null : reader.GetGuid(1),
                     reader.IsDBNull(2) ? null : reader.GetString(2));
             }
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
             // Table may not exist in older tenant DBs.
         }
@@ -2141,16 +2149,16 @@ ORDER BY Id DESC;";
         return null;
     }
 
-    private static async Task<int> TryGetCommentsCountAsync(SqlConnection connection, string workflowCommentsTable, Guid workflowInstanceId, CancellationToken cancellationToken)
+    private static async Task<int> TryGetCommentsCountAsync(NpgsqlConnection connection, string workflowCommentsTable, Guid workflowInstanceId, CancellationToken cancellationToken)
     {
-        var sql = $"SELECT COUNT(1) FROM {workflowCommentsTable} WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0;";
+        var sql = $"SELECT COUNT(1) FROM {workflowCommentsTable} WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false;";
         try
         {
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
             return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
             return 0;
         }
@@ -2408,7 +2416,11 @@ public sealed record WorkflowInboxFormData(
     int FormEntryId,
     string? FormId = null,
     string? FieldsJson = null);
-public sealed record WorkflowInboxRepositoryData(int? RepositoryId, int? ItemId, string? FormJsonId);
+// PHASE 4: RepositoryId/ItemId widened from int? to Guid? -- workflow.workflow_attachments_{suffix}
+// always has uuid-typed repository_id/item_id columns on Postgres (see WorkflowTableCreator.cs's
+// GenerateAttachmentsTableScript: no legacy INT-typed shape exists to migrate away from), so the
+// SQL Server int? shape has nothing left to represent and was updated to match the real data.
+public sealed record WorkflowInboxRepositoryData(Guid? RepositoryId, Guid? ItemId, string? FormJsonId);
 public sealed record WorkflowInboxItem(
     int TransactionId,
     Guid WorkflowInstanceId,

@@ -1,4 +1,5 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
+using NpgsqlTypes;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
@@ -53,13 +54,13 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
             return null;
 
         var suffix = workflowId.ToString("N")[..8];
-        var instancesTable = $"workflow.[WorkflowInstances_{suffix}]";
+        var instancesTable = $"workflow.workflow_instances_{suffix}";
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var sql = $"SELECT TOP 1 Status FROM {instancesTable} WHERE Id = @WorkflowInstanceId;";
-        await using var cmd = new SqlCommand(sql, connection);
+        var sql = $"SELECT status FROM {instancesTable} WHERE id = @WorkflowInstanceId LIMIT 1;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         if (result == null || result == DBNull.Value)
@@ -89,8 +90,8 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
             throw new InvalidOperationException("Tenant connection string not resolved.");
 
         var suffix = workflowId.ToString("N")[..8];
-        var transactionTable = $"workflow.[transaction_{suffix}]";
-        var instancesTable = $"workflow.[WorkflowInstances_{suffix}]";
+        var transactionTable = $"workflow.transaction_{suffix}";
+        var instancesTable = $"workflow.workflow_instances_{suffix}";
         var txActivityId = ResolveTransactionActivityId(targetStep, activityId);
         var resolvedActivityUserId = activityUserId ?? targetStep.AssignedToUserId ?? userId;
         var hasReview = !string.IsNullOrWhiteSpace(review);
@@ -98,7 +99,7 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
         await _tableCreator.EnsureLegacyTransactionTableAsync(workflowId, connectionString, cancellationToken);
         await _tableCreator.EnsureLegacyMailboxTablesAsync(workflowId, connectionString, cancellationToken);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var existingRow = await FindTransactionRowForStepAsync(
@@ -352,7 +353,7 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
     private sealed record TransactionRow(int Id, string? Review, int ActionStatus);
 
     private static async Task<TransactionRow?> FindTransactionRowForStepAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTable,
         Guid workflowInstanceId,
         WorkflowStep step,
@@ -360,25 +361,33 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
         CancellationToken cancellationToken)
     {
         var sql = $@"
-SELECT TOP 1 Id, Review, ActionStatus
+SELECT id, review, action_status
 FROM {transactionTable}
-WHERE WorkflowInstanceId = @WorkflowInstanceId
-  AND IsDeleted = 0
+WHERE workflow_instance_id = @WorkflowInstanceId
+  AND is_deleted = false
   AND (
-        ActivityId = @TxActivityId
-     OR ActivityId = @RequestActivityId
-     OR ActivityId = @StepIdD
-     OR ActivityId = @StepIdN
-     OR (@StepActivityId IS NOT NULL AND ActivityId = @StepActivityId)
+        activity_id = @TxActivityId
+     OR activity_id = @RequestActivityId
+     OR activity_id = @StepIdD
+     OR activity_id = @StepIdN
+     OR (@StepActivityId IS NOT NULL AND activity_id = @StepActivityId)
   )
-ORDER BY Id DESC;";
-        await using var cmd = new SqlCommand(sql, connection);
+ORDER BY id DESC
+LIMIT 1;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         cmd.Parameters.AddWithValue("@TxActivityId", txActivityId);
         cmd.Parameters.AddWithValue("@RequestActivityId", txActivityId);
         cmd.Parameters.AddWithValue("@StepIdD", step.Id.ToString("D"));
         cmd.Parameters.AddWithValue("@StepIdN", step.Id.ToString("N"));
-        cmd.Parameters.AddWithValue("@StepActivityId", (object?)step.ActivityId ?? DBNull.Value);
+        // Explicit NpgsqlDbType.Varchar (not AddWithValue) -- when the CLR value is
+        // DBNull.Value, AddWithValue leaves the parameter type as Unknown, and Postgres
+        // can't infer it from a bare "@StepActivityId IS NOT NULL" comparison, causing
+        // 42P08 "could not determine data type of parameter" (confirmed empirically).
+        cmd.Parameters.Add(new NpgsqlParameter("StepActivityId", NpgsqlDbType.Varchar)
+        {
+            Value = (object?)step.ActivityId ?? DBNull.Value
+        });
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -391,7 +400,7 @@ ORDER BY Id DESC;";
     }
 
     private static async Task UpdateReviewAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTable,
         int transactionId,
         WorkflowStep step,
@@ -404,17 +413,17 @@ ORDER BY Id DESC;";
     {
         var sql = $@"
 UPDATE {transactionTable}
-SET ActivityId = @ActivityId,
-    RuleId = @RuleId,
-    StageType = @StageType,
-    StageName = @StageName,
-    Review = @Review,
-    ActionStatus = @ActionStatus,
-    ActivityUserId = @ActivityUserId,
-    ModifiedAt = SYSUTCDATETIME(),
-    ModifiedBy = @ModifiedBy
-WHERE Id = @Id AND IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+SET activity_id = @ActivityId,
+    rule_id = @RuleId,
+    stage_type = @StageType,
+    stage_name = @StageName,
+    review = @Review,
+    action_status = @ActionStatus,
+    activity_user_id = @ActivityUserId,
+    modified_at = now(),
+    modified_by = @ModifiedBy
+WHERE id = @Id AND is_deleted = false;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ActivityId", txActivityId);
         cmd.Parameters.AddWithValue("@RuleId", (object?)ruleId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@StageType", (object?)ResolveTransactionStageType(step) ?? DBNull.Value);
@@ -428,7 +437,7 @@ WHERE Id = @Id AND IsDeleted = 0;";
     }
 
     private static async Task CompleteWorkflowInstanceAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string instancesTable,
         Guid workflowInstanceId,
         Guid userId,
@@ -436,11 +445,11 @@ WHERE Id = @Id AND IsDeleted = 0;";
     {
         var sql = $@"
 UPDATE {instancesTable}
-SET Status = @Status,
-    CompletedAtUtc = SYSUTCDATETIME(),
-    LastActivityAtUtc = SYSUTCDATETIME()
-WHERE Id = @WorkflowInstanceId;";
-        await using var cmd = new SqlCommand(sql, connection);
+SET status = @Status,
+    completed_at_utc = now(),
+    last_activity_at_utc = now()
+WHERE id = @WorkflowInstanceId;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Status", (int)WorkflowInstanceStatus.Completed);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -486,7 +495,7 @@ WHERE Id = @WorkflowInstanceId;";
     }
 
     private static async Task<(int Id, Guid Guid)> InsertOpenTransactionForDefinitionStepAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTable,
         Guid workflowInstanceId,
         WorkflowStep step,
@@ -498,14 +507,14 @@ WHERE Id = @WorkflowInstanceId;";
     {
         var sql = $@"
 INSERT INTO {transactionTable}
-    (WorkflowInstanceId, ActivityId, RuleId, StageType, StageName, Review, ActionStatus,
-     ActivityUserId, CreatedAt, CreatedBy, IsDeleted, TransactionGuid)
-OUTPUT INSERTED.Id
+    (workflow_instance_id, activity_id, rule_id, stage_type, stage_name, review, action_status,
+     activity_user_id, created_at, created_by, is_deleted, transaction_guid)
 VALUES
     (@WorkflowInstanceId, @ActivityId, @RuleId, @StageType, @StageName, NULL, @ActionStatus,
-     @ActivityUserId, SYSUTCDATETIME(), @CreatedBy, 0, NEWID());";
+     @ActivityUserId, now(), @CreatedBy, false, gen_random_uuid())
+RETURNING id;";
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         cmd.Parameters.AddWithValue("@ActivityId", txActivityId);
         cmd.Parameters.AddWithValue("@RuleId", (object?)ruleId ?? DBNull.Value);
@@ -516,8 +525,8 @@ VALUES
         cmd.Parameters.AddWithValue("@CreatedBy", createdByUserId);
         var id = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
 
-        var guidSql = $"SELECT TransactionGuid FROM {transactionTable} WHERE Id = @Id AND IsDeleted = 0";
-        await using var guidCmd = new SqlCommand(guidSql, connection);
+        var guidSql = $"SELECT transaction_guid FROM {transactionTable} WHERE id = @Id AND is_deleted = false";
+        await using var guidCmd = new NpgsqlCommand(guidSql, connection);
         guidCmd.Parameters.AddWithValue("@Id", id);
         var guidResult = await guidCmd.ExecuteScalarAsync(cancellationToken);
         var guid = guidResult == null || guidResult == DBNull.Value ? Guid.Empty : (Guid)guidResult;

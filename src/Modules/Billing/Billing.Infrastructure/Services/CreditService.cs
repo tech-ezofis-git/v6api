@@ -1,5 +1,5 @@
 using System.Globalization;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using SaaSApp.Billing.Application.Contracts;
@@ -183,7 +183,7 @@ public sealed class CreditService : ICreditService
         var tableNames = GetTransactionTableNames(startUtc, endUtc);
         var transactions = new List<CreditTransactionItemDto>();
 
-        await using var connection = new SqlConnection(_catalogConnectionString);
+        await using var connection = new NpgsqlConnection(_catalogConnectionString);
         await connection.OpenAsync(cancellationToken);
 
         foreach (var tableName in tableNames)
@@ -263,39 +263,36 @@ public sealed class CreditService : ICreditService
     {
         var tableName = $"creditTransaction_{tableSuffix}";
         var sql = $"""
-            IF OBJECT_ID(N'[dbo].[{tableName}]', N'U') IS NULL
-            BEGIN
-                CREATE TABLE [dbo].[{tableName}] (
-                    [id] INT IDENTITY(1,1) NOT NULL,
-                    [tenantId] UNIQUEIDENTIFIER NOT NULL,
-                    [allocationMonth] NVARCHAR(20) NULL,
-                    [allocationYear] NVARCHAR(20) NULL,
-                    [activityType] NVARCHAR(100) NULL,
-                    [subActivityType] NVARCHAR(100) NULL,
-                    [credit] INT NULL,
-                    [identifyTable] NVARCHAR(100) NULL,
-                    [identifyId] INT NULL,
-                    [remarks] NVARCHAR(500) NULL,
-                    [inputTokens] INT NULL,
-                    [outputTokens] INT NULL,
-                    [totalTokens] INT NULL,
-                    [env] NVARCHAR(50) NULL,
-                    [createdAt] DATETIME2 NULL,
-                    [modifiedAt] DATETIME2 NULL,
-                    [createdBy] NVARCHAR(50) NULL,
-                    [modifiedBy] NVARCHAR(50) NULL,
-                    [isDeleted] BIT NULL,
-                    [ValidFrom] DATETIME2 NULL,
-                    [ValidTo] DATETIME2 NULL,
-                    CONSTRAINT [PK_{tableName}] PRIMARY KEY CLUSTERED ([id] ASC)
-                );
-                CREATE INDEX [IX_{tableName}_TenantId_CreatedAt] ON [dbo].[{tableName}] ([tenantId], [createdAt]);
-            END
+            CREATE SCHEMA IF NOT EXISTS dbo;
+            CREATE TABLE IF NOT EXISTS dbo."{tableName}" (
+                "id" integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                "tenantId" uuid NOT NULL,
+                "allocationMonth" varchar(20) NULL,
+                "allocationYear" varchar(20) NULL,
+                "activityType" varchar(100) NULL,
+                "subActivityType" varchar(100) NULL,
+                "credit" integer NULL,
+                "identifyTable" varchar(100) NULL,
+                "identifyId" integer NULL,
+                "remarks" varchar(500) NULL,
+                "inputTokens" integer NULL,
+                "outputTokens" integer NULL,
+                "totalTokens" integer NULL,
+                "env" varchar(50) NULL,
+                "createdAt" timestamptz NULL,
+                "modifiedAt" timestamptz NULL,
+                "createdBy" varchar(50) NULL,
+                "modifiedBy" varchar(50) NULL,
+                "isDeleted" boolean NULL,
+                "ValidFrom" timestamptz NULL,
+                "ValidTo" timestamptz NULL
+            );
+            CREATE INDEX IF NOT EXISTS "IX_{tableName}_TenantId_CreatedAt" ON dbo."{tableName}" ("tenantId", "createdAt");
             """;
 
-        await using var connection = new SqlConnection(_catalogConnectionString);
+        await using var connection = new NpgsqlConnection(_catalogConnectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -312,19 +309,19 @@ public sealed class CreditService : ICreditService
     {
         var tableName = $"creditTransaction_{tableSuffix}";
         var sql = $"""
-            INSERT INTO [dbo].[{tableName}]
-                (tenantId, activityType, subActivityType, identifyTable, identifyId, remarks,
-                 allocationMonth, allocationYear, credit, inputTokens, outputTokens, totalTokens,
-                 env, createdAt, createdBy, isDeleted)
+            INSERT INTO dbo."{tableName}"
+                ("tenantId", "activityType", "subActivityType", "identifyTable", "identifyId", "remarks",
+                 "allocationMonth", "allocationYear", "credit", "inputTokens", "outputTokens", "totalTokens",
+                 "env", "createdAt", "createdBy", "isDeleted")
             VALUES
                 (@TenantId, @ActivityType, @SubActivity, @IdentifyTable, @IdentifyId, @Remarks,
                  @AllocationMonth, @AllocationYear, @Credit, @InputTokens, @OutputTokens, @TotalTokens,
-                 @Env, @CreatedAt, @CreatedBy, 0);
+                 @Env, @CreatedAt, @CreatedBy, false);
             """;
 
-        await using var connection = new SqlConnection(_catalogConnectionString);
+        await using var connection = new NpgsqlConnection(_catalogConnectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@ActivityType", (object?)request.ActivityType ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@SubActivity", (object?)request.SubActivity ?? DBNull.Value);
@@ -344,23 +341,23 @@ public sealed class CreditService : ICreditService
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT 1
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = @TableName
+            FROM information_schema.tables
+            WHERE table_schema = 'dbo' AND table_name = @TableName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result is not null;
     }
 
     private static async Task<List<CreditTransactionItemDto>> ReadTransactionsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         Guid tenantId,
         DateTime startUtc,
@@ -370,24 +367,24 @@ public sealed class CreditService : ICreditService
         var hasTenantColumn = await ColumnExistsAsync(connection, tableName, "tenantId", cancellationToken);
         var sql = hasTenantColumn
             ? $"""
-                SELECT id, activityType, subActivityType, identifyTable, identifyId, remarks,
-                       credit, inputTokens, outputTokens, totalTokens, createdAt
-                FROM [dbo].[{tableName}]
-                WHERE (isDeleted = 0 OR isDeleted IS NULL)
-                  AND tenantId = @TenantId
-                  AND createdAt >= @StartUtc AND createdAt < @EndUtc
-                ORDER BY createdAt DESC
+                SELECT "id", "activityType", "subActivityType", "identifyTable", "identifyId", "remarks",
+                       "credit", "inputTokens", "outputTokens", "totalTokens", "createdAt"
+                FROM dbo."{tableName}"
+                WHERE ("isDeleted" = false OR "isDeleted" IS NULL)
+                  AND "tenantId" = @TenantId
+                  AND "createdAt" >= @StartUtc AND "createdAt" < @EndUtc
+                ORDER BY "createdAt" DESC
                 """
             : $"""
-                SELECT id, activityType, subActivityType, identifyTable, identifyId, remarks,
-                       credit, inputTokens, outputTokens, totalTokens, createdAt
-                FROM [dbo].[{tableName}]
-                WHERE (isDeleted = 0 OR isDeleted IS NULL)
-                  AND createdAt >= @StartUtc AND createdAt < @EndUtc
-                ORDER BY createdAt DESC
+                SELECT "id", "activityType", "subActivityType", "identifyTable", "identifyId", "remarks",
+                       "credit", "inputTokens", "outputTokens", "totalTokens", "createdAt"
+                FROM dbo."{tableName}"
+                WHERE ("isDeleted" = false OR "isDeleted" IS NULL)
+                  AND "createdAt" >= @StartUtc AND "createdAt" < @EndUtc
+                ORDER BY "createdAt" DESC
                 """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         if (hasTenantColumn)
             cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@StartUtc", startUtc);
@@ -415,17 +412,17 @@ public sealed class CreditService : ICreditService
     }
 
     private static async Task<bool> ColumnExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string columnName,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT 1
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = @TableName AND COLUMN_NAME = @ColumnName
+            FROM information_schema.columns
+            WHERE table_schema = 'dbo' AND table_name = @TableName AND column_name = @ColumnName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         cmd.Parameters.AddWithValue("@ColumnName", columnName);
         return await cmd.ExecuteScalarAsync(cancellationToken) is not null;

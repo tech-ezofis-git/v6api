@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SaaSApp.ActivityLog.Application.Contracts;
@@ -38,23 +38,23 @@ public sealed class EventLogInsertService
 {
     public async Task InsertAsync(EventLogEntry entry, string connectionString, CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await EnsureEventLogsTableAsync(connection, cancellationToken);
 
         const string sql = """
-            INSERT INTO activitylog.EventLogs (
-                Id, TenantId, UserId, UserDisplayName, UserEmail,
-                EventTitle, EventType, Category, Severity,
-                IpAddress, HttpMethod, Path, StatusCode, CorrelationId, CreatedAtUtc)
+            INSERT INTO activitylog."EventLogs" (
+                "Id", "TenantId", "UserId", "UserDisplayName", "UserEmail",
+                "EventTitle", "EventType", "Category", "Severity",
+                "IpAddress", "HttpMethod", "Path", "StatusCode", "CorrelationId", "CreatedAtUtc")
             VALUES (
                 @Id, @TenantId, @UserId, @UserDisplayName, @UserEmail,
                 @EventTitle, @EventType, @Category, @Severity,
                 @IpAddress, @HttpMethod, @Path, @StatusCode, @CorrelationId, @CreatedAtUtc)
             """;
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@Id", entry.Id);
         command.Parameters.AddWithValue("@TenantId", entry.TenantId);
         command.Parameters.AddWithValue("@UserId", (object?)entry.UserId ?? DBNull.Value);
@@ -74,49 +74,49 @@ public sealed class EventLogInsertService
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task EnsureEventLogsTableAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task EnsureEventLogsTableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         const string sql = """
-            IF NOT EXISTS (SELECT * FROM sys.schemas WHERE name = N'activitylog')
-                EXEC(N'CREATE SCHEMA activitylog');
+            CREATE SCHEMA IF NOT EXISTS activitylog;
 
-            IF OBJECT_ID(N'activitylog.EventLogs', N'U') IS NULL
-            BEGIN
-                CREATE TABLE activitylog.EventLogs (
-                    Id               uniqueidentifier NOT NULL CONSTRAINT PK_EventLogs PRIMARY KEY,
-                    TenantId         uniqueidentifier NOT NULL,
-                    UserId           uniqueidentifier NULL,
-                    UserDisplayName  nvarchar(256) NULL,
-                    UserEmail        nvarchar(256) NULL,
-                    EventTitle       nvarchar(512) NOT NULL,
-                    EventType        nvarchar(128) NOT NULL,
-                    Category         nvarchar(64) NOT NULL,
-                    Severity         nvarchar(32) NOT NULL,
-                    IpAddress        nvarchar(64) NULL,
-                    HttpMethod       nvarchar(10) NULL,
-                    Path             nvarchar(512) NULL,
-                    StatusCode       int NULL,
-                    CorrelationId    nvarchar(64) NULL,
-                    CreatedAtUtc     datetime2 NOT NULL
-                );
+            CREATE TABLE IF NOT EXISTS activitylog."EventLogs" (
+                "Id"               uuid NOT NULL CONSTRAINT "PK_EventLogs" PRIMARY KEY,
+                "TenantId"         uuid NOT NULL,
+                "UserId"           uuid NULL,
+                "UserDisplayName"  varchar(256) NULL,
+                "UserEmail"        varchar(256) NULL,
+                "EventTitle"       varchar(512) NOT NULL,
+                "EventType"        varchar(128) NOT NULL,
+                "Category"         varchar(64) NOT NULL,
+                "Severity"         varchar(32) NOT NULL,
+                "IpAddress"        varchar(64) NULL,
+                "HttpMethod"       varchar(10) NULL,
+                "Path"             varchar(512) NULL,
+                "StatusCode"       integer NULL,
+                "CorrelationId"    varchar(64) NULL,
+                "CreatedAtUtc"     timestamptz NOT NULL
+            );
 
-                CREATE INDEX IX_EventLogs_TenantId_CreatedAtUtc
-                    ON activitylog.EventLogs (TenantId, CreatedAtUtc DESC);
+            CREATE INDEX IF NOT EXISTS "IX_EventLogs_TenantId_CreatedAtUtc"
+                ON activitylog."EventLogs" ("TenantId", "CreatedAtUtc" DESC);
 
-                CREATE INDEX IX_EventLogs_TenantId_Category_CreatedAtUtc
-                    ON activitylog.EventLogs (TenantId, Category, CreatedAtUtc DESC);
+            CREATE INDEX IF NOT EXISTS "IX_EventLogs_TenantId_Category_CreatedAtUtc"
+                ON activitylog."EventLogs" ("TenantId", "Category", "CreatedAtUtc" DESC);
 
-                CREATE INDEX IX_EventLogs_TenantId_Severity
-                    ON activitylog.EventLogs (TenantId, Severity);
-            END
+            CREATE INDEX IF NOT EXISTS "IX_EventLogs_TenantId_Severity"
+                ON activitylog."EventLogs" ("TenantId", "Severity");
             """;
 
         try
         {
-            await using var command = new SqlCommand(sql, connection) { CommandTimeout = 60 };
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 60 };
             await command.ExecuteNonQueryAsync(cancellationToken);
         }
-        catch (SqlException ex) when (ex.Number is 2714 or 1913 or 2705 or 2627)
+        catch (PostgresException ex) when (ex.SqlState is
+            PostgresErrorCodes.DuplicateTable or
+            PostgresErrorCodes.DuplicateObject or
+            PostgresErrorCodes.DuplicateSchema or
+            PostgresErrorCodes.UniqueViolation)
         {
             // Idempotent: object/index already exists (concurrent create).
         }

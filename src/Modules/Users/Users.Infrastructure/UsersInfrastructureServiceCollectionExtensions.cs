@@ -22,13 +22,13 @@ public static class UsersInfrastructureServiceCollectionExtensions
             var connectionString = tenantConnection.ConnectionString
                 ?? throw new InvalidOperationException("Tenant connection string has not been set for this request. Ensure tenant resolution middleware runs and the tenant exists in the catalog.");
             var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-            optionsBuilder.UseSqlServer(connectionString, sql =>
+            optionsBuilder.UseNpgsql(connectionString, npgsql =>
             {
-                sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-                sql.EnableRetryOnFailure(
+                npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+                npgsql.EnableRetryOnFailure(
                     maxRetryCount: 5,
                     maxRetryDelay: TimeSpan.FromSeconds(30),
-                    errorNumbersToAdd: null);
+                    errorCodesToAdd: null);
             });
             optionsBuilder.LogTo(
                 action: message =>

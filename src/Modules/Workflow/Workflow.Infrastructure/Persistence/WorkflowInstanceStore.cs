@@ -1,5 +1,5 @@
 using System.Reflection;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Domain.Entities;
 using SaaSApp.Workflow.Domain.Enums;
@@ -7,8 +7,8 @@ using SaaSApp.Workflow.Domain.Enums;
 namespace SaaSApp.Workflow.Infrastructure.Persistence;
 
 /// <summary>
-/// Persists workflow instances to per-workflow tables (WorkflowInstances_{suffix}, WorkflowStepInstances_{suffix}).
-/// Uses WorkflowInstanceLookup for cross-workflow queries.
+/// Persists workflow instances to per-workflow tables (workflow_instances_{suffix}, workflow_step_instances_{suffix}).
+/// Uses workflow."WorkflowInstanceLookup" for cross-workflow queries.
 /// </summary>
 public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
 {
@@ -20,9 +20,9 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
     }
 
     private static string GetSuffix(Guid workflowId) => workflowId.ToString("N")[..8];
-    private static string InstancesTable(Guid workflowId) => $"workflow.WorkflowInstances_{GetSuffix(workflowId)}";
-    private static string StepInstancesTable(Guid workflowId) => $"workflow.WorkflowStepInstances_{GetSuffix(workflowId)}";
-    private static string InstanceSlasTable(Guid workflowId) => $"workflow.WorkflowInstanceSlas_{GetSuffix(workflowId)}";
+    private static string InstancesTable(Guid workflowId) => $"workflow.workflow_instances_{GetSuffix(workflowId)}";
+    private static string StepInstancesTable(Guid workflowId) => $"workflow.workflow_step_instances_{GetSuffix(workflowId)}";
+    private static string InstanceSlasTable(Guid workflowId) => $"workflow.workflow_instance_slas_{GetSuffix(workflowId)}";
 
     public async Task AddAsync(WorkflowInstance instance, CancellationToken cancellationToken = default)
     {
@@ -31,7 +31,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         var instancesTable = InstancesTable(instance.WorkflowId);
         var stepInstancesTable = StepInstancesTable(instance.WorkflowId);
 
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
         await EnsureStepInstanceColumnsAsync(conn, suffix, cancellationToken);
@@ -39,11 +39,11 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         // Insert instance
         var instanceSql = $@"
             INSERT INTO {instancesTable} (
-                Id, TenantId, WorkflowId, WorkflowName, WorkflowVersion, Status, CurrentStepInstanceId,
-                CreatedAtUtc, StartedAtUtc, CompletedAtUtc, StartedBy, Context, ErrorMessage,
-                ReferenceNumber, CustomerName, CustomerEmail, CustomerPhone, Department, Category, Priority,
-                Tags, CustomFieldsJson, AssignedToUserId, AssignedToGroupId, LastActivityAtUtc,
-                ViewCount, IsArchived, ArchivedAtUtc, SourceType, SourceId, LastViewedAtUtc, LastViewedBy)
+                id, tenant_id, workflow_id, workflow_name, workflow_version, status, current_step_instance_id,
+                created_at_utc, started_at_utc, completed_at_utc, started_by, context, error_message,
+                reference_number, customer_name, customer_email, customer_phone, department, category, priority,
+                tags, custom_fields_json, assigned_to_user_id, assigned_to_group_id, last_activity_at_utc,
+                view_count, is_archived, archived_at_utc, source_type, source_id, last_viewed_at_utc, last_viewed_by)
             VALUES (
                 @Id, @TenantId, @WorkflowId, @WorkflowName, @WorkflowVersion, @Status, @CurrentStepInstanceId,
                 @CreatedAtUtc, @StartedAtUtc, @CompletedAtUtc, @StartedBy, @Context, @ErrorMessage,
@@ -51,7 +51,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
                 @Tags, @CustomFieldsJson, @AssignedToUserId, @AssignedToGroupId, @LastActivityAtUtc,
                 @ViewCount, @IsArchived, @ArchivedAtUtc, @SourceType, @SourceId, @LastViewedAtUtc, @LastViewedBy)";
 
-        await using (var cmd = new SqlCommand(instanceSql, conn))
+        await using (var cmd = new NpgsqlCommand(instanceSql, conn))
         {
             AddInstanceParams(cmd, instance);
             await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -62,14 +62,14 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         {
             var stepSql = $@"
                 INSERT INTO {stepInstancesTable} (
-                    Id, WorkflowInstanceId, WorkflowStepId, StepName, StepType, [Order], Status,
-                    AssignedToUserId, AssignedToRole, CreatedAtUtc, StartedAtUtc, CompletedAtUtc,
-                    CompletedBy, Result, ErrorMessage, ActivityId, StageType)
+                    id, workflow_instance_id, workflow_step_id, step_name, step_type, ""order"", status,
+                    assigned_to_user_id, assigned_to_role, created_at_utc, started_at_utc, completed_at_utc,
+                    completed_by, result, error_message, activity_id, stage_type)
                 VALUES (
                     @Id, @WorkflowInstanceId, @WorkflowStepId, @StepName, @StepType, @Order, @Status,
                     @AssignedToUserId, @AssignedToRole, @CreatedAtUtc, @StartedAtUtc, @CompletedAtUtc,
                     @CompletedBy, @Result, @ErrorMessage, @ActivityId, @StageType)";
-            await using var stepCmd = new SqlCommand(stepSql, conn);
+            await using var stepCmd = new NpgsqlCommand(stepSql, conn);
             AddStepInstanceParams(stepCmd, step, instance.Id);
             await stepCmd.ExecuteNonQueryAsync(cancellationToken);
         }
@@ -80,27 +80,28 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
             var slaTable = InstanceSlasTable(instance.WorkflowId);
             var slaSql = $@"
                 INSERT INTO {slaTable} (
-                    Id, WorkflowInstanceId, Priority, ResponseDeadline, ResolutionDeadline, EscalationDeadline,
-                    ResponseAchievedAt, ResolutionAchievedAt, ResponseStatus, ResolutionStatus, IsEscalated, EscalatedAt, CreatedAtUtc)
+                    id, workflow_instance_id, priority, response_deadline, resolution_deadline, escalation_deadline,
+                    response_achieved_at, resolution_achieved_at, response_status, resolution_status, is_escalated, escalated_at, created_at_utc)
                 VALUES (
                     @Id, @WorkflowInstanceId, @Priority, @ResponseDeadline, @ResolutionDeadline, @EscalationDeadline,
                     @ResponseAchievedAt, @ResolutionAchievedAt, @ResponseStatus, @ResolutionStatus, @IsEscalated, @EscalatedAt, @CreatedAtUtc)";
-            await using var slaCmd = new SqlCommand(slaSql, conn);
+            await using var slaCmd = new NpgsqlCommand(slaSql, conn);
             AddSlaParams(slaCmd, instance.Sla);
             await slaCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
         // Insert lookup row
-        var lookupSql = @"
-            INSERT INTO workflow.WorkflowInstanceLookup (
-                InstanceId, WorkflowId, TenantId, WorkflowName, Status, AssignedToUserId, StartedBy,
-                CreatedAtUtc, LastActivityAtUtc, CompletedAtUtc, IsArchived, Priority, CurrentStepInstanceId,
-                SlaPriority, ResponseStatus, ResolutionStatus, ResponseDeadline, ResolutionDeadline, IsEscalated)
+        const string lookupSql = """
+            INSERT INTO workflow."WorkflowInstanceLookup" (
+                "InstanceId", "WorkflowId", "TenantId", "WorkflowName", "Status", "AssignedToUserId", "StartedBy",
+                "CreatedAtUtc", "LastActivityAtUtc", "CompletedAtUtc", "IsArchived", "Priority", "CurrentStepInstanceId",
+                "SlaPriority", "ResponseStatus", "ResolutionStatus", "ResponseDeadline", "ResolutionDeadline", "IsEscalated")
             VALUES (
                 @InstanceId, @WorkflowId, @TenantId, @WorkflowName, @Status, @AssignedToUserId, @StartedBy,
                 @CreatedAtUtc, @LastActivityAtUtc, @CompletedAtUtc, @IsArchived, @Priority, @CurrentStepInstanceId,
-                @SlaPriority, @ResponseStatus, @ResolutionStatus, @ResponseDeadline, @ResolutionDeadline, @IsEscalated)";
-        await using var lookupCmd = new SqlCommand(lookupSql, conn);
+                @SlaPriority, @ResponseStatus, @ResolutionStatus, @ResponseDeadline, @ResolutionDeadline, @IsEscalated)
+            """;
+        await using var lookupCmd = new NpgsqlCommand(lookupSql, conn);
         AddLookupParams(lookupCmd, instance);
         await lookupCmd.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -109,12 +110,12 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
     {
         var connStr = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string required.");
 
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
         // Lookup workflowId
-        var lookupSql = "SELECT WorkflowId FROM workflow.WorkflowInstanceLookup WHERE InstanceId = @Id";
-        await using var lookupCmd = new SqlCommand(lookupSql, conn);
+        const string lookupSql = """SELECT "WorkflowId" FROM workflow."WorkflowInstanceLookup" WHERE "InstanceId" = @Id""";
+        await using var lookupCmd = new NpgsqlCommand(lookupSql, conn);
         lookupCmd.Parameters.AddWithValue("@Id", instanceId);
         var workflowIdObj = await lookupCmd.ExecuteScalarAsync(cancellationToken);
         if (workflowIdObj == null || workflowIdObj == DBNull.Value)
@@ -126,17 +127,12 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         var slaTable = InstanceSlasTable(workflowId);
 
         // Check if per-workflow tables exist (workflow may have been published)
-        var tableCheck = $@"
-            IF EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInstances_{GetSuffix(workflowId)}' AND schema_id = SCHEMA_ID('workflow'))
-                SELECT 1";
-        await using var checkCmd = new SqlCommand(tableCheck, conn);
-        var exists = await checkCmd.ExecuteScalarAsync(cancellationToken);
-        if (exists == null)
+        if (!await TableExistsAsync(conn, $"workflow_instances_{GetSuffix(workflowId)}", cancellationToken))
             return null;
 
         // Load instance
-        var instanceSql = $"SELECT * FROM {instancesTable} WHERE Id = @Id";
-        await using var instanceCmd = new SqlCommand(instanceSql, conn);
+        var instanceSql = $"SELECT * FROM {instancesTable} WHERE id = @Id";
+        await using var instanceCmd = new NpgsqlCommand(instanceSql, conn);
         instanceCmd.Parameters.AddWithValue("@Id", instanceId);
 
         WorkflowInstance? instance = null;
@@ -150,8 +146,8 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
             return null;
 
         // Load step instances
-        var stepSql = $"SELECT * FROM {stepInstancesTable} WHERE WorkflowInstanceId = @InstanceId ORDER BY [Order]";
-        await using var stepCmd = new SqlCommand(stepSql, conn);
+        var stepSql = $"""SELECT * FROM {stepInstancesTable} WHERE workflow_instance_id = @InstanceId ORDER BY "order" """;
+        await using var stepCmd = new NpgsqlCommand(stepSql, conn);
         stepCmd.Parameters.AddWithValue("@InstanceId", instanceId);
         await using (var stepReader = await stepCmd.ExecuteReaderAsync(cancellationToken))
         {
@@ -165,8 +161,8 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         // Load SLA (table may not exist for workflows without SLA)
         try
         {
-            var slaSql = $"SELECT * FROM {slaTable} WHERE WorkflowInstanceId = @InstanceId";
-            await using var slaCmd = new SqlCommand(slaSql, conn);
+            var slaSql = $"SELECT * FROM {slaTable} WHERE workflow_instance_id = @InstanceId";
+            await using var slaCmd = new NpgsqlCommand(slaSql, conn);
             slaCmd.Parameters.AddWithValue("@InstanceId", instanceId);
             await using var slaReader = await slaCmd.ExecuteReaderAsync(cancellationToken);
             if (await slaReader.ReadAsync(cancellationToken))
@@ -175,7 +171,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
                 instance.SetSla(sla);
             }
         }
-        catch (SqlException) { /* Table may not exist */ }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable) { /* Table may not exist */ }
 
         return instance;
     }
@@ -186,18 +182,14 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         var instancesTable = InstancesTable(workflowId);
         var stepInstancesTable = StepInstancesTable(workflowId);
 
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
-        var tableCheck = $@"
-            IF EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInstances_{GetSuffix(workflowId)}' AND schema_id = SCHEMA_ID('workflow'))
-                SELECT 1";
-        await using var checkCmd = new SqlCommand(tableCheck, conn);
-        if (await checkCmd.ExecuteScalarAsync(cancellationToken) == null)
+        if (!await TableExistsAsync(conn, $"workflow_instances_{GetSuffix(workflowId)}", cancellationToken))
             return Array.Empty<WorkflowInstance>();
 
-        var sql = $"SELECT * FROM {instancesTable} WHERE WorkflowId = @WorkflowId ORDER BY CreatedAtUtc DESC";
-        await using var cmd = new SqlCommand(sql, conn);
+        var sql = $"SELECT * FROM {instancesTable} WHERE workflow_id = @WorkflowId ORDER BY created_at_utc DESC";
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
 
         var list = new List<WorkflowInstance>();
@@ -212,8 +204,8 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
 
         foreach (var instance in list)
         {
-            var stepSql = $"SELECT * FROM {stepInstancesTable} WHERE WorkflowInstanceId = @InstanceId ORDER BY [Order]";
-            await using var stepCmd = new SqlCommand(stepSql, conn);
+            var stepSql = $"""SELECT * FROM {stepInstancesTable} WHERE workflow_instance_id = @InstanceId ORDER BY "order" """;
+            await using var stepCmd = new NpgsqlCommand(stepSql, conn);
             stepCmd.Parameters.AddWithValue("@InstanceId", instance.Id);
             await using var stepReader = await stepCmd.ExecuteReaderAsync(cancellationToken);
             while (await stepReader.ReadAsync(cancellationToken))
@@ -231,19 +223,19 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         var connStr = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string required.");
         var instancesTable = InstancesTable(instance.WorkflowId);
 
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
         var sql = $@"
             UPDATE {instancesTable} SET
-                Status = @Status, CurrentStepInstanceId = @CurrentStepInstanceId,
-                StartedAtUtc = @StartedAtUtc, CompletedAtUtc = @CompletedAtUtc,
-                ErrorMessage = @ErrorMessage, AssignedToUserId = @AssignedToUserId,
-                LastActivityAtUtc = @LastActivityAtUtc, ViewCount = @ViewCount,
-                IsArchived = @IsArchived, ArchivedAtUtc = @ArchivedAtUtc
-            WHERE Id = @Id";
+                status = @Status, current_step_instance_id = @CurrentStepInstanceId,
+                started_at_utc = @StartedAtUtc, completed_at_utc = @CompletedAtUtc,
+                error_message = @ErrorMessage, assigned_to_user_id = @AssignedToUserId,
+                last_activity_at_utc = @LastActivityAtUtc, view_count = @ViewCount,
+                is_archived = @IsArchived, archived_at_utc = @ArchivedAtUtc
+            WHERE id = @Id";
 
-        await using var cmd = new SqlCommand(sql, conn);
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@Id", instance.Id);
         cmd.Parameters.AddWithValue("@Status", (int)instance.Status);
         cmd.Parameters.AddWithValue("@CurrentStepInstanceId", (object?)instance.CurrentStepInstanceId ?? DBNull.Value);
@@ -263,10 +255,10 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         {
             var stepSql = $@"
                 UPDATE {stepInstancesTable} SET
-                    Status = @Status, StartedAtUtc = @StartedAtUtc, CompletedAtUtc = @CompletedAtUtc,
-                    CompletedBy = @CompletedBy, Result = @Result, ErrorMessage = @ErrorMessage
-                WHERE Id = @Id";
-            await using var stepCmd = new SqlCommand(stepSql, conn);
+                    status = @Status, started_at_utc = @StartedAtUtc, completed_at_utc = @CompletedAtUtc,
+                    completed_by = @CompletedBy, result = @Result, error_message = @ErrorMessage
+                WHERE id = @Id";
+            await using var stepCmd = new NpgsqlCommand(stepSql, conn);
             stepCmd.Parameters.AddWithValue("@Id", step.Id);
             stepCmd.Parameters.AddWithValue("@Status", (int)step.Status);
             stepCmd.Parameters.AddWithValue("@StartedAtUtc", (object?)step.StartedAtUtc ?? DBNull.Value);
@@ -285,11 +277,11 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
                 var slaTable = InstanceSlasTable(instance.WorkflowId);
                 var slaSql = $@"
                     UPDATE {slaTable} SET
-                        ResponseAchievedAt = @ResponseAchievedAt, ResolutionAchievedAt = @ResolutionAchievedAt,
-                        ResponseStatus = @ResponseStatus, ResolutionStatus = @ResolutionStatus,
-                        IsEscalated = @IsEscalated, EscalatedAt = @EscalatedAt
-                    WHERE WorkflowInstanceId = @WorkflowInstanceId";
-                await using var slaCmd = new SqlCommand(slaSql, conn);
+                        response_achieved_at = @ResponseAchievedAt, resolution_achieved_at = @ResolutionAchievedAt,
+                        response_status = @ResponseStatus, resolution_status = @ResolutionStatus,
+                        is_escalated = @IsEscalated, escalated_at = @EscalatedAt
+                    WHERE workflow_instance_id = @WorkflowInstanceId";
+                await using var slaCmd = new NpgsqlCommand(slaSql, conn);
                 slaCmd.Parameters.AddWithValue("@WorkflowInstanceId", instance.Id);
                 slaCmd.Parameters.AddWithValue("@ResponseAchievedAt", (object?)instance.Sla.ResponseAchievedAt ?? DBNull.Value);
                 slaCmd.Parameters.AddWithValue("@ResolutionAchievedAt", (object?)instance.Sla.ResolutionAchievedAt ?? DBNull.Value);
@@ -299,18 +291,19 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
                 slaCmd.Parameters.AddWithValue("@EscalatedAt", (object?)instance.Sla.EscalatedAt ?? DBNull.Value);
                 await slaCmd.ExecuteNonQueryAsync(cancellationToken);
             }
-            catch (SqlException) { /* Table may not exist */ }
+            catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable) { /* Table may not exist */ }
         }
 
         // Update lookup
-        var lookupSql = @"
-            UPDATE workflow.WorkflowInstanceLookup SET
-                Status = @Status, AssignedToUserId = @AssignedToUserId, LastActivityAtUtc = @LastActivityAtUtc,
-                CompletedAtUtc = @CompletedAtUtc, IsArchived = @IsArchived, CurrentStepInstanceId = @CurrentStepInstanceId,
-                SlaPriority = @SlaPriority, ResponseStatus = @ResponseStatus, ResolutionStatus = @ResolutionStatus,
-                ResponseDeadline = @ResponseDeadline, ResolutionDeadline = @ResolutionDeadline, IsEscalated = @IsEscalated
-            WHERE InstanceId = @InstanceId";
-        await using var lookupCmd = new SqlCommand(lookupSql, conn);
+        const string lookupSql = """
+            UPDATE workflow."WorkflowInstanceLookup" SET
+                "Status" = @Status, "AssignedToUserId" = @AssignedToUserId, "LastActivityAtUtc" = @LastActivityAtUtc,
+                "CompletedAtUtc" = @CompletedAtUtc, "IsArchived" = @IsArchived, "CurrentStepInstanceId" = @CurrentStepInstanceId,
+                "SlaPriority" = @SlaPriority, "ResponseStatus" = @ResponseStatus, "ResolutionStatus" = @ResolutionStatus,
+                "ResponseDeadline" = @ResponseDeadline, "ResolutionDeadline" = @ResolutionDeadline, "IsEscalated" = @IsEscalated
+            WHERE "InstanceId" = @InstanceId
+            """;
+        await using var lookupCmd = new NpgsqlCommand(lookupSql, conn);
         lookupCmd.Parameters.AddWithValue("@InstanceId", instance.Id);
         lookupCmd.Parameters.AddWithValue("@Status", (int)instance.Status);
         lookupCmd.Parameters.AddWithValue("@AssignedToUserId", (object?)instance.AssignedToUserId ?? DBNull.Value);
@@ -324,33 +317,34 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
 
     public async Task<(List<WorkflowInstance> Items, int TotalCount)> GetMyInboxAsync(Guid userId, int pageNumber, int pageSize, Guid? workflowId = null, CancellationToken cancellationToken = default)
     {
-        var whereClause = "AssignedToUserId = @UserId AND Status IN (0, 1) AND IsArchived = 0";
-        var parameters = new List<SqlParameter> { new SqlParameter("@UserId", userId) };
+        var whereClause = "\"AssignedToUserId\" = @UserId AND \"Status\" IN (0, 1) AND \"IsArchived\" = false";
+        var parameters = new List<NpgsqlParameter> { new NpgsqlParameter("@UserId", userId) };
         if (workflowId.HasValue)
         {
-            whereClause += " AND WorkflowId = @WorkflowId";
-            parameters.Add(new SqlParameter("@WorkflowId", workflowId.Value));
+            whereClause += " AND \"WorkflowId\" = @WorkflowId";
+            parameters.Add(new NpgsqlParameter("@WorkflowId", workflowId.Value));
         }
         return await GetInstancesFromLookupAsync(
             whereClause,
             parameters.ToArray(),
-            "Priority DESC, ISNULL(LastActivityAtUtc, CreatedAtUtc) DESC",
+            "\"Priority\" DESC, COALESCE(\"LastActivityAtUtc\", \"CreatedAtUtc\") DESC",
             pageNumber, pageSize, cancellationToken);
     }
 
     public async Task<IReadOnlyList<WorkflowInboxCount>> GetWorkflowWiseInboxCountsAsync(Guid userId, CancellationToken cancellationToken = default)
     {
         var connStr = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string required.");
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
-        var sql = @"
-            SELECT WorkflowId, WorkflowName, COUNT(*) AS InboxCount
-            FROM workflow.WorkflowInstanceLookup
-            WHERE AssignedToUserId = @UserId AND Status IN (0, 1) AND IsArchived = 0
-            GROUP BY WorkflowId, WorkflowName
-            ORDER BY InboxCount DESC, WorkflowName";
-        await using var cmd = new SqlCommand(sql, conn);
+        const string sql = """
+            SELECT "WorkflowId", "WorkflowName", COUNT(*) AS "InboxCount"
+            FROM workflow."WorkflowInstanceLookup"
+            WHERE "AssignedToUserId" = @UserId AND "Status" IN (0, 1) AND "IsArchived" = false
+            GROUP BY "WorkflowId", "WorkflowName"
+            ORDER BY "InboxCount" DESC, "WorkflowName"
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@UserId", userId);
         var list = new List<WorkflowInboxCount>();
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -359,7 +353,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
             list.Add(new WorkflowInboxCount(
                 reader.GetGuid(0),
                 reader.GetString(1),
-                reader.GetInt32(2)));
+                Convert.ToInt32(reader.GetInt64(2))));
         }
         return list;
     }
@@ -367,55 +361,60 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
     public async Task<(List<WorkflowInstance> Items, int TotalCount)> GetMySentAsync(Guid userId, int pageNumber, int pageSize, CancellationToken cancellationToken = default)
     {
         return await GetInstancesFromLookupAsync(
-            "StartedBy = @UserId AND IsArchived = 0",
-            new[] { new SqlParameter("@UserId", userId) },
-            "CreatedAtUtc DESC",
+            "\"StartedBy\" = @UserId AND \"IsArchived\" = false",
+            new[] { new NpgsqlParameter("@UserId", userId) },
+            "\"CreatedAtUtc\" DESC",
             pageNumber, pageSize, cancellationToken);
     }
 
     public async Task<(List<WorkflowInstance> Items, int TotalCount)> GetMyCompletedAsync(Guid userId, int pageNumber, int pageSize, CancellationToken cancellationToken = default)
     {
         return await GetInstancesFromLookupAsync(
-            "(StartedBy = @UserId OR AssignedToUserId = @UserId) AND Status = 3",
-            new[] { new SqlParameter("@UserId", userId) },
-            "LastActivityAtUtc DESC",
+            "(\"StartedBy\" = @UserId OR \"AssignedToUserId\" = @UserId) AND \"Status\" = 3",
+            new[] { new NpgsqlParameter("@UserId", userId) },
+            "\"LastActivityAtUtc\" DESC",
             pageNumber, pageSize, cancellationToken);
     }
 
     public async Task<WorkflowCounts> GetWorkflowCountsAsync(Guid userId, CancellationToken cancellationToken = default)
     {
         var connStr = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string required.");
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
-        var sql = @"
+        const string sql = """
             SELECT
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup WHERE AssignedToUserId = @UserId AND Status IN (0, 1) AND IsArchived = 0),
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup WHERE StartedBy = @UserId AND IsArchived = 0),
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup WHERE (StartedBy = @UserId OR AssignedToUserId = @UserId) AND Status = 3),
-                (SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup WHERE Status NOT IN (3, 5) AND IsArchived = 0)";
-        await using var cmd = new SqlCommand(sql, conn);
+                (SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" WHERE "AssignedToUserId" = @UserId AND "Status" IN (0, 1) AND "IsArchived" = false),
+                (SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" WHERE "StartedBy" = @UserId AND "IsArchived" = false),
+                (SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" WHERE ("StartedBy" = @UserId OR "AssignedToUserId" = @UserId) AND "Status" = 3),
+                (SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" WHERE "Status" NOT IN (3, 5) AND "IsArchived" = false)
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@UserId", userId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         await reader.ReadAsync(cancellationToken);
         return new WorkflowCounts(
-            reader.GetInt32(0), reader.GetInt32(1), reader.GetInt32(2), reader.GetInt32(3));
+            Convert.ToInt32(reader.GetInt64(0)),
+            Convert.ToInt32(reader.GetInt64(1)),
+            Convert.ToInt32(reader.GetInt64(2)),
+            Convert.ToInt32(reader.GetInt64(3)));
     }
 
     public async Task<IReadOnlyList<SlaBreachInfo>> ListSlaBreachesAsync(CancellationToken cancellationToken = default)
     {
         var connStr = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string required.");
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
-        var sql = @"
-            SELECT InstanceId, WorkflowId, WorkflowName, Status, SlaPriority, ResponseStatus, ResolutionStatus,
-                   ResponseDeadline, ResolutionDeadline, IsEscalated, CreatedAtUtc
-            FROM workflow.WorkflowInstanceLookup
-            WHERE (ResponseStatus IN (1, 2) OR ResolutionStatus IN (1, 2))
-              AND SlaPriority IS NOT NULL
-            ORDER BY SlaPriority DESC, ResolutionDeadline";
-        await using var cmd = new SqlCommand(sql, conn);
+        const string sql = """
+            SELECT "InstanceId", "WorkflowId", "WorkflowName", "Status", "SlaPriority", "ResponseStatus", "ResolutionStatus",
+                   "ResponseDeadline", "ResolutionDeadline", "IsEscalated", "CreatedAtUtc"
+            FROM workflow."WorkflowInstanceLookup"
+            WHERE ("ResponseStatus" IN (1, 2) OR "ResolutionStatus" IN (1, 2))
+              AND "SlaPriority" IS NOT NULL
+            ORDER BY "SlaPriority" DESC, "ResolutionDeadline"
+            """;
+        await using var cmd = new NpgsqlCommand(sql, conn);
         var list = new List<SlaBreachInfo>();
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -430,27 +429,28 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
     }
 
     private async Task<(List<WorkflowInstance> Items, int TotalCount)> GetInstancesFromLookupAsync(
-        string whereClause, SqlParameter[] parameters, string orderBy, int pageNumber, int pageSize, CancellationToken cancellationToken)
+        string whereClause, NpgsqlParameter[] parameters, string orderBy, int pageNumber, int pageSize, CancellationToken cancellationToken)
     {
         var connStr = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string required.");
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(cancellationToken);
 
-        var countSql = $"SELECT COUNT(*) FROM workflow.WorkflowInstanceLookup WHERE {whereClause}";
-        await using var countCmd = new SqlCommand(countSql, conn);
+        var countSql = $"""SELECT COUNT(*) FROM workflow."WorkflowInstanceLookup" WHERE {whereClause}""";
+        await using var countCmd = new NpgsqlCommand(countSql, conn);
         foreach (var p in parameters)
-            countCmd.Parameters.Add(new SqlParameter(p.ParameterName, p.Value));
-        var totalCount = (int)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+            countCmd.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
+        var totalCount = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
 
         var offset = (pageNumber - 1) * pageSize;
-        var dataSql = $@"
-            SELECT InstanceId, WorkflowId FROM workflow.WorkflowInstanceLookup
+        var dataSql = $"""
+            SELECT "InstanceId", "WorkflowId" FROM workflow."WorkflowInstanceLookup"
             WHERE {whereClause}
             ORDER BY {orderBy}
-            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY";
-        await using var dataCmd = new SqlCommand(dataSql, conn);
+            OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
+            """;
+        await using var dataCmd = new NpgsqlCommand(dataSql, conn);
         foreach (var p in parameters)
-            dataCmd.Parameters.Add(new SqlParameter(p.ParameterName, p.Value));
+            dataCmd.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
         dataCmd.Parameters.AddWithValue("@Offset", offset);
         dataCmd.Parameters.AddWithValue("@PageSize", pageSize);
 
@@ -478,7 +478,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
     }
 
     private async Task<List<WorkflowInstance>> LoadInstancesBatchAsync(
-        SqlConnection conn,
+        NpgsqlConnection conn,
         Guid workflowId,
         IReadOnlyList<Guid> instanceIds,
         CancellationToken cancellationToken)
@@ -490,17 +490,11 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         var stepInstancesTable = StepInstancesTable(workflowId);
         var slaTable = InstanceSlasTable(workflowId);
 
-        var tableCheck = $@"
-            IF EXISTS (SELECT * FROM sys.tables WHERE name = 'WorkflowInstances_{GetSuffix(workflowId)}' AND schema_id = SCHEMA_ID('workflow'))
-                SELECT 1";
-        await using (var checkCmd = new SqlCommand(tableCheck, conn))
-        {
-            if (await checkCmd.ExecuteScalarAsync(cancellationToken) == null)
-                return [];
-        }
+        if (!await TableExistsAsync(conn, $"workflow_instances_{GetSuffix(workflowId)}", cancellationToken))
+            return [];
 
         var idParams = new List<string>(instanceIds.Count);
-        var instanceSql = new System.Text.StringBuilder($"SELECT * FROM {instancesTable} WHERE Id IN (");
+        var instanceSql = new System.Text.StringBuilder($"SELECT * FROM {instancesTable} WHERE id IN (");
         for (var i = 0; i < instanceIds.Count; i++)
         {
             var param = $"@Id{i}";
@@ -512,7 +506,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         instanceSql.Append(')');
 
         var instances = new Dictionary<Guid, WorkflowInstance>(instanceIds.Count);
-        await using (var instanceCmd = new SqlCommand(instanceSql.ToString(), conn))
+        await using (var instanceCmd = new NpgsqlCommand(instanceSql.ToString(), conn))
         {
             for (var i = 0; i < instanceIds.Count; i++)
                 instanceCmd.Parameters.AddWithValue($"@Id{i}", instanceIds[i]);
@@ -528,16 +522,16 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         if (instances.Count == 0)
             return [];
 
-        var stepSql = new System.Text.StringBuilder($"SELECT * FROM {stepInstancesTable} WHERE WorkflowInstanceId IN (");
+        var stepSql = new System.Text.StringBuilder($"SELECT * FROM {stepInstancesTable} WHERE workflow_instance_id IN (");
         for (var i = 0; i < instanceIds.Count; i++)
         {
             if (i > 0)
                 stepSql.Append(", ");
             stepSql.Append(idParams[i]);
         }
-        stepSql.Append(") ORDER BY [Order]");
+        stepSql.Append(") ORDER BY \"order\"");
 
-        await using (var stepCmd = new SqlCommand(stepSql.ToString(), conn))
+        await using (var stepCmd = new NpgsqlCommand(stepSql.ToString(), conn))
         {
             for (var i = 0; i < instanceIds.Count; i++)
                 stepCmd.Parameters.AddWithValue($"@Id{i}", instanceIds[i]);
@@ -545,7 +539,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
             await using var stepReader = await stepCmd.ExecuteReaderAsync(cancellationToken);
             while (await stepReader.ReadAsync(cancellationToken))
             {
-                var instanceId = stepReader.GetGuid(stepReader.GetOrdinal("WorkflowInstanceId"));
+                var instanceId = stepReader.GetGuid(stepReader.GetOrdinal("workflow_instance_id"));
                 if (instances.TryGetValue(instanceId, out var instance))
                 {
                     var step = ReadWorkflowStepInstance(stepReader, instanceId);
@@ -556,7 +550,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
 
         try
         {
-            var slaSql = new System.Text.StringBuilder($"SELECT * FROM {slaTable} WHERE WorkflowInstanceId IN (");
+            var slaSql = new System.Text.StringBuilder($"SELECT * FROM {slaTable} WHERE workflow_instance_id IN (");
             for (var i = 0; i < instanceIds.Count; i++)
             {
                 if (i > 0)
@@ -565,14 +559,14 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
             }
             slaSql.Append(')');
 
-            await using var slaCmd = new SqlCommand(slaSql.ToString(), conn);
+            await using var slaCmd = new NpgsqlCommand(slaSql.ToString(), conn);
             for (var i = 0; i < instanceIds.Count; i++)
                 slaCmd.Parameters.AddWithValue($"@Id{i}", instanceIds[i]);
 
             await using var slaReader = await slaCmd.ExecuteReaderAsync(cancellationToken);
             while (await slaReader.ReadAsync(cancellationToken))
             {
-                var instanceId = slaReader.GetGuid(slaReader.GetOrdinal("WorkflowInstanceId"));
+                var instanceId = slaReader.GetGuid(slaReader.GetOrdinal("workflow_instance_id"));
                 if (instances.TryGetValue(instanceId, out var instance))
                 {
                     var sla = ReadWorkflowInstanceSla(slaReader, instanceId);
@@ -580,7 +574,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
                 }
             }
         }
-        catch (SqlException) { /* SLA table may not exist */ }
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable) { /* SLA table may not exist */ }
 
         return instanceIds
             .Where(instances.ContainsKey)
@@ -588,7 +582,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
             .ToList();
     }
 
-    private static void AddInstanceParams(SqlCommand cmd, WorkflowInstance i)
+    private static void AddInstanceParams(NpgsqlCommand cmd, WorkflowInstance i)
     {
         cmd.Parameters.AddWithValue("@Id", i.Id);
         cmd.Parameters.AddWithValue("@TenantId", i.TenantId);
@@ -624,7 +618,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         cmd.Parameters.AddWithValue("@LastViewedBy", DBNull.Value);
     }
 
-    private static void AddStepInstanceParams(SqlCommand cmd, WorkflowStepInstance s, Guid instanceId)
+    private static void AddStepInstanceParams(NpgsqlCommand cmd, WorkflowStepInstance s, Guid instanceId)
     {
         cmd.Parameters.AddWithValue("@Id", s.Id);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", instanceId);
@@ -645,7 +639,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         cmd.Parameters.AddWithValue("@StageType", (object?)s.StageType ?? DBNull.Value);
     }
 
-    private static void AddSlaParams(SqlCommand cmd, WorkflowInstanceSla s)
+    private static void AddSlaParams(NpgsqlCommand cmd, WorkflowInstanceSla s)
     {
         cmd.Parameters.AddWithValue("@Id", s.Id);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", s.WorkflowInstanceId);
@@ -662,7 +656,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         cmd.Parameters.AddWithValue("@CreatedAtUtc", s.CreatedAtUtc);
     }
 
-    private static void AddLookupParams(SqlCommand cmd, WorkflowInstance i)
+    private static void AddLookupParams(NpgsqlCommand cmd, WorkflowInstance i)
     {
         cmd.Parameters.AddWithValue("@InstanceId", i.Id);
         cmd.Parameters.AddWithValue("@WorkflowId", i.WorkflowId);
@@ -680,7 +674,7 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         AddLookupSlaParams(cmd, i);
     }
 
-    private static void AddLookupSlaParams(SqlCommand cmd, WorkflowInstance i)
+    private static void AddLookupSlaParams(NpgsqlCommand cmd, WorkflowInstance i)
     {
         if (i.Sla != null)
         {
@@ -702,68 +696,68 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         }
     }
 
-    private static WorkflowInstance ReadWorkflowInstance(SqlDataReader r, Guid workflowId)
+    private static WorkflowInstance ReadWorkflowInstance(NpgsqlDataReader r, Guid workflowId)
     {
         var instance = (WorkflowInstance)Activator.CreateInstance(typeof(WorkflowInstance), nonPublic: true)!;
-        SetProperty(instance, "Id", r.GetGuid(r.GetOrdinal("Id")));
-        SetProperty(instance, "TenantId", r.GetGuid(r.GetOrdinal("TenantId")));
+        SetProperty(instance, "Id", r.GetGuid(r.GetOrdinal("id")));
+        SetProperty(instance, "TenantId", r.GetGuid(r.GetOrdinal("tenant_id")));
         SetProperty(instance, "WorkflowId", workflowId);
-        SetProperty(instance, "WorkflowName", r.GetString(r.GetOrdinal("WorkflowName")));
-        SetProperty(instance, "WorkflowVersion", r.GetInt32(r.GetOrdinal("WorkflowVersion")));
-        SetProperty(instance, "Status", (WorkflowInstanceStatus)r.GetInt32(r.GetOrdinal("Status")));
-        SetProperty(instance, "CurrentStepInstanceId", GetGuidOrNull(r, "CurrentStepInstanceId"));
-        SetProperty(instance, "CreatedAtUtc", r.GetDateTime(r.GetOrdinal("CreatedAtUtc")));
-        SetProperty(instance, "StartedAtUtc", GetDateTimeOrNull(r, "StartedAtUtc"));
-        SetProperty(instance, "CompletedAtUtc", GetDateTimeOrNull(r, "CompletedAtUtc"));
-        SetProperty(instance, "StartedBy", r.GetGuid(r.GetOrdinal("StartedBy")));
-        SetProperty(instance, "Context", GetStringOrNull(r, "Context"));
-        SetProperty(instance, "ErrorMessage", GetStringOrNull(r, "ErrorMessage"));
-        SetProperty(instance, "ReferenceNumber", GetStringOrNull(r, "ReferenceNumber"));
-        SetProperty(instance, "CustomerName", GetStringOrNull(r, "CustomerName"));
-        SetProperty(instance, "CustomerEmail", GetStringOrNull(r, "CustomerEmail"));
-        SetProperty(instance, "CustomerPhone", GetStringOrNull(r, "CustomerPhone"));
-        SetProperty(instance, "Department", GetStringOrNull(r, "Department"));
-        SetProperty(instance, "Category", GetStringOrNull(r, "Category"));
-        SetProperty(instance, "Priority", r.GetInt32(r.GetOrdinal("Priority")));
-        SetProperty(instance, "Tags", GetStringOrNull(r, "Tags"));
-        SetProperty(instance, "CustomFieldsJson", GetStringOrNull(r, "CustomFieldsJson"));
-        SetProperty(instance, "AssignedToUserId", GetGuidOrNull(r, "AssignedToUserId"));
-        SetProperty(instance, "AssignedToGroupId", GetGuidOrNull(r, "AssignedToGroupId"));
-        SetProperty(instance, "LastActivityAtUtc", GetDateTimeOrNull(r, "LastActivityAtUtc"));
-        SetProperty(instance, "ViewCount", r.GetInt32(r.GetOrdinal("ViewCount")));
-        SetProperty(instance, "IsArchived", r.GetBoolean(r.GetOrdinal("IsArchived")));
-        SetProperty(instance, "ArchivedAtUtc", GetDateTimeOrNull(r, "ArchivedAtUtc"));
-        SetProperty(instance, "SourceType", GetStringOrNull(r, "SourceType"));
-        SetProperty(instance, "SourceId", GetStringOrNull(r, "SourceId"));
+        SetProperty(instance, "WorkflowName", r.GetString(r.GetOrdinal("workflow_name")));
+        SetProperty(instance, "WorkflowVersion", r.GetInt32(r.GetOrdinal("workflow_version")));
+        SetProperty(instance, "Status", (WorkflowInstanceStatus)r.GetInt32(r.GetOrdinal("status")));
+        SetProperty(instance, "CurrentStepInstanceId", GetGuidOrNull(r, "current_step_instance_id"));
+        SetProperty(instance, "CreatedAtUtc", r.GetDateTime(r.GetOrdinal("created_at_utc")));
+        SetProperty(instance, "StartedAtUtc", GetDateTimeOrNull(r, "started_at_utc"));
+        SetProperty(instance, "CompletedAtUtc", GetDateTimeOrNull(r, "completed_at_utc"));
+        SetProperty(instance, "StartedBy", r.GetGuid(r.GetOrdinal("started_by")));
+        SetProperty(instance, "Context", GetStringOrNull(r, "context"));
+        SetProperty(instance, "ErrorMessage", GetStringOrNull(r, "error_message"));
+        SetProperty(instance, "ReferenceNumber", GetStringOrNull(r, "reference_number"));
+        SetProperty(instance, "CustomerName", GetStringOrNull(r, "customer_name"));
+        SetProperty(instance, "CustomerEmail", GetStringOrNull(r, "customer_email"));
+        SetProperty(instance, "CustomerPhone", GetStringOrNull(r, "customer_phone"));
+        SetProperty(instance, "Department", GetStringOrNull(r, "department"));
+        SetProperty(instance, "Category", GetStringOrNull(r, "category"));
+        SetProperty(instance, "Priority", r.GetInt32(r.GetOrdinal("priority")));
+        SetProperty(instance, "Tags", GetStringOrNull(r, "tags"));
+        SetProperty(instance, "CustomFieldsJson", GetStringOrNull(r, "custom_fields_json"));
+        SetProperty(instance, "AssignedToUserId", GetGuidOrNull(r, "assigned_to_user_id"));
+        SetProperty(instance, "AssignedToGroupId", GetGuidOrNull(r, "assigned_to_group_id"));
+        SetProperty(instance, "LastActivityAtUtc", GetDateTimeOrNull(r, "last_activity_at_utc"));
+        SetProperty(instance, "ViewCount", r.GetInt32(r.GetOrdinal("view_count")));
+        SetProperty(instance, "IsArchived", r.GetBoolean(r.GetOrdinal("is_archived")));
+        SetProperty(instance, "ArchivedAtUtc", GetDateTimeOrNull(r, "archived_at_utc"));
+        SetProperty(instance, "SourceType", GetStringOrNull(r, "source_type"));
+        SetProperty(instance, "SourceId", GetStringOrNull(r, "source_id"));
         return instance;
     }
 
-    private static WorkflowStepInstance ReadWorkflowStepInstance(SqlDataReader r, Guid instanceId)
+    private static WorkflowStepInstance ReadWorkflowStepInstance(NpgsqlDataReader r, Guid instanceId)
     {
         var step = (WorkflowStepInstance)Activator.CreateInstance(typeof(WorkflowStepInstance), nonPublic: true)!;
-        SetProperty(step, "Id", r.GetGuid(r.GetOrdinal("Id")));
+        SetProperty(step, "Id", r.GetGuid(r.GetOrdinal("id")));
         SetProperty(step, "WorkflowInstanceId", instanceId);
-        SetProperty(step, "WorkflowStepId", r.GetGuid(r.GetOrdinal("WorkflowStepId")));
-        SetProperty(step, "StepName", r.GetString(r.GetOrdinal("StepName")));
-        SetProperty(step, "StepType", (StepType)r.GetInt32(r.GetOrdinal("StepType")));
-        SetProperty(step, "Order", r.GetInt32(r.GetOrdinal("Order")));
-        SetProperty(step, "Status", (StepInstanceStatus)r.GetInt32(r.GetOrdinal("Status")));
-        SetProperty(step, "AssignedToUserId", GetGuidOrNull(r, "AssignedToUserId"));
-        SetProperty(step, "AssignedToRole", GetStringOrNull(r, "AssignedToRole"));
-        SetProperty(step, "CreatedAtUtc", r.GetDateTime(r.GetOrdinal("CreatedAtUtc")));
-        SetProperty(step, "StartedAtUtc", GetDateTimeOrNull(r, "StartedAtUtc"));
-        SetProperty(step, "CompletedAtUtc", GetDateTimeOrNull(r, "CompletedAtUtc"));
-        SetProperty(step, "CompletedBy", GetGuidOrNull(r, "CompletedBy"));
-        SetProperty(step, "Result", GetStringOrNull(r, "Result"));
-        SetProperty(step, "ErrorMessage", GetStringOrNull(r, "ErrorMessage"));
-        if (HasColumn(r, "ActivityId"))
-            SetProperty(step, "ActivityId", GetStringOrNull(r, "ActivityId"));
-        if (HasColumn(r, "StageType"))
-            SetProperty(step, "StageType", GetStringOrNull(r, "StageType"));
+        SetProperty(step, "WorkflowStepId", r.GetGuid(r.GetOrdinal("workflow_step_id")));
+        SetProperty(step, "StepName", r.GetString(r.GetOrdinal("step_name")));
+        SetProperty(step, "StepType", (StepType)r.GetInt32(r.GetOrdinal("step_type")));
+        SetProperty(step, "Order", r.GetInt32(r.GetOrdinal("order")));
+        SetProperty(step, "Status", (StepInstanceStatus)r.GetInt32(r.GetOrdinal("status")));
+        SetProperty(step, "AssignedToUserId", GetGuidOrNull(r, "assigned_to_user_id"));
+        SetProperty(step, "AssignedToRole", GetStringOrNull(r, "assigned_to_role"));
+        SetProperty(step, "CreatedAtUtc", r.GetDateTime(r.GetOrdinal("created_at_utc")));
+        SetProperty(step, "StartedAtUtc", GetDateTimeOrNull(r, "started_at_utc"));
+        SetProperty(step, "CompletedAtUtc", GetDateTimeOrNull(r, "completed_at_utc"));
+        SetProperty(step, "CompletedBy", GetGuidOrNull(r, "completed_by"));
+        SetProperty(step, "Result", GetStringOrNull(r, "result"));
+        SetProperty(step, "ErrorMessage", GetStringOrNull(r, "error_message"));
+        if (HasColumn(r, "activity_id"))
+            SetProperty(step, "ActivityId", GetStringOrNull(r, "activity_id"));
+        if (HasColumn(r, "stage_type"))
+            SetProperty(step, "StageType", GetStringOrNull(r, "stage_type"));
         return step;
     }
 
-    private static bool HasColumn(SqlDataReader reader, string columnName)
+    private static bool HasColumn(NpgsqlDataReader reader, string columnName)
     {
         for (var i = 0; i < reader.FieldCount; i++)
         {
@@ -774,22 +768,22 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         return false;
     }
 
-    private static WorkflowInstanceSla ReadWorkflowInstanceSla(SqlDataReader r, Guid instanceId)
+    private static WorkflowInstanceSla ReadWorkflowInstanceSla(NpgsqlDataReader r, Guid instanceId)
     {
         var sla = (WorkflowInstanceSla)Activator.CreateInstance(typeof(WorkflowInstanceSla), nonPublic: true)!;
-        SetProperty(sla, "Id", r.GetGuid(r.GetOrdinal("Id")));
+        SetProperty(sla, "Id", r.GetGuid(r.GetOrdinal("id")));
         SetProperty(sla, "WorkflowInstanceId", instanceId);
-        SetProperty(sla, "Priority", (SlaPriority)r.GetInt32(r.GetOrdinal("Priority")));
-        SetProperty(sla, "ResponseDeadline", r.GetDateTime(r.GetOrdinal("ResponseDeadline")));
-        SetProperty(sla, "ResolutionDeadline", r.GetDateTime(r.GetOrdinal("ResolutionDeadline")));
-        SetProperty(sla, "EscalationDeadline", GetDateTimeOrNull(r, "EscalationDeadline"));
-        SetProperty(sla, "ResponseAchievedAt", GetDateTimeOrNull(r, "ResponseAchievedAt"));
-        SetProperty(sla, "ResolutionAchievedAt", GetDateTimeOrNull(r, "ResolutionAchievedAt"));
-        SetProperty(sla, "ResponseStatus", (SlaStatus)r.GetInt32(r.GetOrdinal("ResponseStatus")));
-        SetProperty(sla, "ResolutionStatus", (SlaStatus)r.GetInt32(r.GetOrdinal("ResolutionStatus")));
-        SetProperty(sla, "IsEscalated", r.GetBoolean(r.GetOrdinal("IsEscalated")));
-        SetProperty(sla, "EscalatedAt", GetDateTimeOrNull(r, "EscalatedAt"));
-        SetProperty(sla, "CreatedAtUtc", r.GetDateTime(r.GetOrdinal("CreatedAtUtc")));
+        SetProperty(sla, "Priority", (SlaPriority)r.GetInt32(r.GetOrdinal("priority")));
+        SetProperty(sla, "ResponseDeadline", r.GetDateTime(r.GetOrdinal("response_deadline")));
+        SetProperty(sla, "ResolutionDeadline", r.GetDateTime(r.GetOrdinal("resolution_deadline")));
+        SetProperty(sla, "EscalationDeadline", GetDateTimeOrNull(r, "escalation_deadline"));
+        SetProperty(sla, "ResponseAchievedAt", GetDateTimeOrNull(r, "response_achieved_at"));
+        SetProperty(sla, "ResolutionAchievedAt", GetDateTimeOrNull(r, "resolution_achieved_at"));
+        SetProperty(sla, "ResponseStatus", (SlaStatus)r.GetInt32(r.GetOrdinal("response_status")));
+        SetProperty(sla, "ResolutionStatus", (SlaStatus)r.GetInt32(r.GetOrdinal("resolution_status")));
+        SetProperty(sla, "IsEscalated", r.GetBoolean(r.GetOrdinal("is_escalated")));
+        SetProperty(sla, "EscalatedAt", GetDateTimeOrNull(r, "escalated_at"));
+        SetProperty(sla, "CreatedAtUtc", r.GetDateTime(r.GetOrdinal("created_at_utc")));
         return sla;
     }
 
@@ -799,43 +793,52 @@ public sealed class WorkflowInstanceStore : IWorkflowInstanceStore
         prop?.SetValue(obj, value);
     }
 
-    private static Guid? GetGuidOrNull(SqlDataReader r, string name)
+    private static Guid? GetGuidOrNull(NpgsqlDataReader r, string name)
     {
         var idx = r.GetOrdinal(name);
         return r.IsDBNull(idx) ? null : r.GetGuid(idx);
     }
 
-    private static DateTime? GetDateTimeOrNull(SqlDataReader r, string name)
+    private static DateTime? GetDateTimeOrNull(NpgsqlDataReader r, string name)
     {
         var idx = r.GetOrdinal(name);
         return r.IsDBNull(idx) ? null : r.GetDateTime(idx);
     }
 
-    private static string? GetStringOrNull(SqlDataReader r, string name)
+    private static string? GetStringOrNull(NpgsqlDataReader r, string name)
     {
         var idx = r.GetOrdinal(name);
         return r.IsDBNull(idx) ? null : r.GetString(idx);
     }
 
-    /// <summary>Add ActivityId/StageType to per-workflow step instance tables created before this column existed.</summary>
+    private static async Task<bool> TableExistsAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = 'workflow' AND table_name = @TableName;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TableName", tableName);
+        return await cmd.ExecuteScalarAsync(cancellationToken) != null;
+    }
+
+    /// <summary>
+    /// PHASE 4: WorkflowTableCreator.cs's GenerateWorkflowStepInstancesTableScript already adds
+    /// activity_id/stage_type via ALTER TABLE ... ADD COLUMN IF NOT EXISTS at table-creation time,
+    /// so there is no pre-existing-without-these-columns shape on Postgres. Kept as a cheap
+    /// idempotent safety net rather than dropped outright (same reasoning as WorkflowStepSyncService.cs).
+    /// </summary>
     private static async Task EnsureStepInstanceColumnsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         CancellationToken cancellationToken)
     {
-        var sql = $@"
-IF OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}', N'U') IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}') AND name = N'ActivityId')
-BEGIN
-    ALTER TABLE workflow.WorkflowStepInstances_{suffix} ADD ActivityId NVARCHAR(128) NULL;
-END
-IF OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}', N'U') IS NOT NULL
-  AND NOT EXISTS (SELECT 1 FROM sys.columns WHERE object_id = OBJECT_ID(N'workflow.WorkflowStepInstances_{suffix}') AND name = N'StageType')
-BEGIN
-    ALTER TABLE workflow.WorkflowStepInstances_{suffix} ADD StageType NVARCHAR(64) NULL;
-END";
+        var sql = $"""
+            ALTER TABLE IF EXISTS workflow.workflow_step_instances_{suffix} ADD COLUMN IF NOT EXISTS activity_id varchar(128) NULL;
+            ALTER TABLE IF EXISTS workflow.workflow_step_instances_{suffix} ADD COLUMN IF NOT EXISTS stage_type varchar(64) NULL;
+            """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 }

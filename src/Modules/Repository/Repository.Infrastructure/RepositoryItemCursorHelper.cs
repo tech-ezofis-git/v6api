@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure;
@@ -46,52 +46,52 @@ internal static class RepositoryItemCursorHelper
 
     public static void ApplyKeysetFilter(
         ICollection<string> where,
-        IList<SqlParameter> parameters,
+        IList<NpgsqlParameter> parameters,
         string sortCol,
         bool ascending,
         string? sortValueRaw,
         Guid lastId)
     {
-        var col = $"i.[{sortCol}]";
-        parameters.Add(new SqlParameter("@CursorId", lastId));
+        var col = $"i.{RepositorySqlHelper.ColumnRef(sortCol)}";
+        parameters.Add(new NpgsqlParameter("@CursorId", lastId));
 
         if (string.IsNullOrEmpty(sortValueRaw))
         {
-            where.Add(ascending ? $"i.Id > @CursorId" : $"i.Id < @CursorId");
+            where.Add(ascending ? $"i.id > @CursorId" : $"i.id < @CursorId");
             return;
         }
 
         if (DateTime.TryParse(sortValueRaw, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out var dt))
         {
-            parameters.Add(new SqlParameter("@CursorVal", dt));
+            parameters.Add(new NpgsqlParameter("@CursorVal", dt));
             where.Add(ascending
-                ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.Id > @CursorId))"
-                : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.Id < @CursorId))");
+                ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.id > @CursorId))"
+                : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.id < @CursorId))");
             return;
         }
 
         if (decimal.TryParse(sortValueRaw, NumberStyles.Number, CultureInfo.InvariantCulture, out var dec))
         {
-            parameters.Add(new SqlParameter("@CursorVal", dec));
+            parameters.Add(new NpgsqlParameter("@CursorVal", dec));
             where.Add(ascending
-                ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.Id > @CursorId))"
-                : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.Id < @CursorId))");
+                ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.id > @CursorId))"
+                : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.id < @CursorId))");
             return;
         }
 
         if (byte.TryParse(sortValueRaw, out var b))
         {
-            parameters.Add(new SqlParameter("@CursorVal", b));
+            parameters.Add(new NpgsqlParameter("@CursorVal", (short)b));
             where.Add(ascending
-                ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.Id > @CursorId))"
-                : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.Id < @CursorId))");
+                ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.id > @CursorId))"
+                : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.id < @CursorId))");
             return;
         }
 
-        parameters.Add(new SqlParameter("@CursorVal", sortValueRaw));
+        parameters.Add(new NpgsqlParameter("@CursorVal", sortValueRaw));
         where.Add(ascending
-            ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.Id > @CursorId))"
-            : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.Id < @CursorId))");
+            ? $"({col} > @CursorVal OR ({col} = @CursorVal AND i.id > @CursorId))"
+            : $"({col} < @CursorVal OR ({col} = @CursorVal AND i.id < @CursorId))");
     }
 
     public static object? GetSortValueFromRow(RepositoryItemListDto row, string sortCol) =>

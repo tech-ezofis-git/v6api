@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application;
 using SaaSApp.Workflow.Application.Contracts;
@@ -52,7 +52,7 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
       StringComparer.OrdinalIgnoreCase);
 
     var allInvoices = new List<ApDashboardInvoiceDto>();
-    await using var connection = new SqlConnection(connectionString);
+    await using var connection = new NpgsqlConnection(connectionString);
     await connection.OpenAsync(cancellationToken);
 
     var agentTables = await DiscoverAgentValidationTablesAsync(connection, cancellationToken);
@@ -134,7 +134,7 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
   }
 
   private async Task<List<ApDashboardInvoiceDto>> LoadAgentTableInvoicesAsync(
-    SqlConnection connection,
+    NpgsqlConnection connection,
     string agentTable,
     string suffix,
     Guid workflowId,
@@ -144,21 +144,21 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
     // Core source: latest AgentResponse per instance — no joins required.
     var sql = $"""
 SELECT
-    a.ProcessId AS InstanceId,
-    a.AgentResponse,
-    a.CreatedAt AS AgentCreatedAt
+    a.process_id AS instance_id,
+    a.agent_response,
+    a.created_at AS agent_created_at
 FROM (
-    SELECT ProcessId, MAX(Id) AS MaxId
-    FROM workflow.[{agentTable}]
-    WHERE IsDeleted = 0
-    GROUP BY ProcessId
+    SELECT process_id, MAX(id) AS max_id
+    FROM workflow.{agentTable}
+    WHERE is_deleted = false
+    GROUP BY process_id
 ) latest
-INNER JOIN workflow.[{agentTable}] a ON a.Id = latest.MaxId
-WHERE a.IsDeleted = 0;
+INNER JOIN workflow.{agentTable} a ON a.id = latest.max_id
+WHERE a.is_deleted = false;
 """;
 
     var list = new List<RawAgentRow>();
-    await using (var cmd = new SqlCommand(sql, connection) { CommandTimeout = 60 })
+    await using (var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 60 })
     {
       await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
       while (await reader.ReadAsync(cancellationToken))
@@ -259,27 +259,29 @@ WHERE a.IsDeleted = 0;
   }
 
   private async Task TryMergeFormFieldsFromProcessFormAsync(
-    SqlConnection connection,
+    NpgsqlConnection connection,
     string suffix,
     Guid instanceId,
     Dictionary<string, string> fields,
     CancellationToken cancellationToken)
   {
-    var processFormTable = $"processForm_{suffix}";
+    var processFormTable = $"process_form_{suffix}";
     if (!await TableExistsAsync(connection, processFormTable, cancellationToken))
       return;
 
-    var formIdColumn = await ResolveProcessFormIdColumnAsync(connection, processFormTable, cancellationToken);
+    // PHASE 4: workflow.process_form_{suffix} always has a fixed w_form_id column on Postgres
+    // (see WorkflowTableCreator.cs) -- no WFormId/FormId column-name drift to detect.
     var sql = $"""
-SELECT TOP 1
-    CAST(pf.[{formIdColumn}] AS NVARCHAR(64)) AS FormId,
-    pf.FormEntryId
-FROM workflow.[{processFormTable}] pf
-WHERE pf.IsDeleted = 0 AND pf.WorkflowInstanceId = @InstanceId
-ORDER BY pf.CreatedAt DESC, pf.Id DESC;
+SELECT
+    pf.w_form_id AS form_id,
+    pf.form_entry_id
+FROM workflow.{processFormTable} pf
+WHERE pf.is_deleted = false AND pf.workflow_instance_id = @InstanceId
+ORDER BY pf.created_at DESC, pf.id DESC
+LIMIT 1;
 """;
 
-    await using var cmd = new SqlCommand(sql, connection);
+    await using var cmd = new NpgsqlCommand(sql, connection);
     cmd.Parameters.AddWithValue("@InstanceId", instanceId);
     await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
     if (!await reader.ReadAsync(cancellationToken))
@@ -296,12 +298,12 @@ ORDER BY pf.CreatedAt DESC, pf.Id DESC;
   }
 
   private static async Task<InstanceEnrichment> TryLoadInstanceEnrichmentAsync(
-    SqlConnection connection,
+    NpgsqlConnection connection,
     string suffix,
     Guid instanceId,
     CancellationToken cancellationToken)
   {
-    var instancesTable = $"WorkflowInstances_{suffix}";
+    var instancesTable = $"workflow_instances_{suffix}";
     var transactionTable = $"transaction_{suffix}";
     string? reference = null;
     string? instanceStatus = null;
@@ -313,11 +315,12 @@ ORDER BY pf.CreatedAt DESC, pf.Id DESC;
     if (await TableExistsAsync(connection, instancesTable, cancellationToken))
     {
       var sql = $"""
-SELECT TOP 1 i.ReferenceNumber, i.Status, i.StartedAtUtc, i.CompletedAtUtc
-FROM workflow.[{instancesTable}] i
-WHERE i.Id = @InstanceId;
+SELECT i.reference_number, i.status, i.started_at_utc, i.completed_at_utc
+FROM workflow.{instancesTable} i
+WHERE i.id = @InstanceId
+LIMIT 1;
 """;
-      await using var cmd = new SqlCommand(sql, connection);
+      await using var cmd = new NpgsqlCommand(sql, connection);
       cmd.Parameters.AddWithValue("@InstanceId", instanceId);
       await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
       if (await reader.ReadAsync(cancellationToken))
@@ -332,12 +335,13 @@ WHERE i.Id = @InstanceId;
     if (await TableExistsAsync(connection, transactionTable, cancellationToken))
     {
       var sql = $"""
-SELECT TOP 1 t.Review, t.StageType
-FROM workflow.[{transactionTable}] t
-WHERE t.IsDeleted = 0 AND t.WorkflowInstanceId = @InstanceId
-ORDER BY t.CreatedAt DESC, t.Id DESC;
+SELECT t.review, t.stage_type
+FROM workflow.{transactionTable} t
+WHERE t.is_deleted = false AND t.workflow_instance_id = @InstanceId
+ORDER BY t.created_at DESC, t.id DESC
+LIMIT 1;
 """;
-      await using var cmd = new SqlCommand(sql, connection);
+      await using var cmd = new NpgsqlCommand(sql, connection);
       cmd.Parameters.AddWithValue("@InstanceId", instanceId);
       await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
       if (await reader.ReadAsync(cancellationToken))
@@ -350,7 +354,7 @@ ORDER BY t.CreatedAt DESC, t.Id DESC;
     return new InstanceEnrichment(reference, instanceStatus, review, stageType, startedAt, completedAt);
   }
 
-  private static string? ReadScalarString(SqlDataReader reader, int ordinal)
+  private static string? ReadScalarString(NpgsqlDataReader reader, int ordinal)
   {
     if (reader.IsDBNull(ordinal))
       return null;
@@ -371,19 +375,18 @@ ORDER BY t.CreatedAt DESC, t.Id DESC;
   }
 
   private static async Task<IReadOnlyList<string>> DiscoverAgentValidationTablesAsync(
-    SqlConnection connection,
+    NpgsqlConnection connection,
     CancellationToken cancellationToken)
   {
     const string sql = """
-      SELECT t.name
-      FROM sys.tables t
-      INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-      WHERE s.name = N'workflow'
-        AND t.name LIKE N'agentDataValidation[_]%'
-      ORDER BY t.name
+      SELECT table_name
+      FROM information_schema.tables
+      WHERE table_schema = 'workflow'
+        AND table_name LIKE 'agent\_data\_validation\_%' ESCAPE '\'
+      ORDER BY table_name
       """;
     var tables = new List<string>();
-    await using var cmd = new SqlCommand(sql, connection);
+    await using var cmd = new NpgsqlCommand(sql, connection);
     await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
     while (await reader.ReadAsync(cancellationToken))
       tables.Add(reader.GetString(0));
@@ -392,7 +395,7 @@ ORDER BY t.CreatedAt DESC, t.Id DESC;
 
   private static string AgentTableSuffix(string tableName)
   {
-    const string prefix = "agentDataValidation_";
+    const string prefix = "agent_data_validation_";
     return tableName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)
       ? tableName[prefix.Length..]
       : tableName;
@@ -972,34 +975,6 @@ ORDER BY t.CreatedAt DESC, t.Id DESC;
     };
   }
 
-  private static async Task<string> ResolveProcessFormIdColumnAsync(
-    SqlConnection connection,
-    string tableName,
-    CancellationToken cancellationToken)
-  {
-    const string sql = """
-      SELECT COLUMN_NAME
-      FROM INFORMATION_SCHEMA.COLUMNS
-      WHERE TABLE_SCHEMA = N'workflow'
-        AND TABLE_NAME = @TableName
-        AND COLUMN_NAME IN (N'WFormId', N'FormId')
-      """;
-    await using var cmd = new SqlCommand(sql, connection);
-    cmd.Parameters.AddWithValue("@TableName", tableName);
-
-    var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-    await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-    while (await reader.ReadAsync(cancellationToken))
-      columns.Add(reader.GetString(0));
-
-    if (columns.Contains("WFormId"))
-      return "WFormId";
-    if (columns.Contains("FormId"))
-      return "FormId";
-
-    return "WFormId";
-  }
-
   private static string? FirstField(IReadOnlyDictionary<string, string> fields, params string[] keys)
   {
     foreach (var key in keys)
@@ -1038,17 +1013,16 @@ ORDER BY t.CreatedAt DESC, t.Id DESC;
   }
 
   private static async Task<bool> TableExistsAsync(
-    SqlConnection connection,
+    NpgsqlConnection connection,
     string tableName,
     CancellationToken cancellationToken)
   {
     const string sql = """
       SELECT 1
-      FROM sys.tables t
-      INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-      WHERE s.name = N'workflow' AND t.name = @TableName
+      FROM information_schema.tables
+      WHERE table_schema = 'workflow' AND table_name = @TableName
       """;
-    await using var cmd = new SqlCommand(sql, connection);
+    await using var cmd = new NpgsqlCommand(sql, connection);
     cmd.Parameters.AddWithValue("@TableName", tableName);
     var result = await cmd.ExecuteScalarAsync(cancellationToken);
     return result != null && result != DBNull.Value;

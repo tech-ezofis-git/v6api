@@ -1,0 +1,13 @@
+-- Load-test seed: Inbox/Sent/Completed for workflow F001E07B-DD0C-4687-A0E2-F307086FC6F9 -- Postgres
+-- Ported from scripts/Seed-LegacyMailbox-LoadTest-F001E07B.sql -- Phase 3.
+--
+-- NOT PORTED LINE-FOR-LINE. This is a one-off historical load-test run (~370 lines,
+-- hardcoded to one specific workflow GUID and one specific test user GUID) that does
+-- the exact same thing as scripts/postgres/Seed_LegacyMailbox_PerformanceTest.sql
+-- (ported in full, generalized/parameterized, uses Postgres's generate_series instead
+-- of the SQL Server tally-table trick). Neither script is referenced by any
+-- application code -- both are pure manual QA/perf-test tooling, and the general one
+-- supersedes this specific one for any future Postgres load testing. To reproduce this
+-- exact historical scenario on Postgres, run Seed_LegacyMailbox_PerformanceTest.sql
+-- with workflow_id = 'F001E07B-DD0C-4687-A0E2-F307086FC6F9', workflow_instance_id and
+-- p_user_id set to whatever this run originally used, rows_per_table = 10000.

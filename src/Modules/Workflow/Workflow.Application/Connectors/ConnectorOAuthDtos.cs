@@ -1,3 +1,5 @@
+using System.Text.Json.Serialization;
+
 namespace SaaSApp.Workflow.Application.Connectors;
 
 public sealed record ConnectorProviderPublicDto(
@@ -84,33 +86,73 @@ public sealed record ConnectorQuickBooksDocumentListResponse(string Type, IReadO
 /// <summary>AP Agent payload: look up a QuickBooks Purchase Order by DocNumber (PO Number).</summary>
 public sealed record ConnectorQuickBooksPoLookupRequest(string PoNumber);
 
-public sealed record ConnectorQuickBooksPoLineDto(
-    string? LineId,
-    int? LineNum,
-    string? DetailType,
-    string? Description,
-    decimal? Amount,
-    string? ItemId,
-    string? ItemName,
-    decimal? Quantity,
-    decimal? UnitPrice,
-    string? AccountId,
-    string? AccountName);
+/// <summary>AP Agent PO line shape (snake_case field names).</summary>
+public sealed class ConnectorQuickBooksPoLineDto
+{
+    [JsonPropertyName("line_no")]
+    public int? LineNo { get; init; }
 
-public sealed record ConnectorQuickBooksPurchaseOrderDto(
-    string Id,
-    string? DocNumber,
-    string? TxnDate,
-    string? DueDate,
-    string? VendorId,
-    string? VendorName,
-    decimal? TotalAmount,
-    string? Currency,
-    string? PoStatus,
-    string? EmailStatus,
-    string? Memo,
-    IReadOnlyList<ConnectorQuickBooksPoLineDto> Lines,
-    object? Raw);
+    [JsonPropertyName("item_no")]
+    public string? ItemNo { get; init; }
+
+    [JsonPropertyName("description")]
+    public string? Description { get; init; }
+
+    [JsonPropertyName("quantity")]
+    public decimal? Quantity { get; init; }
+
+    [JsonPropertyName("uom")]
+    public string? Uom { get; init; }
+
+    [JsonPropertyName("rate")]
+    public decimal? Rate { get; init; }
+
+    [JsonPropertyName("line_amount")]
+    public decimal? LineAmount { get; init; }
+}
+
+/// <summary>AP Agent PO header shape (display field names with spaces).</summary>
+public sealed class ConnectorQuickBooksPurchaseOrderDto
+{
+    [JsonPropertyName("PO Number")]
+    public string? PoNumber { get; init; }
+
+    [JsonPropertyName("Vendor Name")]
+    public string? VendorName { get; init; }
+
+    [JsonPropertyName("Vendor")]
+    public string? Vendor { get; init; }
+
+    [JsonPropertyName("PO Date")]
+    public string? PoDate { get; init; }
+
+    [JsonPropertyName("PO Amount")]
+    public decimal? PoAmount { get; init; }
+
+    [JsonPropertyName("Currency")]
+    public string? Currency { get; init; }
+
+    [JsonPropertyName("Terms")]
+    public string? Terms { get; init; }
+
+    [JsonPropertyName("Buyer")]
+    public string? Buyer { get; init; }
+
+    [JsonPropertyName("Vendor Address")]
+    public string? VendorAddress { get; init; }
+
+    [JsonPropertyName("Ship To Address")]
+    public string? ShipToAddress { get; init; }
+
+    [JsonPropertyName("Notes")]
+    public string? Notes { get; init; }
+
+    [JsonPropertyName("PO Status")]
+    public string? PoStatus { get; init; }
+
+    [JsonPropertyName("PO Line Item")]
+    public IReadOnlyList<ConnectorQuickBooksPoLineDto> PoLineItem { get; init; } = Array.Empty<ConnectorQuickBooksPoLineDto>();
+}
 
 public sealed record ConnectorQuickBooksPoLookupResponse(
     bool Found,

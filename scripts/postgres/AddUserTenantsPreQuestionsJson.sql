@@ -1,0 +1,12 @@
+-- Add onboarding pre-questions JSON storage to catalog.UserTenants -- Postgres
+-- Ported from scripts/AddUserTenantsPreQuestionsJson.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL ALTER SCRIPT. This is the same file Phase 0 found in
+-- genuine conflict between scripts/ and src/Api/scripts/ (opposite ALTER directions --
+-- one dropped UserId, one added it). Phase 0 resolved that by keeping the "adds UserId"
+-- version, cross-checked against the real EF migration. On Postgres, catalog.UserTenants
+-- is now 100% EF-managed (Phase 2's InitialPostgres migration) -- UserTenant.cs already
+-- has both UserId and PreQuestionsJson properties, and CatalogDbContext.cs's Fluent
+-- config already maps them, so `dotnet ef database update` creates this table with both
+-- columns from the start. There is nothing left for an incremental ALTER to do; this
+-- script is superseded, not ported.

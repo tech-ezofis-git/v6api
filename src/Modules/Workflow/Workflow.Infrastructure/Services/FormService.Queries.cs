@@ -1,12 +1,21 @@
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Forms;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
 public sealed partial class FormService
 {
+    // createdBy/modifiedBy are stored as text (userId.ToString("D")) since wForm predates a
+    // proper FK to users.Users. Postgres has no TRY_CONVERT; this regex-guarded cast is the
+    // direct equivalent (values are always a well-formed dashed GUID string when set by this
+    // service, but defensively falls back to NULL like TRY_CONVERT did for anything else).
+    private const string TryCastUuidGuard = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+
+    private static string TryCastUuid(string column) =>
+        $"(CASE WHEN {column} ~ '{TryCastUuidGuard}' THEN {column}::uuid ELSE NULL END)";
+
     public async Task<FormListResponse> ListAsync(CancellationToken cancellationToken = default)
     {
         var connectionString = _tenantContext.ConnectionString
@@ -14,31 +23,30 @@ public sealed partial class FormService
         var tenantGuid = _tenantContext.TenantId
             ?? throw new InvalidOperationException("Tenant context is required.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await TableExistsAsync(connection, "wForm", cancellationToken))
             return new FormListResponse(Array.Empty<FormListItem>());
 
-        var tenantKey = await ResolveTenantKeyAsync(connection, tenantGuid, cancellationToken);
-        const string sql = """
+        var sql = $"""
             SELECT
-                CONVERT(NVARCHAR(64), f.id),
+                f.id,
                 f.name,
-                f.createdBy,
-                f.modifiedBy,
-                cb.Email AS CreatedByName,
-                COALESCE(mb.Email, cb.Email) AS ModifiedByName
-            FROM dbo.wForm f
-            LEFT JOIN users.Users cb ON cb.Id = TRY_CONVERT(uniqueidentifier, f.createdBy) AND cb.IsDeleted = 0
-            LEFT JOIN users.Users mb ON mb.Id = TRY_CONVERT(uniqueidentifier, f.modifiedBy) AND mb.IsDeleted = 0
-            WHERE f.isDeleted = 0 AND f.tenantId = @TenantId
+                f."createdBy",
+                f."modifiedBy",
+                cb."Email" AS "CreatedByName",
+                COALESCE(mb."Email", cb."Email") AS "ModifiedByName"
+            FROM dbo."wForm" f
+            LEFT JOIN users."Users" cb ON cb."Id" = {TryCastUuid("f.\"createdBy\"")} AND cb."IsDeleted" = false
+            LEFT JOIN users."Users" mb ON mb."Id" = {TryCastUuid("f.\"modifiedBy\"")} AND mb."IsDeleted" = false
+            WHERE f."isDeleted" = false AND f."tenantId" = @TenantId
             ORDER BY f.name;
             """;
 
         var items = new List<FormListItem>();
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@TenantId", tenantKey);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -74,43 +82,42 @@ public sealed partial class FormService
         var sortColumn = MapFormSortColumn(request.SortBy?.Criteria);
         var sortOrder = string.Equals(request.SortBy?.Order, "ASC", StringComparison.OrdinalIgnoreCase) ? "ASC" : "DESC";
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await TableExistsAsync(connection, "wForm", cancellationToken))
             return new FormAllResponse(new List<FormAllGroup> { new(string.Empty, new List<FormAllItem>()) }, new FormAllMeta(page, pageSize, 0));
 
-        var tenantKey = await ResolveTenantKeyAsync(connection, tenantGuid, cancellationToken);
         var hasSecurityTable = await TableExistsAsync(connection, "wFormSecurity", cancellationToken);
 
         var whereParts = new List<string>
         {
-            includeDeleted ? "f.isDeleted = 1" : "f.isDeleted = 0",
-            "f.tenantId = @TenantId"
+            includeDeleted ? "f.\"isDeleted\" = true" : "f.\"isDeleted\" = false",
+            "f.\"tenantId\" = @TenantId"
         };
-        var parameters = new List<SqlParameter> { new("@TenantId", tenantKey) };
+        var parameters = new List<NpgsqlParameter> { new("@TenantId", tenantGuid) };
 
         if (request.HasSecurity && currentUserId != null && !isAdmin && hasSecurityTable)
         {
             var userIdText = currentUserId.Value.ToString("D");
             whereParts.Add("""
                 (
-                    EXISTS (SELECT 1 FROM dbo.wFormSecurity s WHERE s.wFormId = f.id AND s.isDeleted = 0 AND s.userId = @CurrentUserId)
-                    OR f.createdBy = @CurrentUserId
+                    EXISTS (SELECT 1 FROM dbo."wFormSecurity" s WHERE s."wFormId" = f.id AND s."isDeleted" = false AND s."userId" = @CurrentUserId)
+                    OR f."createdBy" = @CurrentUserId
                 )
                 """);
-            parameters.Add(new SqlParameter("@CurrentUserId", userIdText));
+            parameters.Add(new NpgsqlParameter("@CurrentUserId", userIdText));
         }
         else if (request.HasReport && currentUserId != null && hasSecurityTable)
         {
             var userIdText = currentUserId.Value.ToString("D");
             whereParts.Add("""
                 (
-                    EXISTS (SELECT 1 FROM dbo.wFormSecurity s WHERE s.wFormId = f.id AND s.isDeleted = 0 AND s.userId = @CurrentUserId)
-                    OR f.createdBy = @CurrentUserId
+                    EXISTS (SELECT 1 FROM dbo."wFormSecurity" s WHERE s."wFormId" = f.id AND s."isDeleted" = false AND s."userId" = @CurrentUserId)
+                    OR f."createdBy" = @CurrentUserId
                 )
                 """);
-            parameters.Add(new SqlParameter("@CurrentUserId", userIdText));
+            parameters.Add(new NpgsqlParameter("@CurrentUserId", userIdText));
         }
 
         foreach (var filter in (request.FilterBy ?? new List<FormAllFilterGroup>()).SelectMany(g => g.Filters ?? new List<FormAllFilter>()))
@@ -124,22 +131,22 @@ public sealed partial class FormService
         }
 
         var whereSql = string.Join(" AND ", whereParts);
-        var countSql = $"SELECT COUNT(*) FROM dbo.wForm f WHERE {whereSql};";
+        var countSql = $"SELECT COUNT(*) FROM dbo.\"wForm\" f WHERE {whereSql};";
         var selectSql = $"""
             SELECT
-                CONVERT(NVARCHAR(64), f.id),
+                f.id,
                 f.name,
                 f.description,
-                f.publishOption,
-                f.createdBy,
-                f.modifiedBy,
-                f.createdAt,
-                f.modifiedAt,
-                cb.Email AS CreatedByName,
-                COALESCE(mb.Email, cb.Email) AS ModifiedByName
-            FROM dbo.wForm f
-            LEFT JOIN users.Users cb ON cb.Id = TRY_CONVERT(uniqueidentifier, f.createdBy) AND cb.IsDeleted = 0
-            LEFT JOIN users.Users mb ON mb.Id = TRY_CONVERT(uniqueidentifier, f.modifiedBy) AND mb.IsDeleted = 0
+                f."publishOption",
+                f."createdBy",
+                f."modifiedBy",
+                f."createdAt",
+                f."modifiedAt",
+                cb."Email" AS "CreatedByName",
+                COALESCE(mb."Email", cb."Email") AS "ModifiedByName"
+            FROM dbo."wForm" f
+            LEFT JOIN users."Users" cb ON cb."Id" = {TryCastUuid("f.\"createdBy\"")} AND cb."IsDeleted" = false
+            LEFT JOIN users."Users" mb ON mb."Id" = {TryCastUuid("f.\"modifiedBy\"")} AND mb."IsDeleted" = false
             WHERE {whereSql}
             ORDER BY {sortColumn} {sortOrder}
             OFFSET @Skip ROWS
@@ -147,16 +154,18 @@ public sealed partial class FormService
             """;
 
         int totalItems;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
-            countCmd.Parameters.AddRange(parameters.Select(p => new SqlParameter(p.ParameterName, p.Value)).ToArray());
+            foreach (var p in parameters)
+                countCmd.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
             totalItems = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
         }
 
         var items = new List<FormAllItem>();
-        await using (var listCmd = new SqlCommand(selectSql, connection))
+        await using (var listCmd = new NpgsqlCommand(selectSql, connection))
         {
-            listCmd.Parameters.AddRange(parameters.ToArray());
+            foreach (var p in parameters)
+                listCmd.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
             listCmd.Parameters.AddWithValue("@Skip", Math.Max(skip, 0));
             listCmd.Parameters.AddWithValue("@Take", pageSize == 0 ? Math.Max(totalItems, 1) : pageSize);
             await using var reader = await listCmd.ExecuteReaderAsync(cancellationToken);
@@ -190,35 +199,31 @@ public sealed partial class FormService
         var tenantGuid = _tenantContext.TenantId
             ?? throw new InvalidOperationException("Tenant context is required.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await TableExistsAsync(connection, "wForm", cancellationToken))
             return null;
 
-        var tenantKey = await ResolveTenantKeyAsync(connection, tenantGuid, cancellationToken);
-        var idSqlType = await GetColumnTypeAsync(connection, "wForm", "id", cancellationToken);
-        var idValue = CoerceIdValue(formId.Trim(), idSqlType);
-
         const string sql = """
             SELECT
-                CONVERT(NVARCHAR(64), f.id),
+                f.id,
                 f.name,
                 f.description,
                 f.type,
                 f.layout,
-                f.publishOption,
-                f.createdBy,
-                f.modifiedBy,
-                f.createdAt,
-                f.modifiedAt
-            FROM dbo.wForm f
-            WHERE f.id = @Id AND f.tenantId = @TenantId AND f.isDeleted = 0;
+                f."publishOption",
+                f."createdBy",
+                f."modifiedBy",
+                f."createdAt",
+                f."modifiedAt"
+            FROM dbo."wForm" f
+            WHERE f.id = @Id AND f."tenantId" = @TenantId AND f."isDeleted" = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Id", idValue);
-        cmd.Parameters.AddWithValue("@TenantId", tenantKey);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", formId.Trim());
+        cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
             return null;
@@ -271,12 +276,12 @@ public sealed partial class FormService
         {
             "name" => "f.name",
             "description" => "f.description",
-            "createdby" => "f.createdBy",
-            "createdat" => "f.createdAt",
-            "modifiedby" => "f.modifiedBy",
-            "modifiedat" => "f.modifiedAt",
-            "publishoption" or "flowstatus" => "f.publishOption",
-            _ => "ISNULL(f.modifiedAt, f.createdAt)"
+            "createdby" => "f.\"createdBy\"",
+            "createdat" => "f.\"createdAt\"",
+            "modifiedby" => "f.\"modifiedBy\"",
+            "modifiedat" => "f.\"modifiedAt\"",
+            "publishoption" or "flowstatus" => "f.\"publishOption\"",
+            _ => "COALESCE(f.\"modifiedAt\", f.\"createdAt\")"
         };
     }
 
@@ -295,7 +300,7 @@ public sealed partial class FormService
         return groups.Select(x => new FormAllGroup(x.Key, x.ToList())).ToList();
     }
 
-    private static bool TryBuildFormFilterCondition(FormAllFilter filter, out string conditionSql, out SqlParameter? parameter)
+    private static bool TryBuildFormFilterCondition(FormAllFilter filter, out string conditionSql, out NpgsqlParameter? parameter)
     {
         conditionSql = string.Empty;
         parameter = null;
@@ -306,9 +311,9 @@ public sealed partial class FormService
         {
             "name" => "f.name",
             "description" => "f.description",
-            "publishoption" or "flowstatus" => "f.publishOption",
-            "createdby" => "f.createdBy",
-            "modifiedby" => "f.modifiedBy",
+            "publishoption" or "flowstatus" => "f.\"publishOption\"",
+            "createdby" => "f.\"createdBy\"",
+            "modifiedby" => "f.\"modifiedBy\"",
             _ => string.Empty
         };
         if (string.IsNullOrEmpty(col))
@@ -319,19 +324,19 @@ public sealed partial class FormService
         if (cond is "contains" or "like")
         {
             conditionSql = $"{col} LIKE {paramName}";
-            parameter = new SqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
+            parameter = new NpgsqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
             return true;
         }
         if (cond is "eq" or "=" or "equal")
         {
             conditionSql = $"{col} = {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
         if (cond is "neq" or "!=" or "notequal")
         {
             conditionSql = $"{col} <> {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
 

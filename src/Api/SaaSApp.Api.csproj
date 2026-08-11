@@ -17,13 +17,14 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
-    <PackageReference Include="Microsoft.Data.SqlClient" Version="5.2.2" />
+    <!-- Postgres (new) -->
+    <PackageReference Include="Npgsql" Version="8.0.9" />
+    <PackageReference Include="Hangfire.PostgreSql" Version="1.21.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.11" />
     <PackageReference Include="Microsoft.Extensions.Caching.StackExchangeRedis" Version="8.0.11" />
     <PackageReference Include="MediatR" Version="12.4.1" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.22.2" />
     <PackageReference Include="Hangfire.AspNetCore" Version="1.8.14" />
-    <PackageReference Include="Hangfire.SqlServer" Version="1.8.14" />
     <PackageReference Include="Microsoft.Identity.Web" Version="3.0.0" />
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.2.1" />
     <PackageReference Include="Otp.NET" Version="1.4.1" />
@@ -54,29 +55,36 @@
   </ItemGroup>
 
   <ItemGroup>
-    <None Update="..\..\scripts\CreatePlaygroundApiKeySchema.sql">
+    <!-- PHASE 4: source and Link both point at scripts\postgres\ now, matching the
+         AppContext.BaseDirectory-relative lookups in PlaygroundApiKeyService.cs /
+         TenantSignupService.cs. SQL Server originals stay on disk untouched at scripts\.
+         Using Include, not Update: these files live outside the project directory, so they
+         are never picked up by the SDK's default globs, and Update on a path the default
+         globs never included turned out to be a silent no-op in this SDK version (confirmed
+         empirically: the build output's scripts folder was empty until this was Include). -->
+    <None Include="..\..\scripts\postgres\CreatePlaygroundApiKeySchema.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>scripts\CreatePlaygroundApiKeySchema.sql</Link>
+      <Link>scripts\postgres\CreatePlaygroundApiKeySchema.sql</Link>
     </None>
-    <None Update="..\..\scripts\CreatePlaygroundApiKeyCatalog.sql">
+    <None Include="..\..\scripts\postgres\CreatePlaygroundApiKeyCatalog.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>scripts\CreatePlaygroundApiKeyCatalog.sql</Link>
+      <Link>scripts\postgres\CreatePlaygroundApiKeyCatalog.sql</Link>
     </None>
-    <None Update="..\..\scripts\CreateWorkflowSchemaComplete.sql">
+    <None Include="..\..\scripts\postgres\CreateWorkflowSchemaComplete.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>scripts\CreateWorkflowSchemaComplete.sql</Link>
+      <Link>scripts\postgres\CreateWorkflowSchemaComplete.sql</Link>
     </None>
-    <None Update="..\..\scripts\CreateDmsSchema.sql">
+    <None Include="..\..\scripts\postgres\CreateDmsSchema.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>scripts\CreateDmsSchema.sql</Link>
+      <Link>scripts\postgres\CreateDmsSchema.sql</Link>
     </None>
-    <None Update="..\..\scripts\Create-Connector-Table.sql">
+    <None Include="..\..\scripts\postgres\Create-Connector-Table.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>scripts\Create-Connector-Table.sql</Link>
+      <Link>scripts\postgres\Create-Connector-Table.sql</Link>
     </None>
-    <None Update="..\..\scripts\Create-EmailIngest-Tables.sql">
+    <None Include="..\..\scripts\postgres\Create-EmailIngest-Tables.sql">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-      <Link>scripts\Create-EmailIngest-Tables.sql</Link>
+      <Link>scripts\postgres\Create-EmailIngest-Tables.sql</Link>
     </None>
     <None Update="appsettings.ActivityLog.json">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
@@ -86,8 +94,10 @@
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
       <CopyToPublishDirectory>PreserveNewest</CopyToPublishDirectory>
     </None>
-    <EmbeddedResource Include="..\..\scripts\CreateWorkflowSchemaComplete.sql" Link="CreateWorkflowSchemaComplete.sql" />
-    <EmbeddedResource Include="..\..\scripts\CreateDmsSchema.sql" Link="CreateDmsSchema.sql" />
+    <!-- PHASE 4: point at the ported Postgres scripts; SQL Server originals stay on disk
+         (untouched) but are no longer embedded. Resource swap, not a package removal. -->
+    <EmbeddedResource Include="..\..\scripts\postgres\CreateWorkflowSchemaComplete.sql" Link="CreateWorkflowSchemaComplete.sql" />
+    <EmbeddedResource Include="..\..\scripts\postgres\CreateDmsSchema.sql" Link="CreateDmsSchema.sql" />
   </ItemGroup>
 
 </Project>

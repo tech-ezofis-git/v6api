@@ -55,7 +55,12 @@ public sealed class CatalogDbContext : DbContext
 
         modelBuilder.Entity<RepositoryItemShare>(entity =>
         {
-            entity.ToTable("RepositoryItemShares");
+            // Table is created by scripts/Create_RepositoryItemShares.sql (with defaults/PK
+            // naming EF's Fluent API here doesn't replicate), never by an EF migration on
+            // SQL Server either -- excluded from Migrations so EF only queries/writes it,
+            // matching the existing architecture instead of introducing a second,
+            // subtly-different definition of this table.
+            entity.ToTable("RepositoryItemShares", t => t.ExcludeFromMigrations());
             entity.HasKey(e => e.Id);
             entity.Property(e => e.ShareToken).HasMaxLength(128).IsRequired();
             entity.Property(e => e.RecipientEmail).HasMaxLength(256).IsRequired();
@@ -71,7 +76,10 @@ public sealed class CatalogDbContext : DbContext
 
         modelBuilder.Entity<CreditMaster>(entity =>
         {
-            entity.ToTable("creditMaster", "dbo");
+            // Table is created by scripts/AddCreditMaster.sql (legacy dbo schema, INT IDENTITY
+            // PK), never by an EF migration on SQL Server either -- excluded from Migrations,
+            // same reasoning as RepositoryItemShares above.
+            entity.ToTable("creditMaster", "dbo", t => t.ExcludeFromMigrations());
             entity.HasKey(e => e.Id);
             entity.Property(e => e.Id).HasColumnName("id");
             entity.Property(e => e.TenantId).HasColumnName("tenantId");
@@ -132,7 +140,13 @@ public sealed class CatalogDbContext : DbContext
 
         modelBuilder.Entity<ConnectorProvider>(entity =>
         {
-            entity.ToTable("ConnectorProviders");
+            // Table is created AND seeded (7 OAuth providers via MERGE) by
+            // scripts/01a_CreateCatalogDatabase.sql, never by an EF migration on SQL Server
+            // either -- excluded from Migrations, same reasoning as RepositoryItemShares
+            // above. Letting EF's migration create this table instead would produce it
+            // without the script's DEFAULT '' / DEFAULT (1) / DEFAULT SYSUTCDATETIME()
+            // column defaults and with no seed rows.
+            entity.ToTable("ConnectorProviders", t => t.ExcludeFromMigrations());
             entity.HasKey(e => e.Id);
             entity.Property(e => e.ProviderCode).HasMaxLength(64).IsRequired();
             entity.Property(e => e.DisplayName).HasMaxLength(128).IsRequired();

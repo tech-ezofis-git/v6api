@@ -1,31 +1,29 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.Repository.Infrastructure;
 
 internal static class RepositoryItemTableColumns
 {
     public static Task<HashSet<string>> LoadAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string itemsTableName,
         CancellationToken cancellationToken = default) =>
         LoadAsync(connection, itemsTableName, transaction: null, cancellationToken);
 
     public static async Task<HashSet<string>> LoadAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string itemsTableName,
-        SqlTransaction? transaction,
+        NpgsqlTransaction? transaction,
         CancellationToken cancellationToken = default)
     {
         const string sql = """
-            SELECT c.name
-            FROM sys.columns c
-            INNER JOIN sys.tables t ON t.object_id = c.object_id
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = @TableName;
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'repository' AND table_name = @TableName;
             """;
 
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using var cmd = new SqlCommand(sql, connection, transaction);
+        await using var cmd = new NpgsqlCommand(sql, connection, transaction);
         cmd.Parameters.AddWithValue("@TableName", itemsTableName);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -34,15 +32,25 @@ internal static class RepositoryItemTableColumns
         return set;
     }
 
+    /// <summary>
+    /// Accepts either a historical PascalCase reserved-column literal (the vast majority of
+    /// call sites, unmodified from the pre-port code) or an already-physical name (snake_case
+    /// reserved, or a custom column's original casing) -- routed through
+    /// RepositorySqlHelper.ToPhysicalName so both forms resolve to the same physical column
+    /// before the membership check. Without this normalization, every pre-existing
+    /// `Has(tableColumns, "TenantId")`-style call would silently return false against the
+    /// physical "tenant_id" column.
+    /// </summary>
     public static bool Has(HashSet<string> columns, string name) =>
-        columns.Contains(name);
+        columns.Contains(RepositorySqlHelper.ToPhysicalName(name));
 
-    /// <summary>Returns the exact table column name for a case-insensitive match.</summary>
+    /// <summary>Returns the exact table column name for a case-insensitive match (see <see cref="Has"/> on name normalization).</summary>
     public static bool TryGetCanonicalName(HashSet<string> columns, string name, out string canonical)
     {
+        var physical = RepositorySqlHelper.ToPhysicalName(name);
         foreach (var col in columns)
         {
-            if (!string.Equals(col, name, StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(col, physical, StringComparison.OrdinalIgnoreCase))
                 continue;
 
             canonical = col;

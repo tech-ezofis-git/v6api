@@ -1,0 +1,22 @@
+-- =============================================
+-- Repository Folder + Document Security tables -- for ALL registered tenants -- Postgres
+-- Ported from scripts/AddRepositoryFolderDocumentSecurityAllTenants.sql -- Phase 3.
+--
+-- NOT PORTED AS A SINGLE SCRIPT -- and this applies to every other ...AllTenants.sql
+-- script in this folder. The SQL Server original works because SQL Server can `USE
+-- [otherDatabase]` and run dynamic SQL against it from within one connection/session
+-- to the catalog database. Postgres has no cross-database USE -- a single connection
+-- is bound to one database for its lifetime, so "loop over catalog.Tenants and apply
+-- this DDL to each tenant's own database" is fundamentally a client-side/orchestration
+-- concern on Postgres (reconnect per tenant with that tenant's own connection string),
+-- not something one .sql file run through psql can do. That orchestration is Phase 6's
+-- job (Apply-SchemaUpdates.ps1 and friends, rewritten to loop and reconnect via psql
+-- per tenant instead of SQL Server's cross-db EXEC).
+--
+-- What Phase 6's loop should run per tenant is exactly
+-- scripts/postgres/AddRepositoryFolderDocumentSecurity.sql (the single-tenant version)
+-- -- the per-tenant DDL in the SQL Server original is byte-for-byte the same content,
+-- just wrapped in a tenant-iterating cursor + dynamic-SQL string-building (worked
+-- around SQL Server's 4000-char NVARCHAR concatenation truncation, a non-issue in
+-- Postgres where `text`/`format()` have no such limit).
+-- =============================================

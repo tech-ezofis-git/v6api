@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Forms;
 using SaaSApp.Workflow.Application.Workflows;
@@ -36,7 +36,7 @@ public sealed partial class FormService
         var modifiedBy = userId.ToString("D");
         var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await EnsureFormSchemaAsync(connection, cancellationToken);
@@ -55,7 +55,6 @@ public sealed partial class FormService
 
         await UpdateWFormRowAsync(
             connection,
-            tenantGuid,
             storedId,
             general,
             publishOption,
@@ -106,7 +105,7 @@ public sealed partial class FormService
         var modifiedBy = userId.ToString("D");
         var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await TableExistsAsync(connection, "wForm", cancellationToken))
@@ -116,28 +115,25 @@ public sealed partial class FormService
         if (storedId == null)
             return new FormDeleteResult(FormDeleteStatus.NotFound, "Form not found.");
 
-        var wFormIdValue = GetWFormReferenceIdValue(storedId);
         var rows = await SoftDeleteWFormAsync(connection, tenantGuid, storedId, modifiedBy, now, cancellationToken);
         if (rows == 0)
             return new FormDeleteResult(FormDeleteStatus.NotFound, "Form not found.");
 
-        if (await HasTableAsync(connection, "wFormControl", cancellationToken))
+        await using (var cmd = new NpgsqlCommand(
+            """UPDATE dbo."wFormControl" SET "isDeleted" = true, "modifiedBy" = @ModifiedBy, "modifiedAt" = @ModifiedAt WHERE "wFormId" = @FormId AND "isDeleted" = false""",
+            connection))
         {
-            await using var cmd = new SqlCommand(
-                "UPDATE dbo.wFormControl SET isDeleted = 1, modifiedBy = @ModifiedBy, modifiedAt = @ModifiedAt WHERE wFormId = @FormId AND isDeleted = 0",
-                connection);
-            cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+            cmd.Parameters.AddWithValue("@FormId", storedId);
             cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
             cmd.Parameters.AddWithValue("@ModifiedAt", now);
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        if (await HasTableAsync(connection, "wFormSecurity", cancellationToken))
+        await using (var cmd = new NpgsqlCommand(
+            """UPDATE dbo."wFormSecurity" SET "isDeleted" = true, "modifiedBy" = @ModifiedBy, "modifiedAt" = @ModifiedAt WHERE "wFormId" = @FormId AND "isDeleted" = false""",
+            connection))
         {
-            await using var cmd = new SqlCommand(
-                "UPDATE dbo.wFormSecurity SET isDeleted = 1, modifiedBy = @ModifiedBy, modifiedAt = @ModifiedAt WHERE wFormId = @FormId AND isDeleted = 0",
-                connection);
-            cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+            cmd.Parameters.AddWithValue("@FormId", storedId);
             cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
             cmd.Parameters.AddWithValue("@ModifiedAt", now);
             await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -148,55 +144,46 @@ public sealed partial class FormService
     }
 
     private static async Task<string?> ResolveStoredFormIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantGuid,
         string formId,
         CancellationToken cancellationToken)
     {
-        var tenantKey = await ResolveTenantKeyAsync(connection, tenantGuid, cancellationToken);
-        var idSqlType = await GetColumnTypeAsync(connection, "wForm", "id", cancellationToken);
-        var idValue = CoerceIdValue(formId, idSqlType);
-
         const string sql = """
-            SELECT CONVERT(NVARCHAR(64), id)
-            FROM dbo.wForm
-            WHERE id = @Id AND tenantId = @TenantId AND isDeleted = 0;
+            SELECT id
+            FROM dbo."wForm"
+            WHERE id = @Id AND "tenantId" = @TenantId AND "isDeleted" = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Id", idValue);
-        cmd.Parameters.AddWithValue("@TenantId", tenantKey);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", formId);
+        cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result == null || result == DBNull.Value ? null : Convert.ToString(result)?.Trim();
     }
 
     private static async Task<bool> FormNameExistsForOtherFormAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantGuid,
         string name,
         string excludeFormId,
         CancellationToken cancellationToken)
     {
-        var tenantKey = await ResolveTenantKeyAsync(connection, tenantGuid, cancellationToken);
-        var idSqlType = await GetColumnTypeAsync(connection, "wForm", "id", cancellationToken);
-        var excludeId = CoerceIdValue(excludeFormId, idSqlType);
-
         const string sql = """
             SELECT COUNT(1)
-            FROM dbo.wForm
-            WHERE isDeleted = 0 AND tenantId = @TenantId AND name = @Name AND id <> @ExcludeId;
+            FROM dbo."wForm"
+            WHERE "isDeleted" = false AND "tenantId" = @TenantId AND name = @Name AND id <> @ExcludeId;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@TenantId", tenantKey);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
         cmd.Parameters.AddWithValue("@Name", name);
-        cmd.Parameters.AddWithValue("@ExcludeId", excludeId);
+        cmd.Parameters.AddWithValue("@ExcludeId", excludeFormId);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
     private static async Task UpdateWFormRowAsync(
-        SqlConnection connection,
-        Guid tenantGuid,
+        NpgsqlConnection connection,
         string formId,
         FormGeneralDto general,
         string publishOption,
@@ -208,31 +195,24 @@ public sealed partial class FormService
         string now,
         CancellationToken cancellationToken)
     {
-        _ = tenantGuid;
-        var idSqlType = await GetColumnTypeAsync(connection, "wForm", "id", cancellationToken);
-        var idValue = CoerceIdValue(formId, idSqlType);
-
-        var sets = new List<string>
-        {
-            "name = @Name",
-            "description = @Description",
-            "type = @Type",
-            "layout = @Layout",
-            "publishOption = @PublishOption",
-            "qrFields = @QrFields",
-            "uniqueColumns = @UniqueColumns",
-            "superUser = @SuperUser",
-            "entryUser = @EntryUser",
-            "modifiedAt = @ModifiedAt",
-            "modifiedBy = @ModifiedBy"
-        };
-
-        if (await HasColumnAsync(connection, "wForm", "isEdit", cancellationToken))
-            sets.Add("isEdit = 1");
-
-        var sql = $"UPDATE dbo.wForm SET {string.Join(", ", sets)} WHERE id = @Id AND isDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Id", idValue);
+        const string sql = """
+            UPDATE dbo."wForm"
+            SET name = @Name,
+                description = @Description,
+                type = @Type,
+                layout = @Layout,
+                "publishOption" = @PublishOption,
+                "qrFields" = @QrFields,
+                "uniqueColumns" = @UniqueColumns,
+                "superUser" = @SuperUser,
+                "entryUser" = @EntryUser,
+                "modifiedAt" = @ModifiedAt,
+                "modifiedBy" = @ModifiedBy,
+                "isEdit" = 1
+            WHERE id = @Id AND "isDeleted" = false;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", formId);
         cmd.Parameters.AddWithValue("@Name", general.Name!.Trim());
         cmd.Parameters.AddWithValue("@Description", (object?)general.Description ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Type", (object?)general.Type ?? DBNull.Value);
@@ -248,74 +228,54 @@ public sealed partial class FormService
     }
 
     private static async Task<int> SoftDeleteWFormAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantGuid,
         string formId,
         string modifiedBy,
         string now,
         CancellationToken cancellationToken)
     {
-        var tenantKey = await ResolveTenantKeyAsync(connection, tenantGuid, cancellationToken);
-        var idSqlType = await GetColumnTypeAsync(connection, "wForm", "id", cancellationToken);
-        var idValue = CoerceIdValue(formId, idSqlType);
-
         const string sql = """
-            UPDATE dbo.wForm
-            SET isDeleted = 1, modifiedAt = @ModifiedAt, modifiedBy = @ModifiedBy
-            WHERE id = @Id AND tenantId = @TenantId AND isDeleted = 0;
+            UPDATE dbo."wForm"
+            SET "isDeleted" = true, "modifiedAt" = @ModifiedAt, "modifiedBy" = @ModifiedBy
+            WHERE id = @Id AND "tenantId" = @TenantId AND "isDeleted" = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Id", idValue);
-        cmd.Parameters.AddWithValue("@TenantId", tenantKey);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", formId);
+        cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
         cmd.Parameters.AddWithValue("@ModifiedAt", now);
         cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
         return await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task RefreshFormSecurityAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string formId,
         List<string> userIds,
         string modifiedBy,
         string now,
         CancellationToken cancellationToken)
     {
-        const string securityTable = "wFormSecurity";
-        if (!await HasTableAsync(connection, securityTable, cancellationToken))
-            return;
-
-        var wFormIdValue = GetWFormReferenceIdValue(formId);
-
-        await using (var softDel = new SqlCommand(
-            "UPDATE dbo.wFormSecurity SET isDeleted = 1, modifiedBy = @ModifiedBy, modifiedAt = @ModifiedAt WHERE wFormId = @FormId AND isDeleted = 0",
+        await using (var softDel = new NpgsqlCommand(
+            """UPDATE dbo."wFormSecurity" SET "isDeleted" = true, "modifiedBy" = @ModifiedBy, "modifiedAt" = @ModifiedAt WHERE "wFormId" = @FormId AND "isDeleted" = false""",
             connection))
         {
-            softDel.Parameters.AddWithValue("@FormId", wFormIdValue);
+            softDel.Parameters.AddWithValue("@FormId", formId);
             softDel.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
             softDel.Parameters.AddWithValue("@ModifiedAt", now);
             await softDel.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        var securityIdIsIdentity = await IsIdentityColumnAsync(connection, securityTable, "id", cancellationToken);
+        const string insertSql = """
+            INSERT INTO dbo."wFormSecurity"("wFormId", "userId", "createdAt", "createdBy", "isDeleted")
+            VALUES(@FormId, @UserId, @CreatedAt, @CreatedBy, false);
+            """;
 
         foreach (var userId in userIds)
         {
-            var cols = "wFormId, userId, createdAt, createdBy, isDeleted";
-            var vals = "@FormId, @UserId, @CreatedAt, @CreatedBy, 0";
-            int? secId = null;
-            if (!securityIdIsIdentity)
-            {
-                secId = await GetNextNumericIdAsync(connection, securityTable, cancellationToken);
-                cols = "id, " + cols;
-                vals = "@Id, " + vals;
-            }
-
-            var insertSql = $"INSERT INTO dbo.[{securityTable}]({cols}) VALUES({vals});";
-            await using var cmd = new SqlCommand(insertSql, connection);
-            if (secId.HasValue)
-                cmd.Parameters.AddWithValue("@Id", secId.Value);
-            cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+            await using var cmd = new NpgsqlCommand(insertSql, connection);
+            cmd.Parameters.AddWithValue("@FormId", formId);
             cmd.Parameters.AddWithValue("@UserId", userId);
             cmd.Parameters.AddWithValue("@CreatedAt", now);
             cmd.Parameters.AddWithValue("@CreatedBy", modifiedBy);

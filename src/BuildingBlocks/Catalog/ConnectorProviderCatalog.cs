@@ -1,5 +1,5 @@
-using Microsoft.Data.SqlClient;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
 
@@ -7,8 +7,6 @@ namespace SaaSApp.Catalog;
 
 public sealed class ConnectorProviderCatalog : IConnectorProviderCatalog
 {
-    private const int SqlErrorInvalidObjectName = 208;
-
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
 
     public ConnectorProviderCatalog(IDbContextFactory<CatalogDbContext> catalogFactory)
@@ -16,6 +14,15 @@ public sealed class ConnectorProviderCatalog : IConnectorProviderCatalog
         _catalogFactory = catalogFactory;
     }
 
+    /// <summary>
+    /// PHASE 4: catalog."ConnectorProviders" is created AND seeded by
+    /// scripts/postgres/01a_CreateCatalogDatabase.sql (Phase 1) with the same 7 OAuth providers
+    /// this method seeds — that script's INSERT ... ON CONFLICT ("ProviderCode") DO NOTHING is the
+    /// primary seed path. This method's CREATE TABLE IF NOT EXISTS / INSERT ... ON CONFLICT DO
+    /// UPDATE is kept as a defensive idempotent no-op safety net (mirrors the SQL Server MERGE
+    /// semantics: only GMAIL/OUTLOOK scopes get refreshed on conflict) for a catalog DB where the
+    /// Phase 1 script was skipped, plus the ongoing legacy QUICKBOOKS_EMAIL → QUICKBOOKS migration.
+    /// </summary>
     public async Task EnsureSchemaAndSeedAsync(CancellationToken cancellationToken = default)
     {
         await using var context = await _catalogFactory.CreateDbContextAsync(cancellationToken);
@@ -23,88 +30,102 @@ public sealed class ConnectorProviderCatalog : IConnectorProviderCatalog
         if (connection.State != System.Data.ConnectionState.Open)
             await connection.OpenAsync(cancellationToken);
 
-        await using var cmd = connection.CreateCommand();
-        cmd.CommandText = """
-            IF OBJECT_ID(N'[catalog].[ConnectorProviders]', N'U') IS NULL
-            BEGIN
-                CREATE TABLE [catalog].[ConnectorProviders] (
-                    [Id] UNIQUEIDENTIFIER NOT NULL CONSTRAINT [PK_ConnectorProviders] PRIMARY KEY DEFAULT NEWID(),
-                    [ProviderCode] NVARCHAR(64) NOT NULL,
-                    [DisplayName] NVARCHAR(128) NOT NULL,
-                    [ClientId] NVARCHAR(512) NOT NULL CONSTRAINT [DF_ConnectorProviders_ClientId] DEFAULT (N''),
-                    [ClientSecret] NVARCHAR(1024) NOT NULL CONSTRAINT [DF_ConnectorProviders_ClientSecret] DEFAULT (N''),
-                    [AuthUrl] NVARCHAR(1024) NOT NULL,
-                    [TokenUrl] NVARCHAR(1024) NOT NULL,
-                    [Scopes] NVARCHAR(2000) NOT NULL CONSTRAINT [DF_ConnectorProviders_Scopes] DEFAULT (N''),
-                    [RedirectUri] NVARCHAR(1024) NOT NULL CONSTRAINT [DF_ConnectorProviders_RedirectUri] DEFAULT (N''),
-                    [ExtraConfigJson] NVARCHAR(MAX) NULL,
-                    [IsActive] BIT NOT NULL CONSTRAINT [DF_ConnectorProviders_IsActive] DEFAULT (1),
-                    [CreatedAtUtc] DATETIME2(3) NOT NULL CONSTRAINT [DF_ConnectorProviders_CreatedAtUtc] DEFAULT (SYSUTCDATETIME()),
-                    [ModifiedAtUtc] DATETIME2(3) NULL,
-                    CONSTRAINT [UQ_ConnectorProviders_ProviderCode] UNIQUE ([ProviderCode])
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                CREATE SCHEMA IF NOT EXISTS catalog;
+                CREATE TABLE IF NOT EXISTS catalog."ConnectorProviders" (
+                    "Id" uuid NOT NULL DEFAULT gen_random_uuid() CONSTRAINT "PK_ConnectorProviders" PRIMARY KEY,
+                    "ProviderCode" varchar(64) NOT NULL,
+                    "DisplayName" varchar(128) NOT NULL,
+                    "ClientId" varchar(512) NOT NULL DEFAULT '',
+                    "ClientSecret" varchar(1024) NOT NULL DEFAULT '',
+                    "AuthUrl" varchar(1024) NOT NULL,
+                    "TokenUrl" varchar(1024) NOT NULL,
+                    "Scopes" varchar(2000) NOT NULL DEFAULT '',
+                    "RedirectUri" varchar(1024) NOT NULL DEFAULT '',
+                    "ExtraConfigJson" text NULL,
+                    "IsActive" boolean NOT NULL DEFAULT true,
+                    "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+                    "ModifiedAtUtc" timestamptz NULL,
+                    CONSTRAINT "UQ_ConnectorProviders_ProviderCode" UNIQUE ("ProviderCode")
                 );
-            END
 
-            MERGE [catalog].[ConnectorProviders] AS t
-            USING (VALUES
-                (N'GCP', N'Google Cloud Storage',
-                 N'https://accounts.google.com/o/oauth2/v2/auth',
-                 N'https://oauth2.googleapis.com/token',
-                 N'https://www.googleapis.com/auth/devstorage.read_write https://www.googleapis.com/auth/userinfo.email openid'),
-                (N'GMAIL', N'Gmail',
-                 N'https://accounts.google.com/o/oauth2/v2/auth',
-                 N'https://oauth2.googleapis.com/token',
-                 N'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/userinfo.email openid'),
-                (N'OUTLOOK', N'Office 365 Outlook',
-                 N'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-                 N'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-                 N'offline_access openid profile email Mail.ReadWrite User.Read'),
-                (N'ONEDRIVE', N'Microsoft OneDrive',
-                 N'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-                 N'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-                 N'offline_access openid profile email Files.ReadWrite.All User.Read'),
-                (N'TEAMS', N'Microsoft Teams',
-                 N'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
-                 N'https://login.microsoftonline.com/common/oauth2/v2.0/token',
-                 N'offline_access openid profile email Files.ReadWrite.All Sites.ReadWrite.All User.Read'),
-                (N'DROPBOX', N'Dropbox',
-                 N'https://www.dropbox.com/oauth2/authorize',
-                 N'https://api.dropboxapi.com/oauth2/token',
-                 N''),
-                (N'QUICKBOOKS', N'QuickBooks',
-                 N'https://appcenter.intuit.com/connect/oauth2',
-                 N'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-                 N'com.intuit.quickbooks.accounting openid profile email')
-            ) AS s ([ProviderCode], [DisplayName], [AuthUrl], [TokenUrl], [Scopes])
-            ON t.[ProviderCode] = s.[ProviderCode]
-            WHEN MATCHED AND t.[ProviderCode] IN (N'GMAIL', N'OUTLOOK') THEN
-                UPDATE SET [Scopes] = s.[Scopes], [ModifiedAtUtc] = SYSUTCDATETIME()
-            WHEN NOT MATCHED THEN
-                INSERT ([Id], [ProviderCode], [DisplayName], [ClientId], [ClientSecret], [AuthUrl], [TokenUrl], [Scopes], [RedirectUri], [IsActive], [CreatedAtUtc])
-                VALUES (NEWID(), s.[ProviderCode], s.[DisplayName], N'', N'', s.[AuthUrl], s.[TokenUrl], s.[Scopes], N'', 1, SYSUTCDATETIME());
-            """;
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+                INSERT INTO catalog."ConnectorProviders"
+                    ("Id", "ProviderCode", "DisplayName", "AuthUrl", "TokenUrl", "Scopes", "ClientId", "ClientSecret", "RedirectUri", "IsActive", "CreatedAtUtc")
+                VALUES
+                    (gen_random_uuid(), 'GCP', 'Google Cloud Storage',
+                     'https://accounts.google.com/o/oauth2/v2/auth',
+                     'https://oauth2.googleapis.com/token',
+                     'https://www.googleapis.com/auth/devstorage.read_write https://www.googleapis.com/auth/userinfo.email openid',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'GMAIL', 'Gmail',
+                     'https://accounts.google.com/o/oauth2/v2/auth',
+                     'https://oauth2.googleapis.com/token',
+                     'https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/userinfo.email openid',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'OUTLOOK', 'Office 365 Outlook',
+                     'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+                     'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+                     'offline_access openid profile email Mail.ReadWrite User.Read',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'ONEDRIVE', 'Microsoft OneDrive',
+                     'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+                     'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+                     'offline_access openid profile email Files.ReadWrite.All User.Read',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'TEAMS', 'Microsoft Teams',
+                     'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
+                     'https://login.microsoftonline.com/common/oauth2/v2.0/token',
+                     'offline_access openid profile email Files.ReadWrite.All Sites.ReadWrite.All User.Read',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'DROPBOX', 'Dropbox',
+                     'https://www.dropbox.com/oauth2/authorize',
+                     'https://api.dropboxapi.com/oauth2/token',
+                     '',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'QUICKBOOKS', 'QuickBooks',
+                     'https://appcenter.intuit.com/connect/oauth2',
+                     'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
+                     'com.intuit.quickbooks.accounting openid profile email',
+                     '', '', '', true, now())
+                ON CONFLICT ("ProviderCode") DO UPDATE SET
+                    "Scopes" = CASE WHEN EXCLUDED."ProviderCode" IN ('GMAIL', 'OUTLOOK')
+                                    THEN EXCLUDED."Scopes"
+                                    ELSE catalog."ConnectorProviders"."Scopes" END,
+                    "ModifiedAtUtc" = CASE WHEN EXCLUDED."ProviderCode" IN ('GMAIL', 'OUTLOOK')
+                                           THEN now()
+                                           ELSE catalog."ConnectorProviders"."ModifiedAtUtc" END;
+                """;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
 
         // Migrate legacy QUICKBOOKS_EMAIL → QUICKBOOKS (or deactivate if both exist)
-        cmd.CommandText = """
-            IF EXISTS (SELECT 1 FROM [catalog].[ConnectorProviders] WHERE [ProviderCode] = N'QUICKBOOKS_EMAIL')
-               AND NOT EXISTS (SELECT 1 FROM [catalog].[ConnectorProviders] WHERE [ProviderCode] = N'QUICKBOOKS')
-            BEGIN
-                UPDATE [catalog].[ConnectorProviders]
-                SET [ProviderCode] = N'QUICKBOOKS',
-                    [DisplayName] = N'QuickBooks',
-                    [Scopes] = N'com.intuit.quickbooks.accounting openid profile email',
-                    [ModifiedAtUtc] = SYSUTCDATETIME()
-                WHERE [ProviderCode] = N'QUICKBOOKS_EMAIL';
-            END
-            ELSE IF EXISTS (SELECT 1 FROM [catalog].[ConnectorProviders] WHERE [ProviderCode] = N'QUICKBOOKS_EMAIL')
-            BEGIN
-                UPDATE [catalog].[ConnectorProviders]
-                SET [IsActive] = 0, [ModifiedAtUtc] = SYSUTCDATETIME()
-                WHERE [ProviderCode] = N'QUICKBOOKS_EMAIL';
-            END
-            """;
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        await using (var cmd = connection.CreateCommand())
+        {
+            cmd.CommandText = """
+                DO $do$
+                BEGIN
+                    IF EXISTS (SELECT 1 FROM catalog."ConnectorProviders" WHERE "ProviderCode" = 'QUICKBOOKS_EMAIL')
+                       AND NOT EXISTS (SELECT 1 FROM catalog."ConnectorProviders" WHERE "ProviderCode" = 'QUICKBOOKS')
+                    THEN
+                        UPDATE catalog."ConnectorProviders"
+                        SET "ProviderCode" = 'QUICKBOOKS',
+                            "DisplayName" = 'QuickBooks',
+                            "Scopes" = 'com.intuit.quickbooks.accounting openid profile email',
+                            "ModifiedAtUtc" = now()
+                        WHERE "ProviderCode" = 'QUICKBOOKS_EMAIL';
+                    ELSIF EXISTS (SELECT 1 FROM catalog."ConnectorProviders" WHERE "ProviderCode" = 'QUICKBOOKS_EMAIL')
+                    THEN
+                        UPDATE catalog."ConnectorProviders"
+                        SET "IsActive" = false, "ModifiedAtUtc" = now()
+                        WHERE "ProviderCode" = 'QUICKBOOKS_EMAIL';
+                    END IF;
+                END
+                $do$;
+                """;
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     public async Task<IReadOnlyList<ConnectorProvider>> ListActiveAsync(CancellationToken cancellationToken = default)
@@ -119,7 +140,7 @@ public sealed class ConnectorProviderCatalog : IConnectorProviderCatalog
                 .OrderBy(p => p.DisplayName)
                 .ToListAsync(cancellationToken);
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             return Array.Empty<ConnectorProvider>();
         }
@@ -139,7 +160,7 @@ public sealed class ConnectorProviderCatalog : IConnectorProviderCatalog
                 .AsNoTracking()
                 .FirstOrDefaultAsync(p => p.ProviderCode == code && p.IsActive, cancellationToken);
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             return null;
         }

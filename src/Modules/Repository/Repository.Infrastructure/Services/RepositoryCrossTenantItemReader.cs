@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure.Services;
@@ -12,28 +12,28 @@ internal static class RepositoryCrossTenantItemReader
         Guid repositoryId,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
             SELECT
-                r.Id,
-                r.Name,
-                r.Description,
-                r.StorageProviderId,
-                r.StorageDrive,
-                r.ItemsTableName,
-                r.StageTableName,
-                r.IsDefaultRepository,
-                r.IsDeleted,
-                sp.Code AS StorageProviderCode,
-                sp.Name AS StorageProviderName
-            FROM repository.Repositories r
-            LEFT JOIN repository.StorageProviders sp ON sp.Id = r.StorageProviderId AND sp.IsDeleted = 0
-            WHERE r.Id = @Id AND r.TenantId = @TenantId;
+                r."Id",
+                r."Name",
+                r."Description",
+                r."StorageProviderId",
+                r."StorageDrive",
+                r."ItemsTableName",
+                r."StageTableName",
+                r."IsDefaultRepository",
+                r."IsDeleted",
+                sp."Code" AS "StorageProviderCode",
+                sp."Name" AS "StorageProviderName"
+            FROM repository."Repositories" r
+            LEFT JOIN repository."StorageProviders" sp ON sp."Id" = r."StorageProviderId" AND sp."IsDeleted" = false
+            WHERE r."Id" = @Id AND r."TenantId" = @TenantId;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", repositoryId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         Guid id;
@@ -86,7 +86,7 @@ internal static class RepositoryCrossTenantItemReader
     }
 
     private static async Task<int> CountItemsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string itemsTableName,
         CancellationToken cancellationToken)
     {
@@ -94,11 +94,10 @@ internal static class RepositoryCrossTenantItemReader
             return 0;
 
         const string existsSql = """
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @Name AND s.name = 'repository';
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = @Name AND table_schema = 'repository';
             """;
-        await using (var existsCmd = new SqlCommand(existsSql, connection))
+        await using (var existsCmd = new NpgsqlCommand(existsSql, connection))
         {
             existsCmd.Parameters.AddWithValue("@Name", itemsTableName);
             if (await existsCmd.ExecuteScalarAsync(cancellationToken) is null)
@@ -106,8 +105,8 @@ internal static class RepositoryCrossTenantItemReader
         }
 
         var table = RepositorySqlHelper.QualifiedItemsTable(itemsTableName);
-        var sql = $"SELECT COUNT_BIG(1) FROM {table} WHERE IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+        var sql = $"SELECT COUNT(*) FROM {table} WHERE is_deleted = false;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         if (result == null || result == DBNull.Value)
             return 0;
@@ -125,17 +124,23 @@ internal static class RepositoryCrossTenantItemReader
     {
         var table = RepositorySqlHelper.QualifiedItemsTable(repository.ItemsTableName);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, repository.ItemsTableName, cancellationToken);
+        // Explicit aliased select instead of `i.*` -- see RepositoryItemQueryService.GetItemAsync
+        // for why (reserved physical columns are lowercase snake_case now).
+        var selectList = RepositorySqlHelper.BuildAliasedSelectList(
+            tableColumns.OrderBy(c => c, StringComparer.OrdinalIgnoreCase), "i");
+
         var sql = $"""
-            SELECT i.*, sp.Code
+            SELECT {selectList}, sp."Code" AS "Code"
             FROM {table} i
-            INNER JOIN repository.StorageProviders sp ON sp.Id = i.StorageProviderId
-            WHERE i.Id = @ItemId AND i.RepositoryId = @RepositoryId AND i.IsDeleted = 0;
+            INNER JOIN repository."StorageProviders" sp ON sp."Id" = i.storage_provider_id
+            WHERE i.id = @ItemId AND i.repository_id = @RepositoryId AND i.is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -147,7 +152,7 @@ internal static class RepositoryCrossTenantItemReader
         for (var i = 0; i < reader.FieldCount; i++)
         {
             var name = reader.GetName(i);
-            if (name is "Code" or "ValidFrom" or "ValidTo")
+            if (name is "Code")
                 continue;
             fields[name] = reader.IsDBNull(i) ? null : reader.GetValue(i);
         }
@@ -174,7 +179,7 @@ internal static class RepositoryCrossTenantItemReader
             return;
         }
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var email = await RepositoryUserNameResolver.ResolveEmailAsync(
@@ -192,19 +197,19 @@ internal static class RepositoryCrossTenantItemReader
     }
 
     private static async Task<IReadOnlyList<RepositoryFieldDto>> LoadFieldsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid repositoryId,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT Id, Name, SqlColumnName, DataType, Level, IsMandatory, IncludeInFolderStructure, OptionsJson, OrderId, IsReadOnly
-            FROM repository.RepositoryFields
-            WHERE RepositoryId = @RepositoryId AND IsDeleted = 0
-            ORDER BY OrderId, Name;
+            SELECT "Id", "Name", "SqlColumnName", "DataType", "Level", "IsMandatory", "IncludeInFolderStructure", "OptionsJson", "OrderId", "IsReadOnly"
+            FROM repository."RepositoryFields"
+            WHERE "RepositoryId" = @RepositoryId AND "IsDeleted" = false
+            ORDER BY "OrderId", "Name";
             """;
 
         var list = new List<RepositoryFieldDto>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

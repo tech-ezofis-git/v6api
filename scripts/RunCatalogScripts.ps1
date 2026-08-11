@@ -1,84 +1,56 @@
-# Run Catalog DB scripts - no sqlcmd required
-# Uses .NET SqlClient to execute scripts
+# Run Catalog DB scripts.
+# Prerequisite: the psql CLI (PostgreSQL client tools) must be installed and on PATH --
+# e.g. `winget install PostgreSQL.PostgreSQL` or install alongside a local Postgres server.
 #
 # Usage: .\RunCatalogScripts.ps1
-# For different server: .\RunCatalogScripts.ps1 -Server "yourserver.database.windows.net" -User "user" -Password "pass"
+# For a different server: .\RunCatalogScripts.ps1 -PgHost "yourhost" -Port "5432" -User "user" -Password "pass"
 
 param(
-    [string]$Server = "ezmtraildb.database.windows.net",
-    [string]$User = "ezmtrailsa",
-    [string]$Password = "Ezofis@123",
-    [string]$Database = "ezofis_catalog_Dev"
+    [string]$PgHost = "localhost",
+    [string]$Port = "5433",
+    [string]$User = "postgres",
+    [string]$Password = "postgres",
+    [string]$Database = "ezofis_catalog_new"
 )
 
 $ErrorActionPreference = "Stop"
 $scriptDir = $PSScriptRoot
-
-# Load SqlClient (works on Windows PowerShell and PowerShell 7)
-Add-Type -AssemblyName "System.Data"
-
-$masterConn = "Server=$Server;Database=master;User Id=$User;Password=$Password;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
-$catalogConn = "Server=$Server;Database=$Database;User Id=$User;Password=$Password;Encrypt=True;TrustServerCertificate=False;Connection Timeout=30;"
-
-function Run-SqlBatch {
-    param([string]$ConnStr, [string]$Sql)
-    $conn = New-Object System.Data.SqlClient.SqlConnection($ConnStr)
-    $conn.Open()
-    try {
-        $cmd = $conn.CreateCommand()
-        $cmd.CommandText = $Sql
-        $cmd.CommandTimeout = 300
-        $cmd.ExecuteNonQuery() | Out-Null
-    } finally {
-        $conn.Close()
-    }
-}
+$pgScriptDir = Join-Path $scriptDir "postgres"
+$env:PGPASSWORD = $Password
 
 function Run-SqlFile {
-    param([string]$ConnStr, [string]$FilePath)
-    $content = Get-Content $FilePath -Raw -Encoding UTF8
-    # Split on GO (line containing only GO) - (?m) = multiline so ^$ match line boundaries
-    $batches = [regex]::Split($content, '(?m)^\s*GO\s*$') | Where-Object { $_.Trim().Length -gt 0 }
-    
-    foreach ($batch in $batches) {
-        $b = $batch.Trim()
-        if ($b.Length -lt 10) { continue }  # Skip trivial batches; do NOT skip batches starting with --
-        try {
-            Run-SqlBatch -ConnStr $ConnStr -Sql $b
-            Write-Host "  OK" -ForegroundColor Green
-        } catch {
-            Write-Host "  Warning: $($_.Exception.Message)" -ForegroundColor Yellow
-        }
+    param([string]$Database, [string]$FilePath)
+    & psql -h $PgHost -p $Port -U $User -d $Database -v ON_ERROR_STOP=1 -f $FilePath
+    if ($LASTEXITCODE -ne 0) {
+        throw "psql failed on $FilePath (exit code $LASTEXITCODE)"
     }
 }
 
 Write-Host "`n=== Catalog Database Setup ===" -ForegroundColor Cyan
-Write-Host "Server: $Server | Database: $Database`n" -ForegroundColor Yellow
+Write-Host "Host: $PgHost`:$Port | Database: $Database`n" -ForegroundColor Yellow
 
-# Step 1: Create database
+# Step 1: Create database (connect to the default "postgres" admin database first)
 Write-Host "Step 1: Creating database..." -ForegroundColor Cyan
 try {
-    Run-SqlBatch -ConnStr $masterConn -Sql "IF NOT EXISTS (SELECT * FROM sys.databases WHERE name = '$Database') CREATE DATABASE [$Database];"
+    $createDbSql = "SELECT 'CREATE DATABASE ""$Database""' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$Database')\gexec"
+    $createDbSql | & psql -h $PgHost -p $Port -U $User -d postgres -v ON_ERROR_STOP=1
+    if ($LASTEXITCODE -ne 0) { throw "psql exited with code $LASTEXITCODE" }
     Write-Host "  OK: Database ready`n" -ForegroundColor Green
 } catch {
     Write-Host "  Error: $_" -ForegroundColor Red
     exit 1
 }
 
-# Step 2: Catalog tables
-Write-Host "Step 2: Creating Tenants, UserTenants tables..." -ForegroundColor Cyan
-Run-SqlFile -ConnStr $catalogConn -FilePath "$scriptDir\01b_CreateCatalogTables.sql"
-Write-Host ""
+# Step 2: Catalog schema + tables (Tenants, UserTenants, ConnectorProviders, etc.)
+Write-Host "Step 2: Creating catalog schema (01a) and Tenants/UserTenants tables (01b)..." -ForegroundColor Cyan
+Run-SqlFile -Database $Database -FilePath "$pgScriptDir\01a_CreateCatalogDatabase.sql"
+Run-SqlFile -Database $Database -FilePath "$pgScriptDir\01b_CreateCatalogTables.sql"
+Write-Host "  OK`n" -ForegroundColor Green
 
-# Step 3: Hangfire (no GO - run as single batch)
-Write-Host "Step 3: Installing Hangfire..." -ForegroundColor Cyan
-try {
-    $hangfireSql = Get-Content "$scriptDir\01c_InstallHangfire.sql" -Raw
-    Run-SqlBatch -ConnStr $catalogConn -Sql $hangfireSql
-    Write-Host "  OK: Hangfire installed`n" -ForegroundColor Green
-} catch {
-    Write-Host "  Error: $_" -ForegroundColor Red
-}
+# Step 3: Hangfire -- no manual SQL install step on Postgres. Hangfire.PostgreSql creates its own
+# "hangfire" schema automatically on first connection (PostgreSqlStorageOptions.PrepareSchemaIfNecessary
+# defaults to true), replacing the old 01c_InstallHangfire.sql SQL Server install script.
+Write-Host "Step 3: Hangfire schema -- created automatically by the app on first connection (Hangfire.PostgreSql), no script needed.`n" -ForegroundColor Cyan
 
 Write-Host "=== Done ===" -ForegroundColor Cyan
 Write-Host "Catalog database is ready. Start with: dotnet run --project src/Api`n" -ForegroundColor White

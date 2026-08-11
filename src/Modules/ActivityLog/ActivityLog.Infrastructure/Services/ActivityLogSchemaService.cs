@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.ActivityLog.Application.Contracts;
 
 namespace SaaSApp.ActivityLog.Infrastructure.Services;
@@ -8,25 +8,24 @@ public sealed class ActivityLogSchemaService : IActivityLogSchemaService
     public async Task ApplyBaseSchemaAsync(string connectionString, CancellationToken cancellationToken = default)
     {
         var script = await LoadScriptAsync(cancellationToken);
-        var batches = System.Text.RegularExpressions.Regex.Split(script, @"(?m)^\s*GO\s*$")
-            .Select(b => b.Trim())
-            .Where(b => b.Length > 10)
-            .ToList();
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        foreach (var batch in batches)
+        try
         {
-            try
-            {
-                await using var command = new SqlCommand(batch, connection) { CommandTimeout = 120 };
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            catch (SqlException ex) when (ex.Number is 2714 or 1913 or 2705)
-            {
-                // idempotent
-            }
+            // The ported Postgres script uses CREATE SCHEMA/TABLE/INDEX IF NOT EXISTS throughout
+            // (no SQL Server "GO" batch separators), so it can run as a single multi-statement batch.
+            await using var command = new NpgsqlCommand(script, connection) { CommandTimeout = 120 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState is
+            PostgresErrorCodes.DuplicateTable or
+            PostgresErrorCodes.DuplicateObject or
+            PostgresErrorCodes.DuplicateSchema or
+            PostgresErrorCodes.DuplicateColumn)
+        {
+            // idempotent
         }
     }
 
@@ -44,8 +43,8 @@ public sealed class ActivityLogSchemaService : IActivityLogSchemaService
 
         var candidates = new[]
         {
-            Path.Combine(AppContext.BaseDirectory, "scripts", "CreateActivityLogSchema.sql"),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scripts", "CreateActivityLogSchema.sql"))
+            Path.Combine(AppContext.BaseDirectory, "scripts", "postgres", "CreateActivityLogSchema.sql"),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scripts", "postgres", "CreateActivityLogSchema.sql"))
         };
 
         foreach (var path in candidates)

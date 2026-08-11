@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
@@ -296,16 +296,16 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT Id, Name, ItemsTableName
-            FROM repository.Repositories
-            WHERE TenantId = @TenantId AND IsDeleted = 0
-            ORDER BY Name;
+            SELECT "Id", "Name", "ItemsTableName"
+            FROM repository."Repositories"
+            WHERE "TenantId" = @TenantId AND "IsDeleted" = false
+            ORDER BY "Name";
             """;
 
         var list = new List<(Guid, string, string)>();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -328,15 +328,15 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         Guid sourceItemId,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var columns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
         if (minRequired <= 0 || matchCriteria.Count == 0)
             return [];
 
-        var where = new List<string> { "i.RepositoryId = @RepositoryId", "i.IsDeleted = 0" };
-        var parameters = new List<SqlParameter> { new("@RepositoryId", repo.Id) };
+        var where = new List<string> { "i.repository_id = @RepositoryId", "i.is_deleted = false" };
+        var parameters = new List<NpgsqlParameter> { new("@RepositoryId", repo.Id) };
         var matchScoreParts = new List<string>();
         var resolvedKeys = new List<string>();
 
@@ -348,8 +348,8 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
                 continue; // missing column = unmatched toward score denominator
 
             var paramName = $"@m{i}";
-            parameters.Add(new SqlParameter(paramName, criterion.Value));
-            matchScoreParts.Add($"(CASE WHEN i.[{col}] = {paramName} THEN 1 ELSE 0 END)");
+            parameters.Add(new NpgsqlParameter(paramName, criterion.Value));
+            matchScoreParts.Add($"(CASE WHEN i.{RepositorySqlHelper.PhysicalColumnRef(col)} = {paramName} THEN 1 ELSE 0 END)");
             resolvedKeys.Add(criterion.Key);
         }
 
@@ -358,56 +358,57 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
 
         var matchCountExpr = $"({string.Join(" + ", matchScoreParts)})";
         where.Add($"{matchCountExpr} >= @MinRequired");
-        parameters.Add(new SqlParameter("@MinRequired", minRequired));
+        parameters.Add(new NpgsqlParameter("@MinRequired", minRequired));
 
         if (repo.Id == sourceRepositoryId)
         {
-            where.Add("i.Id <> @SourceItemId");
-            parameters.Add(new SqlParameter("@SourceItemId", sourceItemId));
+            where.Add("i.id <> @SourceItemId");
+            parameters.Add(new NpgsqlParameter("@SourceItemId", sourceItemId));
         }
 
         var supplierCol = ResolveCanonical(columns, SupplierAliases);
         var poCol = ResolveCanonical(columns, PoAliases);
         var invoiceCol = ResolveCanonical(columns, InvoiceAliases);
         var docTypeCol = ResolveCanonical(columns, DocumentTypeAliases);
-        var createdCol = RepositoryItemTableColumns.Has(columns, "CreatedAtUtc") ? "CreatedAtUtc" : null;
+        var createdCol = RepositoryItemTableColumns.Has(columns, "CreatedAtUtc") ? "created_at_utc" : null;
 
-        var selectSupplier = supplierCol != null ? $"i.[{supplierCol}]" : "CAST(NULL AS nvarchar(1))";
-        var selectPo = poCol != null ? $"i.[{poCol}]" : "CAST(NULL AS nvarchar(1))";
-        var selectInvoice = invoiceCol != null ? $"i.[{invoiceCol}]" : "CAST(NULL AS nvarchar(1))";
-        var selectDocType = docTypeCol != null ? $"i.[{docTypeCol}]" : "CAST(NULL AS nvarchar(1))";
-        var selectCreated = createdCol != null ? $"i.[{createdCol}]" : "CAST(NULL AS datetime2)";
+        var selectSupplier = supplierCol != null ? $"i.{RepositorySqlHelper.PhysicalColumnRef(supplierCol)}" : "CAST(NULL AS varchar(1))";
+        var selectPo = poCol != null ? $"i.{RepositorySqlHelper.PhysicalColumnRef(poCol)}" : "CAST(NULL AS varchar(1))";
+        var selectInvoice = invoiceCol != null ? $"i.{RepositorySqlHelper.PhysicalColumnRef(invoiceCol)}" : "CAST(NULL AS varchar(1))";
+        var selectDocType = docTypeCol != null ? $"i.{RepositorySqlHelper.PhysicalColumnRef(docTypeCol)}" : "CAST(NULL AS varchar(1))";
+        var selectCreated = createdCol != null ? $"i.{createdCol}" : "CAST(NULL AS timestamptz)";
         var orderBy = createdCol != null
-            ? $"{matchCountExpr} DESC, i.[{createdCol}] DESC, i.Id DESC"
-            : $"{matchCountExpr} DESC, i.Id DESC";
+            ? $"{matchCountExpr} DESC, i.{createdCol} DESC, i.id DESC"
+            : $"{matchCountExpr} DESC, i.id DESC";
 
         var fieldFlagSelects = new List<string>();
         for (var i = 0; i < matchScoreParts.Count; i++)
-            fieldFlagSelects.Add($"{matchScoreParts[i]} AS F{i}");
+            fieldFlagSelects.Add($"{matchScoreParts[i]} AS f{i}");
 
         // Denominator: all source criteria (e.g. 14). Numerator: how many matched (e.g. 10 → 71).
         var totalFields = Math.Max(1, matchCriteria.Count);
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
         var sql = $"""
-            SELECT TOP (@Limit)
-                i.Id,
-                i.FileName,
-                i.FileType,
-                i.FileSize,
-                {selectDocType} AS DocumentType,
-                {selectSupplier} AS Supplier,
-                {selectPo} AS PoNumber,
-                {selectInvoice} AS InvoiceNumber,
-                {selectCreated} AS CreatedAtUtc,
-                {matchCountExpr} AS MatchCount,
+            SELECT
+                i.id,
+                i.file_name,
+                i.file_type,
+                i.file_size,
+                {selectDocType} AS document_type,
+                {selectSupplier} AS supplier,
+                {selectPo} AS po_number,
+                {selectInvoice} AS invoice_number,
+                {selectCreated} AS created_at_utc,
+                {matchCountExpr} AS match_count,
                 {string.Join(",\n                ", fieldFlagSelects)}
             FROM {table} i
             WHERE {string.Join(" AND ", where)}
-            ORDER BY {orderBy};
+            ORDER BY {orderBy}
+            LIMIT @Limit;
             """;
 
         var list = new List<RepositoryRelatedDocumentDto>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         RepositorySqlHelper.AddParameters(cmd, parameters);
         cmd.Parameters.AddWithValue("@Limit", PerRepoLimit);
 
@@ -435,10 +436,10 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
                 reader.IsDBNull(1) ? null : reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : Convert.ToInt32(reader.GetValue(3)),
-                reader.IsDBNull(4) ? null : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5),
-                reader.IsDBNull(6) ? null : reader.GetString(6),
-                reader.IsDBNull(7) ? null : reader.GetString(7),
+                reader.IsDBNull(4) ? null : Convert.ToString(reader.GetValue(4)),
+                reader.IsDBNull(5) ? null : Convert.ToString(reader.GetValue(5)),
+                reader.IsDBNull(6) ? null : Convert.ToString(reader.GetValue(6)),
+                reader.IsDBNull(7) ? null : Convert.ToString(reader.GetValue(7)),
                 reader.IsDBNull(8) ? null : reader.GetDateTime(8),
                 score,
                 matchCount,

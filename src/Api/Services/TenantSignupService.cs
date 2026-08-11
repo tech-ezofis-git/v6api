@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SaaSApp.Api.Options;
@@ -318,8 +318,13 @@ public sealed class TenantSignupService : ITenantSignupService
 
         try
         {
-            var builder = new SqlConnectionStringBuilder(connectionString);
-            return string.Equals(builder.InitialCatalog, databaseName, StringComparison.OrdinalIgnoreCase);
+            // Catalog.dbo.Tenants.ConnectionString is DATA, not config -- existing rows still
+            // hold SQL-Server-format strings until Phase 7 rewrites them per tenant. Parse as
+            // Postgres first (the format all newly-created tenants get); the catch below
+            // falls back to a plain substring check for any still-SQL-Server-format legacy
+            // row, so this keeps working correctly during that mixed-format transition period.
+            var builder = new NpgsqlConnectionStringBuilder(connectionString);
+            return string.Equals(builder.Database, databaseName, StringComparison.OrdinalIgnoreCase);
         }
         catch
         {
@@ -331,20 +336,24 @@ public sealed class TenantSignupService : ITenantSignupService
     {
         var catalogConnection = _configuration.GetConnectionString("DefaultConnection")
             ?? throw new InvalidOperationException("DefaultConnection not found.");
-        var builder = new SqlConnectionStringBuilder(catalogConnection) { InitialCatalog = databaseName };
+        // SQL-Server-only options (Encrypt, TrustServerCertificate, MultipleActiveResultSets)
+        // have no Postgres analog and are dropped rather than mistranslated -- NpgsqlConnectionStringBuilder
+        // simply won't parse them if they were ever present, and DefaultConnection no longer
+        // carries them (rewritten to Postgres format in Phase 1).
+        var builder = new NpgsqlConnectionStringBuilder(catalogConnection) { Database = databaseName };
         return builder.ConnectionString;
     }
 
     private static async Task ApplyUsersMigrationsAsync(string tenantConnectionString, Guid tenantId, CancellationToken cancellationToken)
     {
         var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-        optionsBuilder.UseSqlServer(tenantConnectionString, sql =>
+        optionsBuilder.UseNpgsql(tenantConnectionString, npgsql =>
         {
-            sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-            sql.EnableRetryOnFailure(
+            npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+            npgsql.EnableRetryOnFailure(
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(30),
-                errorNumbersToAdd: null);
+                errorCodesToAdd: null);
         });
         var tenantProvider = new StaticTenantProvider(tenantId);
         await using var context = new UsersDbContext(optionsBuilder.Options, tenantProvider);
@@ -361,13 +370,13 @@ public sealed class TenantSignupService : ITenantSignupService
         CancellationToken cancellationToken)
     {
         var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-        optionsBuilder.UseSqlServer(tenantConnectionString, sql =>
+        optionsBuilder.UseNpgsql(tenantConnectionString, npgsql =>
         {
-            sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-            sql.EnableRetryOnFailure(
+            npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+            npgsql.EnableRetryOnFailure(
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(30),
-                errorNumbersToAdd: null);
+                errorCodesToAdd: null);
         });
         await using var context = new UsersDbContext(optionsBuilder.Options, new StaticTenantProvider(tenantId));
         await BuiltinRoleProvisioning.EnsureAsync(context, tenantId, cancellationToken);
@@ -431,13 +440,13 @@ public sealed class TenantSignupService : ITenantSignupService
         CancellationToken cancellationToken)
     {
         var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-        optionsBuilder.UseSqlServer(tenantConnectionString, sql =>
+        optionsBuilder.UseNpgsql(tenantConnectionString, npgsql =>
         {
-            sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-            sql.EnableRetryOnFailure(
+            npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+            npgsql.EnableRetryOnFailure(
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(30),
-                errorNumbersToAdd: null);
+                errorCodesToAdd: null);
         });
         var tenantProvider = new StaticTenantProvider(tenantId);
         await using var context = new UsersDbContext(optionsBuilder.Options, tenantProvider);
@@ -469,11 +478,11 @@ public sealed class TenantSignupService : ITenantSignupService
 
     private static async Task ApplyWorkflowSchemaAsync(string tenantConnectionString, CancellationToken cancellationToken)
     {
-        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "CreateWorkflowSchemaComplete.sql");
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "postgres", "CreateWorkflowSchemaComplete.sql");
         if (!File.Exists(scriptPath))
         {
             // Fallback: try relative to project root
-            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "CreateWorkflowSchemaComplete.sql");
+            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "postgres", "CreateWorkflowSchemaComplete.sql");
         }
 
         if (!File.Exists(scriptPath))
@@ -482,49 +491,30 @@ public sealed class TenantSignupService : ITenantSignupService
         }
 
         var script = await File.ReadAllTextAsync(scriptPath, cancellationToken);
-        
-        // Remove USE statements - we're already connected to the right database
-        script = System.Text.RegularExpressions.Regex.Replace(script, @"USE\s+\[.*?\]\s*GO", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        
-        // Split on GO (line containing only GO) - multiline regex for robustness
-        // Do NOT filter by StartsWith("--") - batches often start with comments but contain CREATE statements
-        var batches = System.Text.RegularExpressions.Regex.Split(script, @"(?m)^\s*GO\s*$")
-            .Select(b => b.Trim())
-            .Where(b => b.Length > 10)
-            .ToList();
-        
-        await using var connection = new SqlConnection(tenantConnectionString);
+
+        await using var connection = new NpgsqlConnection(tenantConnectionString);
         await connection.OpenAsync(cancellationToken);
-        
-        var batchNumber = 0;
-        foreach (var batch in batches)
+
+        try
         {
-            batchNumber++;
-            var trimmedBatch = batch.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedBatch))
-                continue;
-                
-            try
-            {
-                await using var command = new SqlCommand(trimmedBatch, connection);
-                command.CommandTimeout = 120;
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            catch (SqlException ex)
-            {
-                // Log the error but continue with other batches
-                Console.WriteLine($"Warning: Workflow schema batch {batchNumber} failed: {ex.Message}");
-                // Don't throw - some batches might fail if objects already exist
-            }
+            // Ported Postgres script uses CREATE SCHEMA/TABLE/INDEX IF NOT EXISTS throughout
+            // (no SQL Server "GO" batch separators), so it runs as a single multi-statement batch.
+            await using var command = new NpgsqlCommand(script, connection) { CommandTimeout = 120 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex)
+        {
+            // Log the error but don't throw - objects may already exist (idempotent re-run).
+            Console.WriteLine($"Warning: Workflow schema batch failed: {ex.Message}");
         }
     }
 
     private static async Task ApplyDmsSchemaAsync(string tenantConnectionString, CancellationToken cancellationToken)
     {
-        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "CreateDmsSchema.sql");
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "postgres", "CreateDmsSchema.sql");
         if (!File.Exists(scriptPath))
         {
-            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "CreateDmsSchema.sql");
+            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "postgres", "CreateDmsSchema.sql");
         }
 
         if (!File.Exists(scriptPath))
@@ -534,33 +524,18 @@ public sealed class TenantSignupService : ITenantSignupService
         }
 
         var script = await File.ReadAllTextAsync(scriptPath, cancellationToken);
-        script = System.Text.RegularExpressions.Regex.Replace(script, @"USE\s+\[.*?\]\s*GO", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var batches = System.Text.RegularExpressions.Regex.Split(script, @"(?m)^\s*GO\s*$")
-            .Select(b => b.Trim())
-            .Where(b => b.Length > 10)
-            .ToList();
 
-        await using var connection = new SqlConnection(tenantConnectionString);
+        await using var connection = new NpgsqlConnection(tenantConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var batchNumber = 0;
-        foreach (var batch in batches)
+        try
         {
-            batchNumber++;
-            var trimmedBatch = batch.Trim();
-            if (string.IsNullOrWhiteSpace(trimmedBatch))
-                continue;
-
-            try
-            {
-                await using var command = new SqlCommand(trimmedBatch, connection);
-                command.CommandTimeout = 120;
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            catch (SqlException ex)
-            {
-                Console.WriteLine($"Warning: DMS schema batch {batchNumber} failed: {ex.Message}");
-            }
+            await using var command = new NpgsqlCommand(script, connection) { CommandTimeout = 120 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex)
+        {
+            Console.WriteLine($"Warning: DMS schema batch failed: {ex.Message}");
         }
     }
 
@@ -587,11 +562,11 @@ public sealed class TenantSignupService : ITenantSignupService
         bool required,
         CancellationToken cancellationToken)
     {
-        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", scriptFileName);
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "postgres", scriptFileName);
         if (!File.Exists(scriptPath))
-            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", scriptFileName);
+            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "postgres", scriptFileName);
         if (!File.Exists(scriptPath))
-            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "src", "Api", "scripts", scriptFileName);
+            scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "src", "Api", "scripts", "postgres", scriptFileName);
         if (!File.Exists(scriptPath))
         {
             var message = $"Schema script not found: {scriptFileName}";
@@ -602,32 +577,20 @@ public sealed class TenantSignupService : ITenantSignupService
         }
 
         var script = await File.ReadAllTextAsync(scriptPath, cancellationToken);
-        script = System.Text.RegularExpressions.Regex.Replace(
-            script, @"USE\s+\[.*?\]\s*GO", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
-        var batches = System.Text.RegularExpressions.Regex.Split(script, @"(?m)^\s*GO\s*$")
-            .Select(b => b.Trim())
-            .Where(b => b.Length > 10)
-            .ToList();
 
-        await using var connection = new SqlConnection(tenantConnectionString);
+        await using var connection = new NpgsqlConnection(tenantConnectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var batchNumber = 0;
-        foreach (var batch in batches)
+        try
         {
-            batchNumber++;
-            if (string.IsNullOrWhiteSpace(batch))
-                continue;
-
-            try
-            {
-                await using var command = new SqlCommand(batch, connection) { CommandTimeout = 120 };
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            catch (SqlException ex)
-            {
-                Console.WriteLine($"Warning: {scriptFileName} batch {batchNumber} failed: {ex.Message}");
-            }
+            // Ported Postgres scripts use CREATE SCHEMA/TABLE/INDEX IF NOT EXISTS throughout
+            // (no SQL Server "GO" batch separators), so they run as a single multi-statement batch.
+            await using var command = new NpgsqlCommand(script, connection) { CommandTimeout = 120 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex)
+        {
+            Console.WriteLine($"Warning: {scriptFileName} failed: {ex.Message}");
         }
     }
 }

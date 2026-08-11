@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -27,20 +27,20 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             return null;
 
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var stored = new List<RepositoryItemTimelineEventDto>();
         if (await TimelineTableExistsAsync(connection, cancellationToken))
         {
             const string sql = """
-                SELECT Id, EventType, Title, Description, ActorType, ActorName, ActorUserId, CreatedAtUtc
-                FROM repository.ItemTimelineEvents
-                WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0
-                ORDER BY CreatedAtUtc ASC;
+                SELECT "Id", "EventType", "Title", "Description", "ActorType", "ActorName", "ActorUserId", "CreatedAtUtc"
+                FROM repository."ItemTimelineEvents"
+                WHERE "RepositoryId" = @RepositoryId AND "ItemId" = @ItemId AND "TenantId" = @TenantId AND "IsDeleted" = false
+                ORDER BY "CreatedAtUtc" ASC;
                 """;
 
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             cmd.Parameters.AddWithValue("@ItemId", itemId);
             cmd.Parameters.AddWithValue("@TenantId", tenantId);
@@ -133,14 +133,14 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         var actorName = request.ActorName;
         if (string.IsNullOrWhiteSpace(actorName) && userId.HasValue)
         {
-            await using var connection = new SqlConnection(RequireConnectionString());
+            await using var connection = new NpgsqlConnection(RequireConnectionString());
             await connection.OpenAsync(cancellationToken);
             var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, userId.Value, cancellationToken);
             actorName = RepositoryUserNameResolver.PreferEmail(profile?.Email, profile?.DisplayName, userId);
         }
 
         var connectionString = RequireConnectionString();
-        await using var writeConnection = new SqlConnection(connectionString);
+        await using var writeConnection = new NpgsqlConnection(connectionString);
         await writeConnection.OpenAsync(cancellationToken);
         if (!await TimelineTableExistsAsync(writeConnection, cancellationToken))
             throw new InvalidOperationException("Timeline is not enabled for this tenant database. Apply repository schema or run CreateRepositorySchema.sql.");
@@ -212,7 +212,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         var offset = (page - 1) * pageSize;
 
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await CommentsTableExistsAsync(connection, cancellationToken))
@@ -220,29 +220,29 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
 
         const string countSql = """
             SELECT COUNT(1)
-            FROM repository.ItemComments
-            WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0;
+            FROM repository."ItemComments"
+            WHERE "RepositoryId" = @RepositoryId AND "ItemId" = @ItemId AND "TenantId" = @TenantId AND "IsDeleted" = false;
             """;
 
         int total;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
             countCmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             countCmd.Parameters.AddWithValue("@ItemId", itemId);
             countCmd.Parameters.AddWithValue("@TenantId", tenantId);
-            total = (int)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+            total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
         }
 
         const string sql = """
-            SELECT Id, Body, CreatedBy, CreatedAtUtc, ModifiedAtUtc
-            FROM repository.ItemComments
-            WHERE RepositoryId = @RepositoryId AND ItemId = @ItemId AND TenantId = @TenantId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC
+            SELECT "Id", "Body", "CreatedBy", "CreatedAtUtc", "ModifiedAtUtc"
+            FROM repository."ItemComments"
+            WHERE "RepositoryId" = @RepositoryId AND "ItemId" = @ItemId AND "TenantId" = @TenantId AND "IsDeleted" = false
+            ORDER BY "CreatedAtUtc" DESC
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;
             """;
 
         var raw = new List<(Guid Id, string Body, Guid AuthorUserId, DateTime CreatedAtUtc, DateTime? ModifiedAtUtc)>();
-        await using (var cmd = new SqlCommand(sql, connection))
+        await using (var cmd = new NpgsqlCommand(sql, connection))
         {
             cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             cmd.Parameters.AddWithValue("@ItemId", itemId);
@@ -300,18 +300,18 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
 
         var commentId = Guid.NewGuid();
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await CommentsTableExistsAsync(connection, cancellationToken))
             throw new InvalidOperationException("Comments are not enabled for this tenant database. Apply repository schema or run CreateRepositorySchema.sql.");
 
         const string sql = """
-            INSERT INTO repository.ItemComments (Id, TenantId, RepositoryId, ItemId, Body, CreatedBy)
+            INSERT INTO repository."ItemComments" ("Id", "TenantId", "RepositoryId", "ItemId", "Body", "CreatedBy")
             VALUES (@Id, @TenantId, @RepositoryId, @ItemId, @Body, @CreatedBy);
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", commentId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
@@ -342,7 +342,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         CancellationToken cancellationToken)
     {
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await TimelineTableExistsAsync(connection, cancellationToken))
@@ -355,13 +355,13 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         }
 
         const string sql = """
-            INSERT INTO repository.ItemTimelineEvents
-                (Id, TenantId, RepositoryId, ItemId, EventType, Title, Description, ActorType, ActorName, ActorUserId, CreatedBy)
+            INSERT INTO repository."ItemTimelineEvents"
+                ("Id", "TenantId", "RepositoryId", "ItemId", "EventType", "Title", "Description", "ActorType", "ActorName", "ActorUserId", "CreatedBy")
             VALUES
                 (@Id, @TenantId, @RepositoryId, @ItemId, @EventType, @Title, @Description, @ActorType, @ActorName, @ActorUserId, @CreatedBy);
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", id);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
@@ -388,7 +388,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
 
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var columns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
@@ -399,13 +399,15 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
                 selectCols.Add(col);
         }
 
+        // Alias back to the logical PascalCase name -- map[selectCols[i]] below reads by that
+        // same literal string, and RepositoryItemTimelineDeriver.Derive expects those keys.
         var sql = $"""
-            SELECT {string.Join(", ", selectCols.Select(c => $"[{c}]"))}
+            SELECT {string.Join(", ", selectCols.Select(c => $"{RepositorySqlHelper.ColumnRef(c)} AS \"{c}\""))}
             FROM {table}
-            WHERE Id = @ItemId AND RepositoryId = @RepositoryId AND TenantId = @TenantId AND IsDeleted = 0;
+            WHERE id = @ItemId AND repository_id = @RepositoryId AND tenant_id = @TenantId AND is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
@@ -421,7 +423,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
     }
 
     private static async Task<(IReadOnlyList<RepositoryItemTimelineEventDto> Events, Guid? WorkflowId, string? ReferenceNumber)> LoadWorkflowHistoryEventsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
@@ -431,12 +433,13 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         Guid? workflowId = null;
         string? referenceNumber = null;
         const string lookupSql = """
-            SELECT TOP 1 WorkflowId, WorkflowName
-            FROM workflow.WorkflowInstanceLookup
-            WHERE InstanceId = @InstanceId;
+            SELECT "WorkflowId", "WorkflowName"
+            FROM workflow."WorkflowInstanceLookup"
+            WHERE "InstanceId" = @InstanceId
+            LIMIT 1;
             """;
         string? workflowName = null;
-        await using (var lookupCmd = new SqlCommand(lookupSql, connection))
+        await using (var lookupCmd = new NpgsqlCommand(lookupSql, connection))
         {
             lookupCmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
             await using var lookupReader = await lookupCmd.ExecuteReaderAsync(cancellationToken);
@@ -447,15 +450,18 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         }
 
         var suffix = workflowId.Value.ToString("N")[..8];
-        var instancesTable = $"WorkflowInstances_{suffix}";
+        // workflow_instances_{suffix}/transaction_{suffix}: dynamic tables from
+        // WorkflowTableCreator.cs (ported earlier in Phase 4), snake_case unquoted columns.
+        var instancesTable = $"workflow_instances_{suffix}";
         if (await WorkflowTableExistsAsync(connection, instancesTable, cancellationToken))
         {
             var refSql = $"""
-                SELECT TOP 1 ReferenceNumber
-                FROM workflow.[{instancesTable}]
-                WHERE Id = @InstanceId;
+                SELECT reference_number
+                FROM workflow.{instancesTable}
+                WHERE id = @InstanceId
+                LIMIT 1;
                 """;
-            await using var refCmd = new SqlCommand(refSql, connection);
+            await using var refCmd = new NpgsqlCommand(refSql, connection);
             refCmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
             var refObj = await refCmd.ExecuteScalarAsync(cancellationToken);
             if (refObj is string s && !string.IsNullOrWhiteSpace(s))
@@ -468,14 +474,14 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             return (Array.Empty<RepositoryItemTimelineEventDto>(), workflowId, referenceNumber);
 
         var sql = $"""
-            SELECT Id, StageName, StageType, Review, ActionStatus, ActivityUserId, CreatedBy, ModifiedBy, CreatedAt, ModifiedAt
-            FROM workflow.[{txTable}]
-            WHERE WorkflowInstanceId = @InstanceId AND IsDeleted = 0
-            ORDER BY Id ASC;
+            SELECT id, stage_name, stage_type, review, action_status, activity_user_id, created_by, modified_by, created_at, modified_at
+            FROM workflow.{txTable}
+            WHERE workflow_instance_id = @InstanceId AND is_deleted = false
+            ORDER BY id ASC;
             """;
 
         var rows = new List<(int Id, string? StageName, string? StageType, string? Review, int ActionStatus, Guid? ActivityUserId, Guid? CreatedBy, Guid? ModifiedBy, DateTime CreatedAt, DateTime? ModifiedAt)>();
-        await using (var cmd = new SqlCommand(sql, connection))
+        await using (var cmd = new NpgsqlCommand(sql, connection))
         {
             cmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -560,7 +566,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
     }
 
     private static async Task<List<RepositoryItemTimelineEventDto>> ResolveActorNamesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         List<RepositoryItemTimelineEventDto> events,
         CancellationToken cancellationToken)
     {
@@ -600,11 +606,11 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
 
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
         var connectionString = RequireConnectionString();
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var sql = $"SELECT 1 FROM {table} WHERE Id = @ItemId AND RepositoryId = @RepositoryId AND TenantId = @TenantId AND IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+        var sql = $"SELECT 1 FROM {table} WHERE id = @ItemId AND repository_id = @RepositoryId AND tenant_id = @TenantId AND is_deleted = false;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
@@ -615,27 +621,26 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         _connectionProvider.ConnectionString
         ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-    private static Task<bool> TimelineTableExistsAsync(SqlConnection connection, CancellationToken cancellationToken) =>
+    private static Task<bool> TimelineTableExistsAsync(NpgsqlConnection connection, CancellationToken cancellationToken) =>
         TableExistsAsync(connection, "repository", "ItemTimelineEvents", cancellationToken);
 
-    private static Task<bool> CommentsTableExistsAsync(SqlConnection connection, CancellationToken cancellationToken) =>
+    private static Task<bool> CommentsTableExistsAsync(NpgsqlConnection connection, CancellationToken cancellationToken) =>
         TableExistsAsync(connection, "repository", "ItemComments", cancellationToken);
 
-    private static Task<bool> WorkflowTableExistsAsync(SqlConnection connection, string tableName, CancellationToken cancellationToken) =>
+    private static Task<bool> WorkflowTableExistsAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken) =>
         TableExistsAsync(connection, "workflow", tableName, cancellationToken);
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string schema,
         string table,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE s.name = @Schema AND t.name = @Table;
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = @Schema AND table_name = @Table;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Schema", schema);
         cmd.Parameters.AddWithValue("@Table", table);
         return await cmd.ExecuteScalarAsync(cancellationToken) != null;

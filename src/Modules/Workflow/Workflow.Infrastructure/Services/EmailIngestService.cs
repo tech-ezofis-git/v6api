@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MediatR;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Connectors;
@@ -60,58 +60,49 @@ public sealed class EmailIngestService : IEmailIngestService
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
     {
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
+        // Tables already ported at their final shape (ProviderMessageId varchar(450)) in
+        // scripts/postgres/Create-EmailIngest-Tables.sql, so unlike the SQL Server original
+        // there's no ALTER-widen-if-too-narrow branch needed here -- a fresh Postgres table
+        // never starts undersized.
         const string sql = """
-            IF OBJECT_ID(N'dbo.EmailIngestMailbox', N'U') IS NULL
-            BEGIN
-                CREATE TABLE dbo.EmailIngestMailbox (
-                    Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_EmailIngestMailbox PRIMARY KEY,
-                    ConnectorId UNIQUEIDENTIFIER NOT NULL,
-                    WorkflowId UNIQUEIDENTIFIER NOT NULL,
-                    IsEnabled BIT NOT NULL CONSTRAINT DF_EmailIngestMailbox_IsEnabled DEFAULT (1),
-                    PollIntervalMinutes INT NOT NULL CONSTRAINT DF_EmailIngestMailbox_PollInterval DEFAULT (5),
-                    QueryFilter NVARCHAR(512) NULL,
-                    MasterSource NVARCHAR(32) NOT NULL CONSTRAINT DF_EmailIngestMailbox_MasterSource DEFAULT (N'InternalForm'),
-                    MasterFormId NVARCHAR(128) NULL,
-                    MasterConnectorId UNIQUEIDENTIFIER NULL,
-                    AttachmentExtensions NVARCHAR(256) NOT NULL CONSTRAINT DF_EmailIngestMailbox_Ext DEFAULT (N'.pdf,.tif,.tiff'),
-                    LastPolledAtUtc DATETIME2(3) NULL,
-                    LastError NVARCHAR(2000) NULL,
-                    CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_EmailIngestMailbox_Created DEFAULT (SYSUTCDATETIME()),
-                    ModifiedAtUtc DATETIME2(3) NULL,
-                    CreatedBy UNIQUEIDENTIFIER NULL,
-                    ModifiedBy UNIQUEIDENTIFIER NULL,
-                    IsDeleted BIT NOT NULL CONSTRAINT DF_EmailIngestMailbox_IsDeleted DEFAULT (0)
-                );
-            END
+            CREATE SCHEMA IF NOT EXISTS dbo;
 
-            IF OBJECT_ID(N'dbo.EmailIngestProcessed', N'U') IS NULL
-            BEGIN
-                CREATE TABLE dbo.EmailIngestProcessed (
-                    Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_EmailIngestProcessed PRIMARY KEY,
-                    MailboxId UNIQUEIDENTIFIER NOT NULL,
-                    ProviderMessageId NVARCHAR(450) NOT NULL,
-                    AttachmentId NVARCHAR(256) NOT NULL,
-                    WorkflowInstanceId UNIQUEIDENTIFIER NULL,
-                    ProcessedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_EmailIngestProcessed_At DEFAULT (SYSUTCDATETIME()),
-                    CONSTRAINT UQ_EmailIngestProcessed UNIQUE (MailboxId, ProviderMessageId, AttachmentId)
-                );
-            END
-            ELSE
-            BEGIN
-                -- Outlook Graph ids often exceed 256 chars; truncation broke dedup and re-started workflows.
-                IF EXISTS (
-                    SELECT 1 FROM sys.columns
-                    WHERE object_id = OBJECT_ID(N'dbo.EmailIngestProcessed')
-                      AND name = N'ProviderMessageId' AND max_length < 900)
-                BEGIN
-                    ALTER TABLE dbo.EmailIngestProcessed ALTER COLUMN ProviderMessageId NVARCHAR(450) NOT NULL;
-                END
-            END
+            CREATE TABLE IF NOT EXISTS dbo."EmailIngestMailbox" (
+                "Id" uuid NOT NULL CONSTRAINT "PK_EmailIngestMailbox" PRIMARY KEY,
+                "ConnectorId" uuid NOT NULL,
+                "WorkflowId" uuid NOT NULL,
+                "IsEnabled" boolean NOT NULL DEFAULT true,
+                "PollIntervalMinutes" integer NOT NULL DEFAULT 5,
+                "QueryFilter" varchar(512) NULL,
+                "MasterSource" varchar(32) NOT NULL DEFAULT 'InternalForm',
+                "MasterFormId" varchar(128) NULL,
+                "MasterConnectorId" uuid NULL,
+                "AttachmentExtensions" varchar(256) NOT NULL DEFAULT '.pdf,.tif,.tiff',
+                "LastPolledAtUtc" timestamptz NULL,
+                "LastError" varchar(2000) NULL,
+                "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+                "ModifiedAtUtc" timestamptz NULL,
+                "CreatedBy" uuid NULL,
+                "ModifiedBy" uuid NULL,
+                "IsDeleted" boolean NOT NULL DEFAULT false
+            );
+            CREATE INDEX IF NOT EXISTS "IX_EmailIngestMailbox_Enabled" ON dbo."EmailIngestMailbox" ("IsEnabled", "IsDeleted") WHERE "IsDeleted" = false;
+
+            CREATE TABLE IF NOT EXISTS dbo."EmailIngestProcessed" (
+                "Id" uuid NOT NULL CONSTRAINT "PK_EmailIngestProcessed" PRIMARY KEY,
+                "MailboxId" uuid NOT NULL,
+                "ProviderMessageId" varchar(450) NOT NULL,
+                "AttachmentId" varchar(256) NOT NULL,
+                "WorkflowInstanceId" uuid NULL,
+                "ProcessedAtUtc" timestamptz NOT NULL DEFAULT now(),
+                CONSTRAINT "UQ_EmailIngestProcessed" UNIQUE ("MailboxId", "ProviderMessageId", "AttachmentId")
+            );
+            CREATE INDEX IF NOT EXISTS "IX_EmailIngestProcessed_Mailbox" ON dbo."EmailIngestProcessed" ("MailboxId", "ProcessedAtUtc" DESC);
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -119,21 +110,21 @@ public sealed class EmailIngestService : IEmailIngestService
     {
         await EnsureSchemaAsync(cancellationToken);
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT m.Id, m.ConnectorId, m.WorkflowId, m.IsEnabled, m.PollIntervalMinutes, m.QueryFilter,
-                   m.MasterSource, m.MasterFormId, m.MasterConnectorId, m.AttachmentExtensions,
-                   m.LastPolledAtUtc, m.LastError, m.CreatedAtUtc, m.ModifiedAtUtc,
-                   c.Name, c.ProviderCode, c.ExternalAccountEmail
-            FROM dbo.EmailIngestMailbox m
-            LEFT JOIN dbo.connector c ON c.Id = m.ConnectorId AND c.IsDeleted = 0
-            WHERE m.IsDeleted = 0
-            ORDER BY m.CreatedAtUtc DESC;
+            SELECT m."Id", m."ConnectorId", m."WorkflowId", m."IsEnabled", m."PollIntervalMinutes", m."QueryFilter",
+                   m."MasterSource", m."MasterFormId", m."MasterConnectorId", m."AttachmentExtensions",
+                   m."LastPolledAtUtc", m."LastError", m."CreatedAtUtc", m."ModifiedAtUtc",
+                   c."Name", c."ProviderCode", c."ExternalAccountEmail"
+            FROM dbo."EmailIngestMailbox" m
+            LEFT JOIN dbo."connector" c ON c."Id" = m."ConnectorId" AND c."IsDeleted" = false
+            WHERE m."IsDeleted" = false
+            ORDER BY m."CreatedAtUtc" DESC;
             """;
         var list = new List<EmailIngestMailboxDto>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             list.Add(MapMailbox(reader));
@@ -144,19 +135,19 @@ public sealed class EmailIngestService : IEmailIngestService
     {
         await EnsureSchemaAsync(cancellationToken);
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT m.Id, m.ConnectorId, m.WorkflowId, m.IsEnabled, m.PollIntervalMinutes, m.QueryFilter,
-                   m.MasterSource, m.MasterFormId, m.MasterConnectorId, m.AttachmentExtensions,
-                   m.LastPolledAtUtc, m.LastError, m.CreatedAtUtc, m.ModifiedAtUtc,
-                   c.Name, c.ProviderCode, c.ExternalAccountEmail
-            FROM dbo.EmailIngestMailbox m
-            LEFT JOIN dbo.connector c ON c.Id = m.ConnectorId AND c.IsDeleted = 0
-            WHERE m.Id = @Id AND m.IsDeleted = 0;
+            SELECT m."Id", m."ConnectorId", m."WorkflowId", m."IsEnabled", m."PollIntervalMinutes", m."QueryFilter",
+                   m."MasterSource", m."MasterFormId", m."MasterConnectorId", m."AttachmentExtensions",
+                   m."LastPolledAtUtc", m."LastError", m."CreatedAtUtc", m."ModifiedAtUtc",
+                   c."Name", c."ProviderCode", c."ExternalAccountEmail"
+            FROM dbo."EmailIngestMailbox" m
+            LEFT JOIN dbo."connector" c ON c."Id" = m."ConnectorId" AND c."IsDeleted" = false
+            WHERE m."Id" = @Id AND m."IsDeleted" = false;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", id);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -168,20 +159,21 @@ public sealed class EmailIngestService : IEmailIngestService
     {
         await EnsureSchemaAsync(cancellationToken);
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT TOP 1 m.Id, m.ConnectorId, m.WorkflowId, m.IsEnabled, m.PollIntervalMinutes, m.QueryFilter,
-                   m.MasterSource, m.MasterFormId, m.MasterConnectorId, m.AttachmentExtensions,
-                   m.LastPolledAtUtc, m.LastError, m.CreatedAtUtc, m.ModifiedAtUtc,
-                   c.Name, c.ProviderCode, c.ExternalAccountEmail
-            FROM dbo.EmailIngestMailbox m
-            LEFT JOIN dbo.connector c ON c.Id = m.ConnectorId AND c.IsDeleted = 0
-            WHERE m.WorkflowId = @WorkflowId AND m.IsDeleted = 0
-            ORDER BY m.CreatedAtUtc DESC;
+            SELECT m."Id", m."ConnectorId", m."WorkflowId", m."IsEnabled", m."PollIntervalMinutes", m."QueryFilter",
+                   m."MasterSource", m."MasterFormId", m."MasterConnectorId", m."AttachmentExtensions",
+                   m."LastPolledAtUtc", m."LastError", m."CreatedAtUtc", m."ModifiedAtUtc",
+                   c."Name", c."ProviderCode", c."ExternalAccountEmail"
+            FROM dbo."EmailIngestMailbox" m
+            LEFT JOIN dbo."connector" c ON c."Id" = m."ConnectorId" AND c."IsDeleted" = false
+            WHERE m."WorkflowId" = @WorkflowId AND m."IsDeleted" = false
+            ORDER BY m."CreatedAtUtc" DESC
+            LIMIT 1;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -198,20 +190,20 @@ public sealed class EmailIngestService : IEmailIngestService
         var id = Guid.NewGuid();
         var userId = _currentUserProvider.GetUserId();
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            INSERT INTO dbo.EmailIngestMailbox
-                (Id, ConnectorId, WorkflowId, IsEnabled, PollIntervalMinutes, QueryFilter,
-                 MasterSource, MasterFormId, MasterConnectorId, AttachmentExtensions,
-                 CreatedAtUtc, CreatedBy, IsDeleted)
+            INSERT INTO dbo."EmailIngestMailbox"
+                ("Id", "ConnectorId", "WorkflowId", "IsEnabled", "PollIntervalMinutes", "QueryFilter",
+                 "MasterSource", "MasterFormId", "MasterConnectorId", "AttachmentExtensions",
+                 "CreatedAtUtc", "CreatedBy", "IsDeleted")
             VALUES
                 (@Id, @ConnectorId, @WorkflowId, @IsEnabled, @PollIntervalMinutes, @QueryFilter,
                  @MasterSource, @MasterFormId, @MasterConnectorId, @AttachmentExtensions,
-                 SYSUTCDATETIME(), @CreatedBy, 0);
+                 now(), @CreatedBy, false);
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         BindUpsert(cmd, id, request, userId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
@@ -231,25 +223,25 @@ public sealed class EmailIngestService : IEmailIngestService
         await ValidateRequestAsync(request, cancellationToken);
         var userId = _currentUserProvider.GetUserId();
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            UPDATE dbo.EmailIngestMailbox
-            SET ConnectorId = @ConnectorId,
-                WorkflowId = @WorkflowId,
-                IsEnabled = @IsEnabled,
-                PollIntervalMinutes = @PollIntervalMinutes,
-                QueryFilter = @QueryFilter,
-                MasterSource = @MasterSource,
-                MasterFormId = @MasterFormId,
-                MasterConnectorId = @MasterConnectorId,
-                AttachmentExtensions = @AttachmentExtensions,
-                ModifiedAtUtc = SYSUTCDATETIME(),
-                ModifiedBy = @CreatedBy
-            WHERE Id = @Id AND IsDeleted = 0;
+            UPDATE dbo."EmailIngestMailbox"
+            SET "ConnectorId" = @ConnectorId,
+                "WorkflowId" = @WorkflowId,
+                "IsEnabled" = @IsEnabled,
+                "PollIntervalMinutes" = @PollIntervalMinutes,
+                "QueryFilter" = @QueryFilter,
+                "MasterSource" = @MasterSource,
+                "MasterFormId" = @MasterFormId,
+                "MasterConnectorId" = @MasterConnectorId,
+                "AttachmentExtensions" = @AttachmentExtensions,
+                "ModifiedAtUtc" = now(),
+                "ModifiedBy" = @CreatedBy
+            WHERE "Id" = @Id AND "IsDeleted" = false;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         BindUpsert(cmd, id, request, userId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
@@ -268,13 +260,13 @@ public sealed class EmailIngestService : IEmailIngestService
     {
         await EnsureSchemaAsync(cancellationToken);
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
+        await using var cmd = new NpgsqlCommand(
             """
-            UPDATE dbo.EmailIngestMailbox
-            SET IsDeleted = 1, ModifiedAtUtc = SYSUTCDATETIME()
-            WHERE Id = @Id AND IsDeleted = 0;
+            UPDATE dbo."EmailIngestMailbox"
+            SET "IsDeleted" = true, "ModifiedAtUtc" = now()
+            WHERE "Id" = @Id AND "IsDeleted" = false;
             """, connection);
         cmd.Parameters.AddWithValue("@Id", id);
         var deleted = await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
@@ -308,14 +300,15 @@ public sealed class EmailIngestService : IEmailIngestService
     {
         await EnsureSchemaAsync(cancellationToken);
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
 
-        await using var cmd = new SqlCommand(
+        await using var cmd = new NpgsqlCommand(
             """
-            SELECT TOP 1 1
-            FROM dbo.EmailIngestMailbox
-            WHERE IsDeleted = 0 AND IsEnabled = 1;
+            SELECT 1
+            FROM dbo."EmailIngestMailbox"
+            WHERE "IsDeleted" = false AND "IsEnabled" = true
+            LIMIT 1;
             """,
             connection);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -502,7 +495,7 @@ public sealed class EmailIngestService : IEmailIngestService
             throw new InvalidOperationException("pollIntervalMinutes must be between 1 and 1440.");
     }
 
-    private static void BindUpsert(SqlCommand cmd, Guid id, EmailIngestMailboxUpsertRequest request, Guid? userId)
+    private static void BindUpsert(NpgsqlCommand cmd, Guid id, EmailIngestMailboxUpsertRequest request, Guid? userId)
     {
         cmd.Parameters.AddWithValue("@Id", id);
         cmd.Parameters.AddWithValue("@ConnectorId", request.ConnectorId);
@@ -527,16 +520,17 @@ public sealed class EmailIngestService : IEmailIngestService
         Guid mailboxId, string messageId, string attachmentId, CancellationToken cancellationToken)
     {
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
+        await using var cmd = new NpgsqlCommand(
             """
-            SELECT TOP 1 1 FROM dbo.EmailIngestProcessed
-            WHERE MailboxId = @MailboxId AND ProviderMessageId = @MessageId AND AttachmentId = @AttachmentId;
+            SELECT 1 FROM dbo."EmailIngestProcessed"
+            WHERE "MailboxId" = @MailboxId AND "ProviderMessageId" = @MessageId AND "AttachmentId" = @AttachmentId
+            LIMIT 1;
             """, connection);
-        cmd.Parameters.Add("@MailboxId", System.Data.SqlDbType.UniqueIdentifier).Value = mailboxId;
-        cmd.Parameters.Add("@MessageId", System.Data.SqlDbType.NVarChar, 450).Value = messageId;
-        cmd.Parameters.Add("@AttachmentId", System.Data.SqlDbType.NVarChar, 256).Value = Truncate(attachmentId, 256);
+        cmd.Parameters.AddWithValue("@MailboxId", mailboxId);
+        cmd.Parameters.AddWithValue("@MessageId", messageId);
+        cmd.Parameters.AddWithValue("@AttachmentId", Truncate(attachmentId, 256));
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result != null && result != DBNull.Value;
     }
@@ -548,15 +542,16 @@ public sealed class EmailIngestService : IEmailIngestService
             return true;
 
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
+        await using var cmd = new NpgsqlCommand(
             """
-            SELECT TOP 1 1 FROM dbo.EmailIngestProcessed
-            WHERE MailboxId = @MailboxId AND ProviderMessageId = @MessageId;
+            SELECT 1 FROM dbo."EmailIngestProcessed"
+            WHERE "MailboxId" = @MailboxId AND "ProviderMessageId" = @MessageId
+            LIMIT 1;
             """, connection);
-        cmd.Parameters.Add("@MailboxId", System.Data.SqlDbType.UniqueIdentifier).Value = mailboxId;
-        cmd.Parameters.Add("@MessageId", System.Data.SqlDbType.NVarChar, 450).Value = messageKey;
+        cmd.Parameters.AddWithValue("@MailboxId", mailboxId);
+        cmd.Parameters.AddWithValue("@MessageId", messageKey);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result != null && result != DBNull.Value;
     }
@@ -578,19 +573,18 @@ public sealed class EmailIngestService : IEmailIngestService
         Guid mailboxId, string messageId, string attachmentId, Guid? instanceId, CancellationToken cancellationToken)
     {
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
+        await using var cmd = new NpgsqlCommand(
             """
-            INSERT INTO dbo.EmailIngestProcessed (Id, MailboxId, ProviderMessageId, AttachmentId, WorkflowInstanceId, ProcessedAtUtc)
-            VALUES (@Id, @MailboxId, @MessageId, @AttachmentId, @InstanceId, SYSUTCDATETIME());
+            INSERT INTO dbo."EmailIngestProcessed" ("Id", "MailboxId", "ProviderMessageId", "AttachmentId", "WorkflowInstanceId", "ProcessedAtUtc")
+            VALUES (@Id, @MailboxId, @MessageId, @AttachmentId, @InstanceId, now());
             """, connection);
-        cmd.Parameters.Add("@Id", System.Data.SqlDbType.UniqueIdentifier).Value = Guid.NewGuid();
-        cmd.Parameters.Add("@MailboxId", System.Data.SqlDbType.UniqueIdentifier).Value = mailboxId;
-        cmd.Parameters.Add("@MessageId", System.Data.SqlDbType.NVarChar, 450).Value = messageId;
-        cmd.Parameters.Add("@AttachmentId", System.Data.SqlDbType.NVarChar, 256).Value = Truncate(attachmentId, 256);
-        cmd.Parameters.Add("@InstanceId", System.Data.SqlDbType.UniqueIdentifier).Value =
-            (object?)instanceId ?? DBNull.Value;
+        cmd.Parameters.AddWithValue("@Id", Guid.NewGuid());
+        cmd.Parameters.AddWithValue("@MailboxId", mailboxId);
+        cmd.Parameters.AddWithValue("@MessageId", messageId);
+        cmd.Parameters.AddWithValue("@AttachmentId", Truncate(attachmentId, 256));
+        cmd.Parameters.AddWithValue("@InstanceId", (object?)instanceId ?? DBNull.Value);
         try
         {
             await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -600,7 +594,7 @@ public sealed class EmailIngestService : IEmailIngestService
                 messageId,
                 Truncate(attachmentId, 256));
         }
-        catch (SqlException ex) when (ex.Number is 2627 or 2601)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UniqueViolation)
         {
             // unique violation — already processed
         }
@@ -629,20 +623,20 @@ public sealed class EmailIngestService : IEmailIngestService
         try
         {
             var cs = RequireConnectionString();
-            await using var connection = new SqlConnection(cs);
+            await using var connection = new NpgsqlConnection(cs);
             await connection.OpenAsync(cancellationToken);
-            await using var cmd = new SqlCommand(
+            await using var cmd = new NpgsqlCommand(
                 """
-                UPDATE dbo.EmailIngestProcessed
-                SET WorkflowInstanceId = @InstanceId
-                WHERE MailboxId = @MailboxId
-                  AND ProviderMessageId = @MessageId
-                  AND AttachmentId = @AttachmentId;
+                UPDATE dbo."EmailIngestProcessed"
+                SET "WorkflowInstanceId" = @InstanceId
+                WHERE "MailboxId" = @MailboxId
+                  AND "ProviderMessageId" = @MessageId
+                  AND "AttachmentId" = @AttachmentId;
                 """, connection);
-            cmd.Parameters.Add("@InstanceId", System.Data.SqlDbType.UniqueIdentifier).Value = instanceId.Value;
-            cmd.Parameters.Add("@MailboxId", System.Data.SqlDbType.UniqueIdentifier).Value = mailboxId;
-            cmd.Parameters.Add("@MessageId", System.Data.SqlDbType.NVarChar, 450).Value = messageId;
-            cmd.Parameters.Add("@AttachmentId", System.Data.SqlDbType.NVarChar, 256).Value = Truncate(attachmentId, 256);
+            cmd.Parameters.AddWithValue("@InstanceId", instanceId.Value);
+            cmd.Parameters.AddWithValue("@MailboxId", mailboxId);
+            cmd.Parameters.AddWithValue("@MessageId", messageId);
+            cmd.Parameters.AddWithValue("@AttachmentId", Truncate(attachmentId, 256));
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
         catch (Exception ex)
@@ -679,13 +673,13 @@ public sealed class EmailIngestService : IEmailIngestService
         try
         {
             var cs = RequireConnectionString();
-            await using var connection = new SqlConnection(cs);
+            await using var connection = new NpgsqlConnection(cs);
             await connection.OpenAsync(cancellationToken);
-            await using var cmd = new SqlCommand(
+            await using var cmd = new NpgsqlCommand(
                 """
-                UPDATE dbo.EmailIngestMailbox
-                SET LastError = @Error, ModifiedAtUtc = SYSUTCDATETIME()
-                WHERE Id = @Id AND IsDeleted = 0;
+                UPDATE dbo."EmailIngestMailbox"
+                SET "LastError" = @Error, "ModifiedAtUtc" = now()
+                WHERE "Id" = @Id AND "IsDeleted" = false;
                 """, connection);
             cmd.Parameters.AddWithValue("@Id", mailboxId);
             cmd.Parameters.AddWithValue("@Error", error.Length > 2000 ? error[..2000] : error);
@@ -733,15 +727,15 @@ public sealed class EmailIngestService : IEmailIngestService
     private async Task UpdatePollStatusAsync(Guid mailboxId, string? error, CancellationToken cancellationToken)
     {
         var cs = RequireConnectionString();
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
+        await using var cmd = new NpgsqlCommand(
             """
-            UPDATE dbo.EmailIngestMailbox
-            SET LastPolledAtUtc = SYSUTCDATETIME(),
-                LastError = @Error,
-                ModifiedAtUtc = SYSUTCDATETIME()
-            WHERE Id = @Id AND IsDeleted = 0;
+            UPDATE dbo."EmailIngestMailbox"
+            SET "LastPolledAtUtc" = now(),
+                "LastError" = @Error,
+                "ModifiedAtUtc" = now()
+            WHERE "Id" = @Id AND "IsDeleted" = false;
             """, connection);
         cmd.Parameters.AddWithValue("@Id", mailboxId);
         cmd.Parameters.AddWithValue("@Error", (object?)error ?? DBNull.Value);
@@ -832,7 +826,7 @@ public sealed class EmailIngestService : IEmailIngestService
         ?? _tenantContext.ConnectionString
         ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-    private static EmailIngestMailboxDto MapMailbox(SqlDataReader reader) =>
+    private static EmailIngestMailboxDto MapMailbox(NpgsqlDataReader reader) =>
         new(
             reader.GetGuid(0),
             reader.GetGuid(1),

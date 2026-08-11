@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using SaaSApp.Catalog.Persistence;
 
@@ -41,13 +41,15 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         var apiKey = request.ApiKey.Trim();
         var label = string.IsNullOrWhiteSpace(request.KeyLabel) ? "Playground key" : request.KeyLabel.Trim();
 
-        await using (var conn = new SqlConnection(tenantConnectionString))
+        await using (var conn = new NpgsqlConnection(tenantConnectionString))
         {
             await conn.OpenAsync(cancellationToken);
-            await using var cmd = new SqlCommand(
-                @"INSERT INTO dbo.playgroundApiKeys
-                  (Id, Email, ApiKey, KeyLabel, ProtectedPassword, CreatedAtUtc, ExpiresAtUtc, IsActive)
-                  VALUES (@id, @email, @apiKey, @label, @pwd, @created, @expires, 1)", conn);
+            await using var cmd = new NpgsqlCommand(
+                """
+                INSERT INTO dbo."playgroundApiKeys"
+                  ("Id", "Email", "ApiKey", "KeyLabel", "ProtectedPassword", "CreatedAtUtc", "ExpiresAtUtc", "IsActive")
+                  VALUES (@id, @email, @apiKey, @label, @pwd, @created, @expires, true)
+                """, conn);
             cmd.Parameters.AddWithValue("@id", id);
             cmd.Parameters.AddWithValue("@email", email);
             cmd.Parameters.AddWithValue("@apiKey", apiKey);
@@ -59,18 +61,20 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         }
 
         var catalogCs = GetCatalogConnectionString();
-        await using (var conn = new SqlConnection(catalogCs))
+        await using (var conn = new NpgsqlConnection(catalogCs))
         {
             await conn.OpenAsync(cancellationToken);
-            await using var cmd = new SqlCommand(
-                @"MERGE catalog.PlaygroundApiKeyRoutes AS target
-                  USING (SELECT @apiKey AS ApiKey) AS source
-                  ON target.ApiKey = source.ApiKey
-                  WHEN MATCHED THEN
-                    UPDATE SET TenantId = @tenantId, KeyId = @keyId, Email = @email, IsActive = 1, CreatedAtUtc = @created
-                  WHEN NOT MATCHED THEN
-                    INSERT (ApiKey, TenantId, KeyId, Email, IsActive, CreatedAtUtc)
-                    VALUES (@apiKey, @tenantId, @keyId, @email, 1, @created);", conn);
+            await using var cmd = new NpgsqlCommand(
+                """
+                INSERT INTO catalog."PlaygroundApiKeyRoutes" ("ApiKey", "TenantId", "KeyId", "Email", "IsActive", "CreatedAtUtc")
+                VALUES (@apiKey, @tenantId, @keyId, @email, true, @created)
+                ON CONFLICT ("ApiKey") DO UPDATE SET
+                    "TenantId" = EXCLUDED."TenantId",
+                    "KeyId" = EXCLUDED."KeyId",
+                    "Email" = EXCLUDED."Email",
+                    "IsActive" = true,
+                    "CreatedAtUtc" = EXCLUDED."CreatedAtUtc";
+                """, conn);
             cmd.Parameters.AddWithValue("@apiKey", apiKey);
             cmd.Parameters.AddWithValue("@tenantId", tenantId);
             cmd.Parameters.AddWithValue("@keyId", id);
@@ -104,13 +108,15 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         var list = new List<PlaygroundApiKeyDto>();
         var now = DateTime.UtcNow;
 
-        await using var conn = new SqlConnection(tenantConnectionString);
+        await using var conn = new NpgsqlConnection(tenantConnectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
-            @"SELECT Id, Email, ApiKey, KeyLabel, ProtectedPassword, CreatedAtUtc, ExpiresAtUtc, IsActive
-              FROM dbo.playgroundApiKeys
-              WHERE IsActive = 1 AND Email = @email
-              ORDER BY CreatedAtUtc DESC", conn);
+        await using var cmd = new NpgsqlCommand(
+            """
+            SELECT "Id", "Email", "ApiKey", "KeyLabel", "ProtectedPassword", "CreatedAtUtc", "ExpiresAtUtc", "IsActive"
+              FROM dbo."playgroundApiKeys"
+              WHERE "IsActive" = true AND "Email" = @email
+              ORDER BY "CreatedAtUtc" DESC
+            """, conn);
         cmd.Parameters.AddWithValue("@email", email.Trim());
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -142,12 +148,15 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         await EnsureCatalogSchemaAsync(cancellationToken);
         var catalogCs = GetCatalogConnectionString();
 
-        await using var conn = new SqlConnection(catalogCs);
+        await using var conn = new NpgsqlConnection(catalogCs);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
-            @"SELECT TOP 1 TenantId, KeyId, Email, ApiKey, IsActive
-              FROM catalog.PlaygroundApiKeyRoutes
-              WHERE ApiKey = @apiKey AND IsActive = 1", conn);
+        await using var cmd = new NpgsqlCommand(
+            """
+            SELECT "TenantId", "KeyId", "Email", "ApiKey", "IsActive"
+              FROM catalog."PlaygroundApiKeyRoutes"
+              WHERE "ApiKey" = @apiKey AND "IsActive" = true
+              LIMIT 1
+            """, conn);
         cmd.Parameters.AddWithValue("@apiKey", apiKey.Trim());
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -173,12 +182,15 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         await EnsureTenantSchemaAsync(tenantId, tenantConnectionString, cancellationToken);
         var now = DateTime.UtcNow;
 
-        await using var conn = new SqlConnection(tenantConnectionString);
+        await using var conn = new NpgsqlConnection(tenantConnectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
-            @"SELECT TOP 1 Id, Email, ApiKey, KeyLabel, ProtectedPassword, CreatedAtUtc, ExpiresAtUtc, IsActive
-              FROM dbo.playgroundApiKeys
-              WHERE ApiKey = @apiKey AND IsActive = 1", conn);
+        await using var cmd = new NpgsqlCommand(
+            """
+            SELECT "Id", "Email", "ApiKey", "KeyLabel", "ProtectedPassword", "CreatedAtUtc", "ExpiresAtUtc", "IsActive"
+              FROM dbo."playgroundApiKeys"
+              WHERE "ApiKey" = @apiKey AND "IsActive" = true
+              LIMIT 1
+            """, conn);
         cmd.Parameters.AddWithValue("@apiKey", apiKey.Trim());
 
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -210,12 +222,14 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
     {
         await EnsureTenantSchemaAsync(tenantId, tenantConnectionString, cancellationToken);
 
-        await using var conn = new SqlConnection(tenantConnectionString);
+        await using var conn = new NpgsqlConnection(tenantConnectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
-            @"UPDATE dbo.playgroundApiKeys
-              SET ProtectedPassword = @pwd
-              WHERE ApiKey = @apiKey AND IsActive = 1", conn);
+        await using var cmd = new NpgsqlCommand(
+            """
+            UPDATE dbo."playgroundApiKeys"
+              SET "ProtectedPassword" = @pwd
+              WHERE "ApiKey" = @apiKey AND "IsActive" = true
+            """, conn);
         cmd.Parameters.AddWithValue("@pwd", (object?)protectedPassword ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@apiKey", apiKey.Trim());
         await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -230,12 +244,14 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         await EnsureTenantSchemaAsync(tenantId, tenantConnectionString, cancellationToken);
         var now = DateTime.UtcNow;
 
-        await using var conn = new SqlConnection(tenantConnectionString);
+        await using var conn = new NpgsqlConnection(tenantConnectionString);
         await conn.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(
-            @"INSERT INTO dbo.playgroundApiUsageLog
-              (Id, ApiKeyId, ApiKey, Email, Endpoint, HttpMethod, StatusCode, DurationMs, RequestedAtUtc)
-              VALUES (@id, @apiKeyId, @apiKey, @email, @endpoint, @method, @status, @duration, @requested)", conn);
+        await using var cmd = new NpgsqlCommand(
+            """
+            INSERT INTO dbo."playgroundApiUsageLog"
+              ("Id", "ApiKeyId", "ApiKey", "Email", "Endpoint", "HttpMethod", "StatusCode", "DurationMs", "RequestedAtUtc")
+              VALUES (@id, @apiKeyId, @apiKey, @email, @endpoint, @method, @status, @duration, @requested)
+            """, conn);
         cmd.Parameters.AddWithValue("@id", Guid.NewGuid());
         cmd.Parameters.AddWithValue("@apiKeyId", request.ApiKeyId);
         cmd.Parameters.AddWithValue("@apiKey", request.ApiKey.Trim());
@@ -263,34 +279,39 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
         var failedRequests = 0;
         DateTime? lastUsedAtUtc = null;
 
-        await using (var conn = new SqlConnection(tenantConnectionString))
+        await using (var conn = new NpgsqlConnection(tenantConnectionString))
         {
             await conn.OpenAsync(cancellationToken);
-            await using (var countCmd = new SqlCommand(
-                             @"SELECT
-                                 COUNT(1) AS TotalRequests,
-                                 SUM(CASE WHEN StatusCode >= 200 AND StatusCode < 300 THEN 1 ELSE 0 END) AS SuccessfulRequests,
-                                 SUM(CASE WHEN StatusCode >= 400 THEN 1 ELSE 0 END) AS FailedRequests,
-                                 MAX(RequestedAtUtc) AS LastUsedAtUtc
-                               FROM dbo.playgroundApiUsageLog
-                               WHERE Email = @email", conn))
+            await using (var countCmd = new NpgsqlCommand(
+                             """
+                             SELECT
+                                 COUNT(1) AS "TotalRequests",
+                                 SUM(CASE WHEN "StatusCode" >= 200 AND "StatusCode" < 300 THEN 1 ELSE 0 END) AS "SuccessfulRequests",
+                                 SUM(CASE WHEN "StatusCode" >= 400 THEN 1 ELSE 0 END) AS "FailedRequests",
+                                 MAX("RequestedAtUtc") AS "LastUsedAtUtc"
+                               FROM dbo."playgroundApiUsageLog"
+                               WHERE "Email" = @email
+                             """, conn))
             {
                 countCmd.Parameters.AddWithValue("@email", email.Trim());
                 await using var countReader = await countCmd.ExecuteReaderAsync(cancellationToken);
                 if (await countReader.ReadAsync(cancellationToken))
                 {
-                    totalRequests = countReader.IsDBNull(0) ? 0 : countReader.GetInt32(0);
-                    successfulRequests = countReader.IsDBNull(1) ? 0 : countReader.GetInt32(1);
-                    failedRequests = countReader.IsDBNull(2) ? 0 : countReader.GetInt32(2);
+                    totalRequests = countReader.IsDBNull(0) ? 0 : Convert.ToInt32(countReader.GetInt64(0));
+                    successfulRequests = countReader.IsDBNull(1) ? 0 : Convert.ToInt32(countReader.GetInt64(1));
+                    failedRequests = countReader.IsDBNull(2) ? 0 : Convert.ToInt32(countReader.GetInt64(2));
                     lastUsedAtUtc = countReader.IsDBNull(3) ? null : countReader.GetDateTime(3);
                 }
             }
 
-            await using var cmd = new SqlCommand(
-                @"SELECT TOP 500 Id, ApiKeyId, ApiKey, Email, Endpoint, HttpMethod, StatusCode, DurationMs, RequestedAtUtc
-                  FROM dbo.playgroundApiUsageLog
-                  WHERE Email = @email
-                  ORDER BY RequestedAtUtc DESC", conn);
+            await using var cmd = new NpgsqlCommand(
+                """
+                SELECT "Id", "ApiKeyId", "ApiKey", "Email", "Endpoint", "HttpMethod", "StatusCode", "DurationMs", "RequestedAtUtc"
+                  FROM dbo."playgroundApiUsageLog"
+                  WHERE "Email" = @email
+                  ORDER BY "RequestedAtUtc" DESC
+                  LIMIT 500
+                """, conn);
             cmd.Parameters.AddWithValue("@email", email.Trim());
 
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -371,25 +392,24 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
     private async Task ApplySqlScriptAsync(string connectionString, string scriptFileName, CancellationToken cancellationToken)
     {
         var script = await LoadScriptAsync(scriptFileName, cancellationToken);
-        var batches = System.Text.RegularExpressions.Regex.Split(script, @"(?m)^\s*GO\s*$")
-            .Select(b => b.Trim())
-            .Where(b => b.Length > 10)
-            .ToList();
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        foreach (var batch in batches)
+        try
         {
-            try
-            {
-                await using var command = new SqlCommand(batch, connection) { CommandTimeout = 120 };
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            catch (SqlException ex) when (ex.Number is 2714 or 1913 or 2705)
-            {
-                // idempotent
-            }
+            // Ported Postgres scripts use CREATE SCHEMA/TABLE/INDEX IF NOT EXISTS throughout
+            // (no SQL Server "GO" batch separators), so they run as a single multi-statement batch.
+            await using var command = new NpgsqlCommand(script, connection) { CommandTimeout = 120 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState is
+            PostgresErrorCodes.DuplicateTable or
+            PostgresErrorCodes.DuplicateObject or
+            PostgresErrorCodes.DuplicateSchema or
+            PostgresErrorCodes.DuplicateColumn)
+        {
+            // idempotent
         }
     }
 
@@ -397,9 +417,9 @@ public sealed class PlaygroundApiKeyService : IPlaygroundApiKeyService
     {
         var candidates = new[]
         {
-            Path.Combine(AppContext.BaseDirectory, "scripts", scriptFileName),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "scripts", scriptFileName)),
-            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scripts", scriptFileName))
+            Path.Combine(AppContext.BaseDirectory, "scripts", "postgres", scriptFileName),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "scripts", "postgres", scriptFileName)),
+            Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "scripts", "postgres", scriptFileName))
         };
 
         foreach (var path in candidates)

@@ -34,7 +34,7 @@ function Invoke-Api {
     $h = $headers.Clone()
     if ($ExtraHeaders) { $ExtraHeaders.GetEnumerator() | ForEach-Object { $h[$_.Key] = $_.Value } }
     $params = @{ Method = $Method; Uri = $Uri; Headers = $h; UseBasicParsing = $true }
-    if ($Body) { $params.Body = ($Body | ConvertTo-Json) }
+    if ($Body) { $params.Body = ($Body | ConvertTo-Json -Depth 10) }
     return Invoke-RestMethod @params
 }
 

@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.Api.Services;
 
@@ -14,33 +14,28 @@ public sealed class WorkflowSchemaService : IWorkflowSchemaService
     public async Task ApplySchemaAsync(string connectionString, CancellationToken cancellationToken = default)
     {
         var script = await LoadScriptAsync(cancellationToken);
-        script = System.Text.RegularExpressions.Regex.Replace(script, @"USE\s+\[.*?\]\s*GO", "", System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-        // Split on GO (line containing only GO) - multiline regex
-        // Do NOT filter by StartsWith("--") - batches often start with comments but contain CREATE statements
-        var batches = System.Text.RegularExpressions.Regex.Split(script, @"(?m)^\s*GO\s*$")
-            .Select(b => b.Trim())
-            .Where(b => b.Length > 10) // Skip empty or trivial batches
-            .ToList();
-
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        foreach (var batch in batches)
+        try
         {
-            try
-            {
-                await using var command = new SqlCommand(batch, connection);
-                command.CommandTimeout = 120;
-                await command.ExecuteNonQueryAsync(cancellationToken);
-            }
-            catch (SqlException ex)
-            {
-                // 2714/1913 = object already exists (idempotent)
-                if (ex.Number == 2714 || ex.Number == 1913)
-                    continue;
-                throw new InvalidOperationException($"Workflow schema batch failed: {ex.Message}", ex);
-            }
+            // Ported Postgres script uses CREATE SCHEMA/TABLE/INDEX IF NOT EXISTS throughout
+            // (no SQL Server "GO" batch separators), so it runs as a single multi-statement batch.
+            await using var command = new NpgsqlCommand(script, connection) { CommandTimeout = 120 };
+            await command.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch (PostgresException ex) when (ex.SqlState is
+            PostgresErrorCodes.DuplicateTable or
+            PostgresErrorCodes.DuplicateObject or
+            PostgresErrorCodes.DuplicateSchema or
+            PostgresErrorCodes.DuplicateColumn)
+        {
+            // idempotent (object already exists)
+        }
+        catch (PostgresException ex)
+        {
+            throw new InvalidOperationException($"Workflow schema batch failed: {ex.Message}", ex);
         }
     }
 
@@ -57,15 +52,15 @@ public sealed class WorkflowSchemaService : IWorkflowSchemaService
         }
 
         // 2. Output directory
-        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "CreateWorkflowSchemaComplete.sql");
+        var scriptPath = Path.Combine(AppContext.BaseDirectory, "scripts", "postgres", "CreateWorkflowSchemaComplete.sql");
         if (File.Exists(scriptPath))
             return await File.ReadAllTextAsync(scriptPath, cancellationToken);
 
         // 3. Current directory (e.g. solution root)
-        scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "CreateWorkflowSchemaComplete.sql");
+        scriptPath = Path.Combine(Directory.GetCurrentDirectory(), "scripts", "postgres", "CreateWorkflowSchemaComplete.sql");
         if (File.Exists(scriptPath))
             return await File.ReadAllTextAsync(scriptPath, cancellationToken);
 
-        throw new FileNotFoundException("CreateWorkflowSchemaComplete.sql not found as embedded resource or in scripts/.");
+        throw new FileNotFoundException("CreateWorkflowSchemaComplete.sql not found as embedded resource or in scripts/postgres/.");
     }
 }

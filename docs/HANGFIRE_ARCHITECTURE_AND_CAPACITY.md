@@ -26,6 +26,8 @@ Hangfire does **not** run Python inside .NET. It orchestrates C# jobs that call 
 - AP Agent (per ticket / workflow start)  
 - Master file import (Python)
 
+**Ubuntu / WSL Hangfire + Azure API split (SSL, publish path, install):** see [HANGFIRE_UBUNTU_AZURE_SPLIT.md](./HANGFIRE_UBUNTU_AZURE_SPLIT.md).
+
 ---
 
 ## 2. Azure architecture (production)

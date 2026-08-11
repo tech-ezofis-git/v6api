@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
@@ -12,36 +12,37 @@ internal static class FormMasterFileNotificationStore
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
-    public static async Task EnsureTableAsync(SqlConnection connection, CancellationToken cancellationToken)
+    public static async Task EnsureTableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         if (await TableExistsAsync(connection, "notification", "dbo", cancellationToken))
             return;
 
         const string sql = """
+            CREATE SCHEMA IF NOT EXISTS dbo;
             CREATE TABLE dbo.notification (
-                id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                title NVARCHAR(500) NULL,
-                status NVARCHAR(100) NULL,
-                remarks NVARCHAR(MAX) NULL,
-                inputJson NVARCHAR(MAX) NULL,
-                category NVARCHAR(100) NULL,
-                createdAt NVARCHAR(50) NULL,
-                modifiedAt NVARCHAR(50) NULL,
-                createdBy INT NOT NULL DEFAULT(0),
-                modifiedBy INT NOT NULL DEFAULT(0),
-                isDeleted BIT NOT NULL DEFAULT(0),
-                lastActionBy INT NULL,
-                readStatus INT NOT NULL DEFAULT(0)
+                id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,
+                title varchar(500) NULL,
+                status varchar(100) NULL,
+                "inputJson" text NULL,
+                remarks text NULL,
+                category varchar(100) NULL,
+                "createdAt" varchar(50) NULL,
+                "modifiedAt" varchar(50) NULL,
+                "createdBy" integer NOT NULL DEFAULT 0,
+                "modifiedBy" integer NOT NULL DEFAULT 0,
+                "isDeleted" boolean NOT NULL DEFAULT false,
+                "lastActionBy" integer NULL,
+                "readStatus" integer NOT NULL DEFAULT 0
             );
-            CREATE INDEX IX_notification_category_createdAt ON dbo.notification(category, createdAt DESC);
+            CREATE INDEX IX_notification_category_createdAt ON dbo.notification(category, "createdAt" DESC);
             """;
 
-        await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+        await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public static Task<int> InsertAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string title,
         string? remarks,
         object inputJson,
@@ -51,7 +52,7 @@ internal static class FormMasterFileNotificationStore
         => InsertAsync(connection, title, status: null, remarks, inputJson, category, createdByLegacyId, cancellationToken);
 
     public static async Task<int> InsertAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string title,
         string? status,
         string? remarks,
@@ -65,15 +66,15 @@ internal static class FormMasterFileNotificationStore
 
         const string sql = """
             INSERT INTO dbo.notification (
-                title, status, remarks, inputJson, category,
-                createdAt, modifiedAt, createdBy, modifiedBy, isDeleted, lastActionBy, readStatus)
-            OUTPUT INSERTED.id
+                title, status, remarks, "inputJson", category,
+                "createdAt", "modifiedAt", "createdBy", "modifiedBy", "isDeleted", "lastActionBy", "readStatus")
             VALUES (
                 @Title, @Status, @Remarks, @InputJson, @Category,
-                @CreatedAt, NULL, @CreatedBy, 0, 0, NULL, 0);
+                @CreatedAt, NULL, @CreatedBy, 0, false, NULL, 0)
+            RETURNING id;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Title", (object?)title ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Status", (object?)status ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Remarks", (object?)remarks ?? DBNull.Value);
@@ -86,7 +87,7 @@ internal static class FormMasterFileNotificationStore
     }
 
     public static async Task<int> TryResolveLegacyUserIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid userId,
         CancellationToken cancellationToken)
     {
@@ -95,10 +96,11 @@ internal static class FormMasterFileNotificationStore
             if (await ColumnExistsAsync(connection, "user", "userGuid", "dbo", cancellationToken))
             {
                 const string byGuid = """
-                    SELECT TOP 1 id FROM dbo.[user]
-                    WHERE isDeleted = 0 AND userGuid = @UserGuid;
+                    SELECT id FROM dbo."user"
+                    WHERE "isDeleted" = false AND "userGuid" = @UserGuid
+                    LIMIT 1;
                     """;
-                await using var cmd = new SqlCommand(byGuid, connection);
+                await using var cmd = new NpgsqlCommand(byGuid, connection);
                 cmd.Parameters.AddWithValue("@UserGuid", userId.ToString("D"));
                 var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
                 if (scalar is int i) return i;
@@ -110,9 +112,9 @@ internal static class FormMasterFileNotificationStore
         if (await TableExistsAsync(connection, "Users", "users", cancellationToken))
         {
             const string usersSql = """
-                SELECT TOP 1 Id FROM users.Users WHERE Id = @UserId AND IsDeleted = 0;
+                SELECT "Id" FROM users."Users" WHERE "Id" = @UserId AND "IsDeleted" = false LIMIT 1;
                 """;
-            await using var cmd = new SqlCommand(usersSql, connection);
+            await using var cmd = new NpgsqlCommand(usersSql, connection);
             cmd.Parameters.AddWithValue("@UserId", userId);
             var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
             if (scalar is Guid)
@@ -123,17 +125,16 @@ internal static class FormMasterFileNotificationStore
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string schema,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @TableName AND s.name = @Schema;
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = @TableName AND table_schema = @Schema;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         cmd.Parameters.AddWithValue("@Schema", schema);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -141,19 +142,17 @@ internal static class FormMasterFileNotificationStore
     }
 
     private static async Task<bool> ColumnExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string columnName,
         string schema,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT 1 FROM sys.columns c
-            INNER JOIN sys.tables t ON c.object_id = t.object_id
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @TableName AND s.name = @Schema AND c.name = @ColumnName;
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = @TableName AND table_schema = @Schema AND column_name = @ColumnName;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         cmd.Parameters.AddWithValue("@Schema", schema);
         cmd.Parameters.AddWithValue("@ColumnName", columnName);

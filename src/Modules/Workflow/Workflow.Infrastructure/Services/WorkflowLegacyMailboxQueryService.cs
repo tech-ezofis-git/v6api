@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
@@ -6,6 +6,13 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQueryService
 {
     private const int MaxPageSize = 100;
+
+    // m.workflow_instance_id is stored as varchar(255) (see WorkflowTableCreator.
+    // GenerateLegacyMailboxTableScript), same as before -- Postgres has no TRY_CONVERT, so a
+    // safe cast to uuid is this regex-guarded CASE (same pattern as FormService.Queries.cs).
+    private const string InstanceIdGuard = "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$";
+    private static string TryCastInstanceId(string column) =>
+        $"(CASE WHEN {column} ~ '{InstanceIdGuard}' THEN {column}::uuid ELSE NULL END)";
 
     private readonly ITenantContext _tenantContext;
     private readonly IWorkflowEzfbFormDataLoader _formDataLoader;
@@ -30,12 +37,12 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var fullWorkflowKey = request.WorkflowId.ToString("N");
         var tablePrefix = request.Kind switch
         {
-            LegacyMailboxTableKind.Inbox => "Inbox",
-            LegacyMailboxTableKind.Sent => "Sent",
-            LegacyMailboxTableKind.Completed => "Completed",
+            LegacyMailboxTableKind.Inbox => "inbox",
+            LegacyMailboxTableKind.Sent => "sent",
+            LegacyMailboxTableKind.Completed => "completed",
             _ => throw new ArgumentOutOfRangeException(nameof(request.Kind))
         };
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var (tableName, tableFull, tableExists) = await ResolveMailboxTableAsync(
@@ -55,12 +62,12 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var offset = (page - 1) * pageSize;
 
         var transactionTableName = $"transaction_{suffix}";
-        var transactionTable = $"workflow.[{transactionTableName}]";
+        var transactionTable = $"workflow.{transactionTableName}";
         var transactionTableExists = await TableExistsAsync(connection, transactionTableName, cancellationToken);
         var (whereSql, parameters) = BuildUserFilter(request, transactionTable, transactionTableExists);
         var latestOnlyPerInstance = ShouldReturnLatestOnlyPerInstance(request);
 
-        var agentTable = $"agentDataValidation_{suffix}";
+        var agentTable = $"agent_data_validation_{suffix}";
         var agentJoin = await BuildAgentValidationApplyAsync(connection, agentTable, cancellationToken);
         var dataSql = BuildListSql(tableFull, whereSql, agentJoin, latestOnlyPerInstance);
 
@@ -71,7 +78,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
             return new LegacyMailboxListResult(items, -1, page, pageSize, TableExists: true);
         }
 
-        await using var countConnection = new SqlConnection(connectionString);
+        await using var countConnection = new NpgsqlConnection(connectionString);
         await countConnection.OpenAsync(cancellationToken);
 
         var countSql = BuildCountSql(tableFull, whereSql, latestOnlyPerInstance);
@@ -117,18 +124,18 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var suffix = request.WorkflowId.ToString("N")[..8];
         var fullWorkflowKey = request.WorkflowId.ToString("N");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var transactionTableName = $"transaction_{suffix}";
-        var transactionTable = $"workflow.[{transactionTableName}]";
+        var transactionTable = $"workflow.{transactionTableName}";
         var transactionTableExists = await TableExistsAsync(connection, transactionTableName, cancellationToken);
         var (inboxCount, inboxExists) = await CountMailboxTableAsync(
-            connection, "Inbox", suffix, fullWorkflowKey, request, LegacyMailboxTableKind.Inbox, transactionTable, transactionTableExists, cancellationToken);
+            connection, "inbox", suffix, fullWorkflowKey, request, LegacyMailboxTableKind.Inbox, transactionTable, transactionTableExists, cancellationToken);
         var (sentCount, sentExists) = await CountMailboxTableAsync(
-            connection, "Sent", suffix, fullWorkflowKey, request, LegacyMailboxTableKind.Sent, transactionTable, transactionTableExists, cancellationToken);
+            connection, "sent", suffix, fullWorkflowKey, request, LegacyMailboxTableKind.Sent, transactionTable, transactionTableExists, cancellationToken);
         var (completedCount, completedExists) = await CountMailboxTableAsync(
-            connection, "Completed", suffix, fullWorkflowKey, request, LegacyMailboxTableKind.Completed, transactionTable, transactionTableExists, cancellationToken);
+            connection, "completed", suffix, fullWorkflowKey, request, LegacyMailboxTableKind.Completed, transactionTable, transactionTableExists, cancellationToken);
 
         return new LegacyMailboxInstanceCountResult(
             request.WorkflowId,
@@ -141,7 +148,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
     }
 
     private static async Task<(int Count, bool TableExists)> CountMailboxTableAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tablePrefix,
         string suffix,
         string fullWorkflowKey,
@@ -158,7 +165,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
 
         var (whereSql, parameters) = BuildUserFilter(request, kind, transactionTable, transactionTableExists);
         var countSql = BuildCountSql(tableFull, whereSql, latestOnlyPerInstance: true);
-        await using var cmd = new SqlCommand(countSql, connection);
+        await using var cmd = new NpgsqlCommand(countSql, connection);
         foreach (var p in parameters)
             cmd.Parameters.Add(CloneParameter(p));
 
@@ -166,7 +173,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         return (count, true);
     }
 
-    private static (string WhereSql, List<SqlParameter> Parameters) BuildUserFilter(
+    private static (string WhereSql, List<NpgsqlParameter> Parameters) BuildUserFilter(
         LegacyMailboxInstanceCountRequest request,
         LegacyMailboxTableKind kind,
         string transactionTable,
@@ -175,7 +182,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
             request.CurrentUserId, kind, transactionTable, transactionTableExists,
             instanceId: null, transactionId: null);
 
-    private static (string WhereSql, List<SqlParameter> Parameters) BuildUserFilter(
+    private static (string WhereSql, List<NpgsqlParameter> Parameters) BuildUserFilter(
         LegacyMailboxListRequest request,
         string transactionTable,
         bool transactionTableExists) =>
@@ -187,7 +194,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
             request.InstanceId,
             request.TransactionId);
 
-    private static (string WhereSql, List<SqlParameter> Parameters) BuildUserFilterCore(
+    private static (string WhereSql, List<NpgsqlParameter> Parameters) BuildUserFilterCore(
         Guid currentUserId,
         LegacyMailboxTableKind kind,
         string transactionTable,
@@ -197,7 +204,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
     {
         var userId = currentUserId.ToString("D");
         var whereParts = new List<string>();
-        var parameters = new List<SqlParameter>
+        var parameters = new List<NpgsqlParameter>
         {
             new("@CurrentUserId", userId),
             new("@CurrentUserGuid", currentUserId)
@@ -207,7 +214,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         {
             if (transactionTableExists)
             {
-                // Narrow mailbox rows first (index on userId), then open transaction exists.
+                // Narrow mailbox rows first (index on user_id), then open transaction exists.
                 whereParts.Add(BuildMailboxUserMatchSql("m"));
                 whereParts.AddRange(BuildInboxOpenTransactionFilter(transactionTable));
             }
@@ -223,14 +230,14 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
 
         if (instanceId is Guid instanceGuid && instanceGuid != Guid.Empty)
         {
-            whereParts.Add("m.workflowInstanceId = @InstanceId");
-            parameters.Add(new SqlParameter("@InstanceId", instanceGuid.ToString("D")));
+            whereParts.Add("m.workflow_instance_id = @InstanceId");
+            parameters.Add(new NpgsqlParameter("@InstanceId", instanceGuid.ToString("D")));
         }
 
         if (!string.IsNullOrWhiteSpace(transactionId))
         {
-            whereParts.Add("m.transactionId = @TransactionId");
-            parameters.Add(new SqlParameter("@TransactionId", transactionId.Trim()));
+            whereParts.Add("m.transaction_id = @TransactionId");
+            parameters.Add(new NpgsqlParameter("@TransactionId", transactionId.Trim()));
         }
 
         return (string.Join(" AND ", whereParts), parameters);
@@ -239,16 +246,16 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
     /// <summary>Assignee, creator, or group member — matches legacy inboxList visibility.</summary>
     private static string BuildMailboxUserMatchSql(string alias) => $"""
 (
-    {alias}.userId = @CurrentUserId
-    OR {alias}.transaction_createdBy = @CurrentUserId
+    {alias}.user_id = @CurrentUserId
+    OR {alias}.transaction_created_by = @CurrentUserId
     OR (
-        {alias}.groupId IS NOT NULL
+        {alias}.group_id IS NOT NULL
         AND EXISTS (
             SELECT 1
-            FROM workflow.groupUser gu
-            WHERE gu.GroupId = {alias}.groupId
-              AND gu.UserId = @CurrentUserGuid
-              AND gu.IsDeleted = 0
+            FROM workflow."groupUser" gu
+            WHERE gu."GroupId" = {alias}.group_id
+              AND gu."UserId" = @CurrentUserGuid
+              AND gu."IsDeleted" = false
         )
     )
 )
@@ -256,34 +263,34 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
 
     private static string BuildTransactionParticipantMatchSql(string alias) => $"""
 (
-    {alias}.ActivityUserId = @CurrentUserGuid
-    OR {alias}.CreatedBy = @CurrentUserGuid
-    OR {alias}.ModifiedBy = @CurrentUserGuid
+    {alias}.activity_user_id = @CurrentUserGuid
+    OR {alias}.created_by = @CurrentUserGuid
+    OR {alias}.modified_by = @CurrentUserGuid
     OR (
-        {alias}.ActivityGroupId IS NOT NULL
+        {alias}.activity_group_id IS NOT NULL
         AND EXISTS (
             SELECT 1
-            FROM workflow.groupUser gu
-            WHERE gu.GroupId = {alias}.ActivityGroupId
-              AND gu.UserId = @CurrentUserGuid
-              AND gu.IsDeleted = 0
+            FROM workflow."groupUser" gu
+            WHERE gu."GroupId" = {alias}.activity_group_id
+              AND gu."UserId" = @CurrentUserGuid
+              AND gu."IsDeleted" = false
         )
     )
 )
 """;
 
-    /// <summary>Inbox = open transaction (ActionStatus 0) for this instance and user.</summary>
+    /// <summary>Inbox = open transaction (action_status 0) for this instance and user.</summary>
     private static IEnumerable<string> BuildInboxOpenTransactionFilter(string transactionTable)
     {
-        const string instanceJoin = "TRY_CONVERT(UNIQUEIDENTIFIER, m.workflowInstanceId) = tx.WorkflowInstanceId";
+        var instanceJoin = $"{TryCastInstanceId("m.workflow_instance_id")} = tx.workflow_instance_id";
         var participantMatch = BuildTransactionParticipantMatchSql("tx");
         yield return $"""
 EXISTS (
     SELECT 1
     FROM {transactionTable} tx
-    WHERE tx.IsDeleted = 0
-      AND tx.ActionStatus = 0
-      AND UPPER(LTRIM(RTRIM(ISNULL(tx.StageType, N'')))) <> N'END'
+    WHERE tx.is_deleted = false
+      AND tx.action_status = 0
+      AND UPPER(TRIM(COALESCE(tx.stage_type, ''))) <> 'END'
       AND {instanceJoin}
       AND {participantMatch}
 )
@@ -293,35 +300,35 @@ EXISTS (
     /// <summary>Hide sent rows when the current user still has the same instance in inbox (self-assign).</summary>
     private static string BuildSentExcludeOpenInboxForCurrentUserFilter(string transactionTable)
     {
-        const string instanceJoin = "TRY_CONVERT(UNIQUEIDENTIFIER, m.workflowInstanceId) = tx_open.WorkflowInstanceId";
+        var instanceJoin = $"{TryCastInstanceId("m.workflow_instance_id")} = tx_open.workflow_instance_id";
         var assigneeMatch = BuildTransactionParticipantMatchSql("tx_open");
         return $"""
 NOT EXISTS (
     SELECT 1
     FROM {transactionTable} tx_open
-    WHERE tx_open.IsDeleted = 0
-      AND tx_open.ActionStatus = 0
-      AND UPPER(LTRIM(RTRIM(ISNULL(tx_open.StageType, N'')))) <> N'END'
+    WHERE tx_open.is_deleted = false
+      AND tx_open.action_status = 0
+      AND UPPER(TRIM(COALESCE(tx_open.stage_type, ''))) <> 'END'
       AND {instanceJoin}
       AND {assigneeMatch}
 )
 """;
     }
 
-    /// <summary>Sent: ActionStatus 1. Completed: END stage.</summary>
+    /// <summary>Sent: action_status 1. Completed: END stage.</summary>
     private static IEnumerable<string> BuildTransactionStateFilter(
         LegacyMailboxTableKind kind,
         string transactionTable)
     {
-        const string instanceJoin = "TRY_CONVERT(UNIQUEIDENTIFIER, m.workflowInstanceId) = tx.WorkflowInstanceId";
+        var instanceJoin = $"{TryCastInstanceId("m.workflow_instance_id")} = tx.workflow_instance_id";
         var participantMatch = BuildTransactionParticipantMatchSql("tx");
         var workflowCompleted = $"""
 NOT EXISTS (
     SELECT 1
     FROM {transactionTable} tx_end
-    WHERE tx_end.IsDeleted = 0
-      AND tx_end.WorkflowInstanceId = TRY_CONVERT(UNIQUEIDENTIFIER, m.workflowInstanceId)
-      AND UPPER(LTRIM(RTRIM(ISNULL(tx_end.StageType, N'')))) = N'END'
+    WHERE tx_end.is_deleted = false
+      AND tx_end.workflow_instance_id = {TryCastInstanceId("m.workflow_instance_id")}
+      AND UPPER(TRIM(COALESCE(tx_end.stage_type, ''))) = 'END'
 )
 """;
 
@@ -333,9 +340,9 @@ NOT EXISTS (
 EXISTS (
     SELECT 1
     FROM {transactionTable} tx
-    WHERE tx.IsDeleted = 0
-      AND tx.ActionStatus = 1
-      AND UPPER(LTRIM(RTRIM(ISNULL(tx.StageType, N'')))) <> N'END'
+    WHERE tx.is_deleted = false
+      AND tx.action_status = 1
+      AND UPPER(TRIM(COALESCE(tx.stage_type, ''))) <> 'END'
       AND {instanceJoin}
       AND {participantMatch}
 )
@@ -348,8 +355,8 @@ EXISTS (
 EXISTS (
     SELECT 1
     FROM {transactionTable} tx
-    WHERE tx.IsDeleted = 0
-      AND UPPER(LTRIM(RTRIM(ISNULL(tx.StageType, N'')))) = N'END'
+    WHERE tx.is_deleted = false
+      AND UPPER(TRIM(COALESCE(tx.stage_type, ''))) = 'END'
       AND {instanceJoin}
 )
 """;
@@ -371,8 +378,8 @@ SELECT COUNT(*)
 FROM (
     SELECT
         ROW_NUMBER() OVER (
-            PARTITION BY m.workflowInstanceId
-            ORDER BY m.transaction_createdAt DESC, m.id DESC) AS mailbox_rn
+            PARTITION BY m.workflow_instance_id
+            ORDER BY m.transaction_created_at DESC, m.id DESC) AS mailbox_rn
     FROM {tableFull} m
     WHERE {whereSql}
 ) ranked
@@ -382,18 +389,18 @@ WHERE ranked.mailbox_rn = 1;";
     private static string BuildListSql(string tableFull, string whereSql, string agentJoin, bool latestOnlyPerInstance)
     {
         const string selectColumns = """
-    m.id, m.userId, m.groupId, m.workflowId, m.name, m.workflowInstanceId, m.referenceNumber, m.createdAtUtc, m.startedAtUtc, m.completedAtUtc, m.context,
-    m.transactionId, m.activityId, m.ruleId, m.stageType, m.stage, m.review,
-    m.transaction_createdAt, m.transaction_createdBy, m.transaction_createdByEmail,
-    m.transaction_modifiedAt, m.transaction_modifiedBy,
-    m.repositoryId, m.itemId, m.formId, m.formEntryId, m.formData,
-    m.mlPrediction, m.mlCondition, m.userType, m.createdByName,
-    m.lastActionStageType, m.lastActionStageName, m.lastAction,
-    m.commentsCount, m.attachmentCount, m.activityUserEmail, m.activityGroupName,
-    av.AgentValidationWorkflowId,
-    ISNULL(av.AgentResponse, N'') AS AgentResponse,
-    ISNULL(av.AgentHtmlResponse, N'') AS AgentHtml,
-    ISNULL(m.[action], 1) AS [action]
+    m.id, m.user_id, m.group_id, m.workflow_id, m.name, m.workflow_instance_id, m.reference_number, m.created_at_utc, m.started_at_utc, m.completed_at_utc, m.context,
+    m.transaction_id, m.activity_id, m.rule_id, m.stage_type, m.stage, m.review,
+    m.transaction_created_at, m.transaction_created_by, m.transaction_created_by_email,
+    m.transaction_modified_at, m.transaction_modified_by,
+    m.repository_id, m.item_id, m.form_id, m.form_entry_id, m.form_data,
+    m.ml_prediction, m.ml_condition, m.user_type, m.created_by_name,
+    m.last_action_stage_type, m.last_action_stage_name, m.last_action,
+    m.comments_count, m.attachment_count, m.activity_user_email, m.activity_group_name,
+    av.agent_validation_workflow_id,
+    COALESCE(av.agent_response, '') AS agent_response,
+    COALESCE(av.agent_html_response, '') AS agent_html,
+    COALESCE(m."action", 1) AS action
 """;
 
         if (!latestOnlyPerInstance)
@@ -404,7 +411,7 @@ SELECT
 FROM {tableFull} m
 {agentJoin}
 WHERE {whereSql}
-ORDER BY m.transaction_createdAt DESC, m.id DESC
+ORDER BY m.transaction_created_at DESC, m.id DESC
 OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY;";
         }
 
@@ -413,8 +420,8 @@ WITH mailbox_ranked AS (
     SELECT
         m.*,
         ROW_NUMBER() OVER (
-            PARTITION BY m.workflowInstanceId
-            ORDER BY m.transaction_createdAt DESC, m.id DESC) AS mailbox_rn
+            PARTITION BY m.workflow_instance_id
+            ORDER BY m.transaction_created_at DESC, m.id DESC) AS mailbox_rn
     FROM {tableFull} m
     WHERE {whereSql}
 ),
@@ -422,38 +429,38 @@ page_rows AS (
     SELECT m.*
     FROM mailbox_ranked m
     WHERE m.mailbox_rn = 1
-    ORDER BY m.transaction_createdAt DESC, m.id DESC
+    ORDER BY m.transaction_created_at DESC, m.id DESC
     OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
 )
 SELECT
 {selectColumns}
 FROM page_rows m
 {agentJoin}
-ORDER BY m.transaction_createdAt DESC, m.id DESC;";
+ORDER BY m.transaction_created_at DESC, m.id DESC;";
     }
 
     private static async Task<int> ExecuteCountAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string countSql,
-        List<SqlParameter> parameters,
+        List<NpgsqlParameter> parameters,
         CancellationToken cancellationToken)
     {
-        await using var countCmd = new SqlCommand(countSql, connection) { CommandTimeout = 120 };
+        await using var countCmd = new NpgsqlCommand(countSql, connection) { CommandTimeout = 120 };
         foreach (var p in parameters)
             countCmd.Parameters.Add(CloneParameter(p));
         return Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
     }
 
     private static async Task<List<LegacyMailboxRowDto>> ReadListPageAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string dataSql,
-        List<SqlParameter> parameters,
+        List<NpgsqlParameter> parameters,
         int offset,
         int pageSize,
         CancellationToken cancellationToken)
     {
         var items = new List<LegacyMailboxRowDto>();
-        await using var cmd = new SqlCommand(dataSql, connection) { CommandTimeout = 120 };
+        await using var cmd = new NpgsqlCommand(dataSql, connection) { CommandTimeout = 120 };
         foreach (var p in parameters)
             cmd.Parameters.Add(CloneParameter(p));
         cmd.Parameters.AddWithValue("@Offset", offset);
@@ -465,7 +472,7 @@ ORDER BY m.transaction_createdAt DESC, m.id DESC;";
     }
 
     private static async Task<(string TableName, string TableFull, bool Exists)> ResolveMailboxTableAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tablePrefix,
         string suffix,
         string fullWorkflowKey,
@@ -473,35 +480,35 @@ ORDER BY m.transaction_createdAt DESC, m.id DESC;";
     {
         var tableName = $"{tablePrefix}_{suffix}";
         if (await TableExistsAsync(connection, tableName, cancellationToken))
-            return (tableName, $"workflow.[{tableName}]", true);
+            return (tableName, $"workflow.{tableName}", true);
 
         var legacyTableName = $"{tablePrefix}_{fullWorkflowKey}";
         if (!string.Equals(legacyTableName, tableName, StringComparison.Ordinal)
             && await TableExistsAsync(connection, legacyTableName, cancellationToken))
-            return (legacyTableName, $"workflow.[{legacyTableName}]", true);
+            return (legacyTableName, $"workflow.{legacyTableName}", true);
 
-        return (tableName, $"workflow.[{tableName}]", false);
+        return (tableName, $"workflow.{tableName}", false);
     }
 
-    private static SqlParameter CloneParameter(SqlParameter p) =>
-        new(p.ParameterName, p.Value ?? DBNull.Value) { SqlDbType = p.SqlDbType };
+    private static NpgsqlParameter CloneParameter(NpgsqlParameter p) =>
+        new(p.ParameterName, p.Value ?? DBNull.Value) { NpgsqlDbType = p.NpgsqlDbType };
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT COUNT(*)
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = 'workflow' AND TABLE_NAME = @TableName
+            FROM information_schema.tables
+            WHERE table_schema = 'workflow' AND table_name = @TableName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
-    private static LegacyMailboxRowDto MapRow(SqlDataReader reader) =>
+    private static LegacyMailboxRowDto MapRow(NpgsqlDataReader reader) =>
         new(
             Id: reader.GetInt32(0),
             UserId: reader.IsDBNull(1) ? null : reader.GetString(1),
@@ -547,32 +554,33 @@ ORDER BY m.transaction_createdAt DESC, m.id DESC;";
             Action: reader.FieldCount > 41 && !reader.IsDBNull(41) ? reader.GetInt32(41) : 1);
 
     private static async Task<string> BuildAgentValidationApplyAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string agentTableName,
         CancellationToken cancellationToken)
     {
         if (!await TableExistsAsync(connection, agentTableName, cancellationToken))
         {
             return """
-OUTER APPLY (
+LEFT JOIN LATERAL (
     SELECT
-        CAST(NULL AS NVARCHAR(36)) AS AgentValidationWorkflowId,
-        CAST(NULL AS NVARCHAR(MAX)) AS AgentResponse,
-        CAST(NULL AS NVARCHAR(MAX)) AS AgentHtmlResponse
-) av
+        NULL::text AS agent_validation_workflow_id,
+        NULL::text AS agent_response,
+        NULL::text AS agent_html_response
+) av ON true
 """;
         }
 
         return $@"
-OUTER APPLY (
-    SELECT TOP 1
-        CONVERT(NVARCHAR(36), a.WorkflowId) AS AgentValidationWorkflowId,
-        a.AgentResponse,
-        a.AgentHtmlResponse
-    FROM workflow.[{agentTableName}] a
-    WHERE a.IsDeleted = 0
-      AND a.ProcessId = TRY_CONVERT(UNIQUEIDENTIFIER, m.workflowInstanceId)
-    ORDER BY a.CreatedAt DESC, a.Id DESC
-) av";
+LEFT JOIN LATERAL (
+    SELECT
+        a.workflow_id::text AS agent_validation_workflow_id,
+        a.agent_response,
+        a.agent_html_response
+    FROM workflow.{agentTableName} a
+    WHERE a.is_deleted = false
+      AND a.process_id = {TryCastInstanceId("m.workflow_instance_id")}
+    ORDER BY a.created_at DESC, a.id DESC
+    LIMIT 1
+) av ON true";
     }
 }

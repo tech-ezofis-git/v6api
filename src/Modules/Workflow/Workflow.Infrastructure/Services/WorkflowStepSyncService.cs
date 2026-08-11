@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Workflows;
@@ -104,8 +104,8 @@ public sealed class WorkflowStepSyncService : IWorkflowStepSyncService
             return;
 
         var suffix = workflowId.ToString("N")[..8];
-        var stepInstancesTable = $"workflow.WorkflowStepInstances_{suffix}";
-        if (!await TableExistsAsync(connectionString, stepInstancesTable, cancellationToken))
+        var stepInstancesTable = $"workflow.workflow_step_instances_{suffix}";
+        if (!await TableExistsAsync(connectionString, $"workflow_step_instances_{suffix}", cancellationToken))
             return;
 
         var definitionSteps = await _context.WorkflowSteps
@@ -117,16 +117,17 @@ public sealed class WorkflowStepSyncService : IWorkflowStepSyncService
         if (definitionSteps.Count == 0)
             return;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        const string instanceIdsSql = @"
-SELECT InstanceId
-FROM workflow.WorkflowInstanceLookup
-WHERE WorkflowId = @WorkflowId AND Status IN (0, 1) AND IsArchived = 0";
+        const string instanceIdsSql = """
+            SELECT "InstanceId"
+            FROM workflow."WorkflowInstanceLookup"
+            WHERE "WorkflowId" = @WorkflowId AND "Status" IN (0, 1) AND "IsArchived" = false;
+            """;
 
         var instanceIds = new List<Guid>();
-        await using (var listCmd = new SqlCommand(instanceIdsSql, connection))
+        await using (var listCmd = new NpgsqlCommand(instanceIdsSql, connection))
         {
             listCmd.Parameters.AddWithValue("@WorkflowId", workflowId);
             await using var reader = await listCmd.ExecuteReaderAsync(cancellationToken);
@@ -137,29 +138,29 @@ WHERE WorkflowId = @WorkflowId AND Status IN (0, 1) AND IsArchived = 0";
         foreach (var instanceId in instanceIds)
         {
             var updateSql = $@"
-;WITH def AS (
-    SELECT Id, Name, [Order], ActivityId, StageType, AssignedToUserId
-    FROM workflow.WorkflowSteps
-    WHERE WorkflowId = @WorkflowId
+WITH def AS (
+    SELECT ""Id"", ""Name"", ""Order"", ""ActivityId"", ""StageType"", ""AssignedToUserId""
+    FROM workflow.""WorkflowSteps""
+    WHERE ""WorkflowId"" = @WorkflowId
 ),
 inst AS (
-    SELECT Id, [Order]
+    SELECT id, ""order""
     FROM {stepInstancesTable}
-    WHERE WorkflowInstanceId = @InstanceId
+    WHERE workflow_instance_id = @InstanceId
 )
-UPDATE si SET
-    si.WorkflowStepId = d.Id,
-    si.StepName = d.Name,
-    si.ActivityId = d.ActivityId,
-    si.StageType = d.StageType,
-    si.AssignedToUserId = d.AssignedToUserId
-FROM {stepInstancesTable} si
-INNER JOIN inst i ON i.Id = si.Id
-INNER JOIN def d ON d.[Order] = i.[Order]
-WHERE si.WorkflowInstanceId = @InstanceId
-  AND (SELECT COUNT(*) FROM def) = (SELECT COUNT(*) FROM inst)";
+UPDATE {stepInstancesTable} si SET
+    workflow_step_id = d.""Id"",
+    step_name = d.""Name"",
+    activity_id = d.""ActivityId"",
+    stage_type = d.""StageType"",
+    assigned_to_user_id = d.""AssignedToUserId""
+FROM inst i
+INNER JOIN def d ON d.""Order"" = i.""order""
+WHERE si.id = i.id
+  AND si.workflow_instance_id = @InstanceId
+  AND (SELECT COUNT(*) FROM def) = (SELECT COUNT(*) FROM inst);";
 
-            await using var cmd = new SqlCommand(updateSql, connection);
+            await using var cmd = new NpgsqlCommand(updateSql, connection);
             cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
             cmd.Parameters.AddWithValue("@InstanceId", instanceId);
             var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -181,14 +182,14 @@ WHERE si.WorkflowInstanceId = @InstanceId
     {
         var schema = "workflow";
         var name = tableName.Replace("workflow.", "", StringComparison.OrdinalIgnoreCase);
-        const string sql = @"
-SELECT 1 FROM sys.tables t
-INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-WHERE s.name = @Schema AND t.name = @Name";
+        const string sql = """
+            SELECT 1 FROM information_schema.tables
+            WHERE table_schema = @Schema AND table_name = @Name;
+            """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Schema", schema);
         cmd.Parameters.AddWithValue("@Name", name);
         return await cmd.ExecuteScalarAsync(cancellationToken) != null;
@@ -205,38 +206,30 @@ WHERE s.name = @Schema AND t.name = @Name";
             SaaSApp.Workflow.Application.Workflows.WorkflowJsonSerializerOptions.Deserialize);
     }
 
+    /// <summary>
+    /// PHASE 4: Phase 3's static Postgres scripts (CreateWorkflowSchemaComplete.sql +
+    /// AddWorkflowStepsActivityIdReview.sql / AddWorkflowStepsStageType.sql /
+    /// Alter-WorkflowSteps-AddActionsJson.sql) already guarantee ActivityId/StageType/ActionsJson
+    /// exist on workflow."WorkflowSteps" for every tenant DB provisioned from these scripts, so
+    /// there is no cross-install drift to detect here the way SQL Server had. Kept as a cheap
+    /// idempotent no-op safety net (ALTER TABLE IF EXISTS ... ADD COLUMN IF NOT EXISTS) rather
+    /// than dropped outright, since it costs nothing and guards against a script being skipped.
+    /// </summary>
     private async Task EnsureWorkflowStepsColumnsAsync(CancellationToken cancellationToken)
     {
         var connectionString = _tenantContext.ConnectionString;
         if (string.IsNullOrWhiteSpace(connectionString))
             return;
 
-        const string sql = @"
-IF OBJECT_ID(N'workflow.WorkflowSteps', N'U') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.columns
-    WHERE object_id = OBJECT_ID(N'workflow.WorkflowSteps') AND name = N'StageType')
-BEGIN
-    ALTER TABLE workflow.WorkflowSteps ADD StageType NVARCHAR(64) NULL;
-END
-IF OBJECT_ID(N'workflow.WorkflowSteps', N'U') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.columns
-    WHERE object_id = OBJECT_ID(N'workflow.WorkflowSteps') AND name = N'ActivityId')
-BEGIN
-    ALTER TABLE workflow.WorkflowSteps ADD ActivityId NVARCHAR(128) NULL;
-END
-IF OBJECT_ID(N'workflow.WorkflowSteps', N'U') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.columns
-    WHERE object_id = OBJECT_ID(N'workflow.WorkflowSteps') AND name = N'ActionsJson')
-BEGIN
-    ALTER TABLE workflow.WorkflowSteps ADD ActionsJson NVARCHAR(MAX) NULL;
-END";
+        const string sql = """
+            ALTER TABLE IF EXISTS workflow."WorkflowSteps" ADD COLUMN IF NOT EXISTS "StageType" varchar(64) NULL;
+            ALTER TABLE IF EXISTS workflow."WorkflowSteps" ADD COLUMN IF NOT EXISTS "ActivityId" varchar(128) NULL;
+            ALTER TABLE IF EXISTS workflow."WorkflowSteps" ADD COLUMN IF NOT EXISTS "ActionsJson" text NULL;
+            """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 

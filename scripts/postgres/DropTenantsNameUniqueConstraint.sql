@@ -1,0 +1,8 @@
+-- Drop unique organization/tenant name constraint -- Postgres
+-- Ported from scripts/DropTenantsNameUniqueConstraint.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL SCRIPT. catalog.Tenants is 100% EF-managed on Postgres
+-- (Phase 2) -- checked CatalogDbContext.cs's Fluent config for Tenant: it has no
+-- .HasIndex(e => e.Name) at all, unique or otherwise. `dotnet ef database update`
+-- never creates a unique constraint on Tenants.Name to begin with, so there is nothing
+-- for this DROP script to remove on a Postgres-provisioned catalog database.

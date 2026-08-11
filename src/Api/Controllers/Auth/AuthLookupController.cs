@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Catalog.Persistence;
 
 namespace SaaSApp.Api.Controllers.Auth;
@@ -12,8 +12,6 @@ namespace SaaSApp.Api.Controllers.Auth;
 [AllowAnonymous]
 public sealed class AuthLookupController : ControllerBase
 {
-    private const int SqlErrorInvalidObjectName = 208;
-
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
 
     public AuthLookupController(IDbContextFactory<CatalogDbContext> catalogFactory)
@@ -49,7 +47,7 @@ public sealed class AuthLookupController : ControllerBase
                 items,
                 RequiresOrgSelection: items.Count > 1));
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             return Ok(new TenantLookupResponse(Array.Empty<TenantLookupItem>(), RequiresOrgSelection: false));
         }
@@ -104,7 +102,7 @@ public sealed class AuthLookupController : ControllerBase
 
             return Ok(new TenantEmailListResponse(tenantId, emails));
         }
-        catch (SqlException ex) when (ex.Number == SqlErrorInvalidObjectName)
+        catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             return Ok(new TenantEmailListResponse(tenantId, Array.Empty<TenantEmailItem>()));
         }

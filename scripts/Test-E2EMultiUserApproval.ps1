@@ -40,7 +40,7 @@ function Invoke-Api {
     $h = $headers.Clone()
     if ($ExtraHeaders) { $ExtraHeaders.GetEnumerator() | ForEach-Object { $h[$_.Key] = $_.Value } }
     $params = @{ Method = $Method; Uri = $Uri; Headers = $h; UseBasicParsing = $true }
-    if ($Body) { $params.Body = ($Body | ConvertTo-Json) }
+    if ($Body) { $params.Body = ($Body | ConvertTo-Json -Depth 10) }
     return Invoke-RestMethod @params
 }
 
@@ -122,6 +122,14 @@ $userId = $currentUser.id; if (-not $userId) { $userId = $currentUser.Id }
 Write-Host "  OK: UserId = $userId" -ForegroundColor Green
 }
 
+# Step 3.5: Create a minimal form (workflow start requires InitiateUsing.FormId -- see Test-E2EWorkflow.ps1 for detail).
+if ($StartFromStep -eq 0 -or $StartFromStep -ge 4) {
+Write-Host "`nStep 3.5: Create form (for workflow InitiateUsing.FormId)..." -ForegroundColor Cyan
+$formId = Invoke-Api -Method POST -Uri "$BaseUrl/api/form" -Body @{ formJson = @{ name = "Approval Test Form" } } -ExtraHeaders $authHeaders
+$formId = $formId -replace '"', ''
+Write-Host "  OK: Form $formId created" -ForegroundColor Green
+}
+
 # Step 4: Create workflow
 if ($StartFromStep -eq 0 -or $StartFromStep -ge 4) {
 Write-Host "`nStep 4: Create Approval Policy Test workflow..." -ForegroundColor Cyan
@@ -129,6 +137,13 @@ $createBody = @{
     name        = "Approval Policy Test"
     description = "Tests AnyOneApprove vs AllMustApprove"
     triggerType = 0
+    workflowJson = @{
+        settings = @{
+            general = @{
+                initiateUsing = @{ type = "FORM"; formId = $formId }
+            }
+        }
+    }
 }
 $create = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows" -Body $createBody -ExtraHeaders $authHeaders
 $workflowId = $create.workflowId; if (-not $workflowId) { $workflowId = $create.WorkflowId }
@@ -147,8 +162,12 @@ $steps = @(
     @{ name = "AllMust Approval"; stepType = 1; order = 3; description = "Both must approve"; isRequired = $true; approvalPolicy = 0; approversJson = $approversJson }
     @{ name = "Final"; stepType = 0; order = 4; description = "Final step"; isRequired = $true }
 )
+$stepIdsByOrder = @{}
 foreach ($s in $steps) {
-    Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/steps" -Body $s -ExtraHeaders $authHeaders | Out-Null
+    $stepResp = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/steps" -Body $s -ExtraHeaders $authHeaders
+    $stepId = $stepResp.stepId; if (-not $stepId) { $stepId = $stepResp.StepId }
+    if (-not $stepId) { $stepId = $stepResp.id }
+    $stepIdsByOrder[$s.order] = $stepId
 }
 Write-Host "  OK: Added Submit, AnyOne Approval, AllMust Approval, Final" -ForegroundColor Green
 }
@@ -161,7 +180,7 @@ Write-Host "  OK: Published" -ForegroundColor Green
 
 # Step 7: Start instance
 Write-Host "`nStep 7: Start workflow instance..." -ForegroundColor Cyan
-$start = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/start" -Body @{ context = "{}" } -ExtraHeaders $authHeaders
+$start = Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/$workflowId/start/json" -Body @{ context = "{}" } -ExtraHeaders $authHeaders
 $instanceId = $start.instanceId; if (-not $instanceId) { $instanceId = $start.InstanceId }
 Write-Host "  OK: Instance $instanceId started" -ForegroundColor Green
 }
@@ -169,7 +188,8 @@ Write-Host "  OK: Instance $instanceId started" -ForegroundColor Green
 # Step 8: Move past Submit (step 1)
 if ($StartFromStep -eq 0 -or $StartFromStep -ge 8) {
 Write-Host "`nStep 8: MoveToNext (Submit -> AnyOne Approval)..." -ForegroundColor Cyan
-Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ comments = "Submitted" } -ExtraHeaders $authHeaders | Out-Null
+# review must be non-empty for move-next to actually complete-and-advance the step (see Test-E2EWorkflow.ps1 for detail).
+Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ activityid = $stepIdsByOrder[1]; review = "Reviewed"; comments = "Submitted" } -ExtraHeaders $authHeaders | Out-Null
 Write-Host "  OK: At AnyOne Approval step" -ForegroundColor Green
 }
 
@@ -226,7 +246,7 @@ if ($approveResp2.message -match "moved to" -or $approveResp2.message -match "co
 # Step 12: Move past Final (complete workflow)
 if ($StartFromStep -eq 0 -or $StartFromStep -ge 12) {
 Write-Host "`nStep 12: MoveToNext (Final -> complete)..." -ForegroundColor Cyan
-Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ comments = "Done" } -ExtraHeaders $authHeaders | Out-Null
+Invoke-Api -Method POST -Uri "$BaseUrl/api/Workflows/instances/$instanceId/move-next" -Body @{ activityid = $stepIdsByOrder[4]; review = "Reviewed"; comments = "Done" } -ExtraHeaders $authHeaders | Out-Null
 Write-Host "  OK: Workflow completed" -ForegroundColor Green
 }
 

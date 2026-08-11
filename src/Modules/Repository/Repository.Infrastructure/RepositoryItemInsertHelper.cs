@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure;
@@ -15,7 +15,7 @@ internal static class RepositoryItemInsertHelper
     ];
 
     public static async Task InsertItemAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
         Guid repositoryId,
@@ -34,16 +34,18 @@ internal static class RepositoryItemInsertHelper
 
         var columns = new List<string>();
         var values = new List<string>();
-        var parameters = new List<SqlParameter>();
+        var parameters = new List<NpgsqlParameter>();
+        var usedColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         void AddIfExists(string column, string param, object? value)
         {
             if (!RepositoryItemTableColumns.Has(tableColumns, column))
                 return;
 
-            columns.Add($"[{column}]");
+            columns.Add(RepositorySqlHelper.ColumnRef(column));
             values.Add(param);
-            parameters.Add(new SqlParameter(param, value ?? DBNull.Value));
+            parameters.Add(new NpgsqlParameter(param, value ?? DBNull.Value));
+            usedColumns.Add(column);
         }
 
         AddIfExists("Id", "@Id", itemId);
@@ -60,10 +62,6 @@ internal static class RepositoryItemInsertHelper
         foreach (var (column, getValue) in OptionalCoreColumns)
             AddIfExists(column, $"@{column}", getValue(request));
 
-        var usedColumns = new HashSet<string>(
-            columns.Select(c => c.Trim('[', ']')),
-            StringComparer.OrdinalIgnoreCase);
-
         var extraIndex = 0;
         foreach (var (key, value) in fieldValues)
         {
@@ -78,16 +76,20 @@ internal static class RepositoryItemInsertHelper
                 continue;
 
             var param = $"@F{extraIndex++}";
-            columns.Add($"[{column}]");
+            columns.Add(RepositorySqlHelper.PhysicalColumnRef(column));
             values.Add(param);
-            parameters.Add(new SqlParameter(param, value));
+            // Coerce to the field's declared type (Number/Date/Boolean/etc.) before binding -- a plain
+            // string parameter always binds as `text`, and Postgres won't implicitly cast that into a
+            // typed column the way SQL Server would (see RepositoryFieldValueCoercion for detail).
+            var coerced = RepositoryFieldValueCoercion.TryCoerce(repo.Fields, column, value) ?? value;
+            parameters.Add(RepositoryFieldValueCoercion.CreateParameter(param, coerced));
         }
 
         if (columns.Count == 0)
             throw new InvalidOperationException("No insertable columns resolved for repository item.");
 
         var sql = $"INSERT INTO {table} ({string.Join(", ", columns)}) VALUES ({string.Join(", ", values)});";
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         foreach (var p in parameters)
             cmd.Parameters.Add(p);
         await cmd.ExecuteNonQueryAsync(cancellationToken);

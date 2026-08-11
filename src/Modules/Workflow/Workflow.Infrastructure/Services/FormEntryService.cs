@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Forms;
@@ -56,7 +56,7 @@ public sealed class FormEntryService : IFormEntryService
         var userId = _currentUserProvider.GetUserId()
             ?? throw new InvalidOperationException("Authenticated user is required.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var formMeta = await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken);
@@ -72,7 +72,7 @@ public sealed class FormEntryService : IFormEntryService
         if (ezfbColumns.Count == 0)
             return Failed("form entry table has no columns");
 
-        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
+        var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
         var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
         var resolvedFields = ResolveFieldColumns(fieldMap, controls, ezfbColumns);
         if (resolvedFields.Count == 0)
@@ -148,7 +148,7 @@ public sealed class FormEntryService : IFormEntryService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
@@ -203,7 +203,7 @@ public sealed class FormEntryService : IFormEntryService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken) == null)
@@ -229,9 +229,9 @@ public sealed class FormEntryService : IFormEntryService
 
         var whereParts = new List<string>
         {
-            includeDeleted ? "(isDeleted = 1)" : "(isDeleted = 0 OR isDeleted IS NULL)"
+            includeDeleted ? "(is_deleted = true)" : "(is_deleted = false OR is_deleted IS NULL)"
         };
-        var parameters = new List<SqlParameter>();
+        var parameters = new List<NpgsqlParameter>();
 
         foreach (var filter in (request.FilterBy ?? new List<FormAllFilterGroup>())
                      .SelectMany(g => g.Filters ?? new List<FormAllFilter>()))
@@ -245,13 +245,13 @@ public sealed class FormEntryService : IFormEntryService
         }
 
         var whereSql = string.Join(" AND ", whereParts);
-        var countSql = $"SELECT COUNT(1) FROM dbo.[{tableName}] WHERE {whereSql};";
+        var countSql = $"""SELECT COUNT(1) FROM dbo.{tableName} WHERE {whereSql};""";
         var selectColumns = ezfbColumns
-            .Select(c => $"[{EscapeColumn(c)}]")
+            .Select(c => $"\"{EscapeColumn(c)}\"")
             .ToList();
         var selectSql = $"""
             SELECT {string.Join(", ", selectColumns)}
-            FROM dbo.[{tableName}]
+            FROM dbo.{tableName}
             WHERE {whereSql}
             ORDER BY {sortColumn} {sortOrder}
             OFFSET @Skip ROWS
@@ -259,16 +259,18 @@ public sealed class FormEntryService : IFormEntryService
             """;
 
         int totalItems;
-        await using (var countCmd = new SqlCommand(countSql, connection))
+        await using (var countCmd = new NpgsqlCommand(countSql, connection))
         {
-            countCmd.Parameters.AddRange(parameters.Select(p => new SqlParameter(p.ParameterName, p.Value)).ToArray());
+            foreach (var p in parameters)
+                countCmd.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
             totalItems = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
         }
 
         var entries = new List<Dictionary<string, object?>>();
-        await using (var listCmd = new SqlCommand(selectSql, connection))
+        await using (var listCmd = new NpgsqlCommand(selectSql, connection))
         {
-            listCmd.Parameters.AddRange(parameters.ToArray());
+            foreach (var p in parameters)
+                listCmd.Parameters.Add(p);
             listCmd.Parameters.AddWithValue("@Skip", Math.Max(skip, 0));
             listCmd.Parameters.AddWithValue("@Take", pageSize == 0 ? Math.Max(totalItems, 1) : pageSize);
             await using var reader = await listCmd.ExecuteReaderAsync(cancellationToken);
@@ -289,7 +291,7 @@ public sealed class FormEntryService : IFormEntryService
         {
             for (var i = 0; i < entries.Count; i++)
             {
-                if (!entries[i].TryGetValue("itemId", out var itemObj) || itemObj == null)
+                if (!entries[i].TryGetValue("item_id", out var itemObj) || itemObj == null)
                     continue;
 
                 var entryId = Convert.ToInt32(itemObj, CultureInfo.InvariantCulture);
@@ -322,19 +324,19 @@ public sealed class FormEntryService : IFormEntryService
 
     private static string MapEntrySortColumn(string? criteria, IReadOnlySet<string> ezfbColumns)
     {
-        var c = (criteria ?? "modifiedAt").Trim();
+        var c = (criteria ?? "modified_at").Trim();
         if (ezfbColumns.Contains(c))
-            return $"[{EscapeColumn(c)}]";
+            return $"\"{EscapeColumn(c)}\"";
 
         var lower = c.ToLowerInvariant();
         return lower switch
         {
-            "itemid" or "id" when ezfbColumns.Contains("itemId") => "[itemId]",
-            "createdat" when ezfbColumns.Contains("createdAt") => "[createdAt]",
-            "modifiedat" when ezfbColumns.Contains("modifiedAt") => "[modifiedAt]",
-            _ => ezfbColumns.Contains("modifiedAt")
-                ? "[modifiedAt]"
-                : "[itemId]"
+            "itemid" or "id" or "item_id" when ezfbColumns.Contains("item_id") => "\"item_id\"",
+            "createdat" or "created_at" when ezfbColumns.Contains("created_at") => "\"created_at\"",
+            "modifiedat" or "modified_at" when ezfbColumns.Contains("modified_at") => "\"modified_at\"",
+            _ => ezfbColumns.Contains("modified_at")
+                ? "\"modified_at\""
+                : "\"item_id\""
         };
     }
 
@@ -342,7 +344,7 @@ public sealed class FormEntryService : IFormEntryService
         FormAllFilter filter,
         IReadOnlySet<string> ezfbColumns,
         out string conditionSql,
-        out SqlParameter? parameter)
+        out NpgsqlParameter? parameter)
     {
         conditionSql = string.Empty;
         parameter = null;
@@ -368,22 +370,22 @@ public sealed class FormEntryService : IFormEntryService
         var cond = filter.Condition.Trim().ToLowerInvariant();
         if (cond is "contains" or "like")
         {
-            conditionSql = $"[{escaped}] LIKE {paramName}";
-            parameter = new SqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
+            conditionSql = $"\"{escaped}\" LIKE {paramName}";
+            parameter = new NpgsqlParameter(paramName, $"%{filter.Value ?? string.Empty}%");
             return true;
         }
 
         if (cond is "eq" or "=" or "equal")
         {
-            conditionSql = $"[{escaped}] = {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            conditionSql = $"\"{escaped}\" = {paramName}";
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
 
         if (cond is "neq" or "!=" or "notequal")
         {
-            conditionSql = $"[{escaped}] <> {paramName}";
-            parameter = new SqlParameter(paramName, filter.Value ?? string.Empty);
+            conditionSql = $"\"{escaped}\" <> {paramName}";
+            parameter = new NpgsqlParameter(paramName, filter.Value ?? string.Empty);
             return true;
         }
 
@@ -444,16 +446,17 @@ public sealed class FormEntryService : IFormEntryService
         new(0, null, message);
 
     private static async Task<FormMetadata?> LoadFormMetadataAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT TOP 1 uniqueColumns
-            FROM dbo.wForm
-            WHERE id = @FormId AND isDeleted = 0
+            SELECT "uniqueColumns"
+            FROM dbo."wForm"
+            WHERE id = @FormId AND "isDeleted" = false
+            LIMIT 1;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", formId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -490,7 +493,7 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static async Task<FormEntryResult?> CheckUniqueColumnsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string? uniqueColumns,
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
@@ -541,8 +544,28 @@ public sealed class FormEntryService : IFormEntryService
             "already existing form entry");
     }
 
+    /// <summary>
+    /// PHASE 4: SQL Server used ISJSON()/JSON_VALUE() inline; Postgres has no exception-safe inline
+    /// JSON parse, so a reusable dbo.try_json_email() PL/pgSQL wrapper (same TryCast pattern as
+    /// WorkflowTicketSearchService.cs's dbo.try_cast_timestamp/numeric) replaces the two-step check.
+    /// </summary>
+    private static async Task EnsureTryJsonEmailFunctionAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
+        const string sql = """
+            CREATE OR REPLACE FUNCTION dbo.try_json_email(p_text text) RETURNS text AS $body$
+            BEGIN
+                RETURN p_text::jsonb ->> 'email';
+            EXCEPTION WHEN OTHERS THEN
+                RETURN NULL;
+            END;
+            $body$ LANGUAGE plpgsql IMMUTABLE;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static async Task<int?> FindDuplicateEntryIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string column,
         string fieldValue,
@@ -554,29 +577,31 @@ public sealed class FormEntryService : IFormEntryService
         if (string.IsNullOrWhiteSpace(fieldValue))
         {
             sql = $"""
-                SELECT TOP 1 itemId
-                FROM dbo.[{tableName}]
-                WHERE [{escapedCol}] = N'' AND [{escapedCol}] <> N''
-                  AND (isDeleted = 0 OR isDeleted IS NULL)
+                SELECT item_id
+                FROM dbo.{tableName}
+                WHERE "{escapedCol}" = '' AND "{escapedCol}" <> ''
+                  AND (is_deleted = false OR is_deleted IS NULL)
                 """;
         }
         else
         {
+            await EnsureTryJsonEmailFunctionAsync(connection, cancellationToken);
             sql = $"""
-                SELECT TOP 1 itemId
-                FROM dbo.[{tableName}]
+                SELECT item_id
+                FROM dbo.{tableName}
                 WHERE (
-                    [{escapedCol}] = @Value
-                    OR (ISJSON([{escapedCol}]) = 1 AND JSON_VALUE([{escapedCol}], '$.email') = @Value)
+                    "{escapedCol}" = @Value
+                    OR dbo.try_json_email("{escapedCol}") = @Value
                 )
-                  AND (isDeleted = 0 OR isDeleted IS NULL)
+                  AND (is_deleted = false OR is_deleted IS NULL)
                 """;
         }
 
         if (excludeEntryId is > 0)
-            sql += " AND itemId <> @ExcludeId";
+            sql += " AND item_id <> @ExcludeId";
+        sql += " LIMIT 1;";
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         if (!string.IsNullOrWhiteSpace(fieldValue))
             cmd.Parameters.AddWithValue("@Value", fieldValue);
         if (excludeEntryId is > 0)
@@ -590,30 +615,30 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static async Task<int> InsertEntryAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
         string createdAt,
         string createdBy,
         CancellationToken cancellationToken)
     {
-        var columns = resolvedFields.Select(f => $"[{EscapeColumn(f.Key)}]").ToList();
-        columns.Add("[createdAt]");
-        columns.Add("[createdBy]");
-        columns.Add("[isDeleted]");
+        var columns = resolvedFields.Select(f => $"\"{EscapeColumn(f.Key)}\"").ToList();
+        columns.Add("created_at");
+        columns.Add("created_by");
+        columns.Add("is_deleted");
 
         var values = resolvedFields.Select((_, i) => $"@V{i}").ToList();
         values.Add("@CreatedAt");
         values.Add("@CreatedBy");
-        values.Add("0");
+        values.Add("false");
 
         var sql = $"""
-            INSERT INTO dbo.[{tableName}] ({string.Join(", ", columns)})
-            OUTPUT INSERTED.itemId
+            INSERT INTO dbo.{tableName} ({string.Join(", ", columns)})
             VALUES ({string.Join(", ", values)})
+            RETURNING item_id;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         for (var i = 0; i < resolvedFields.Count; i++)
             cmd.Parameters.AddWithValue($"@V{i}", resolvedFields[i].Value);
         cmd.Parameters.AddWithValue("@CreatedAt", createdAt);
@@ -623,7 +648,7 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static async Task<bool> UpdateEntryAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         int entryId,
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
@@ -632,18 +657,18 @@ public sealed class FormEntryService : IFormEntryService
         CancellationToken cancellationToken)
     {
         var sets = resolvedFields
-            .Select((f, i) => $"[{EscapeColumn(f.Key)}] = @V{i}")
+            .Select((f, i) => $"\"{EscapeColumn(f.Key)}\" = @V{i}")
             .ToList();
-        sets.Add("[modifiedAt] = @ModifiedAt");
-        sets.Add("[modifiedBy] = @ModifiedBy");
+        sets.Add("modified_at = @ModifiedAt");
+        sets.Add("modified_by = @ModifiedBy");
 
         var sql = $"""
-            UPDATE dbo.[{tableName}]
+            UPDATE dbo.{tableName}
             SET {string.Join(", ", sets)}
-            WHERE itemId = @ItemId AND (isDeleted = 0 OR isDeleted IS NULL)
+            WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL)
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         for (var i = 0; i < resolvedFields.Count; i++)
             cmd.Parameters.AddWithValue($"@V{i}", resolvedFields[i].Value);
         cmd.Parameters.AddWithValue("@ModifiedAt", modifiedAt);
@@ -654,42 +679,42 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static async Task<bool> EntryExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         int entryId,
         CancellationToken cancellationToken)
     {
         var sql = $"""
             SELECT COUNT(1)
-            FROM dbo.[{tableName}]
-            WHERE itemId = @ItemId AND (isDeleted = 0 OR isDeleted IS NULL)
+            FROM dbo.{tableName}
+            WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL)
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ItemId", entryId);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
     }
 
     private static async Task<Dictionary<string, object?>?> LoadEntryRowAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         IReadOnlySet<string> ezfbColumns,
         int entryId,
         CancellationToken cancellationToken)
     {
         var selectColumns = ezfbColumns
-            .Where(c => !IsSystemColumn(c) || c.Equals("itemId", StringComparison.OrdinalIgnoreCase))
-            .Select(c => $"[{EscapeColumn(c)}]")
+            .Where(c => !IsSystemColumn(c) || c.Equals("item_id", StringComparison.OrdinalIgnoreCase))
+            .Select(c => $"\"{EscapeColumn(c)}\"")
             .ToList();
         if (selectColumns.Count == 0)
             return null;
 
         var sql = $"""
             SELECT {string.Join(", ", selectColumns)}
-            FROM dbo.[{tableName}]
-            WHERE itemId = @ItemId AND (isDeleted = 0 OR isDeleted IS NULL)
+            FROM dbo.{tableName}
+            WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL)
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ItemId", entryId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -706,44 +731,42 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static bool IsSystemColumn(string column) =>
-        column.Equals("itemId", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("createdAt", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("modifiedAt", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("createdBy", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("modifiedBy", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("isDeleted", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("todayTask", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("isMarked", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("ValidFrom", StringComparison.OrdinalIgnoreCase)
-        || column.Equals("ValidTo", StringComparison.OrdinalIgnoreCase);
+        column.Equals("item_id", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("created_at", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("modified_at", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("created_by", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("modified_by", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("is_deleted", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("today_task", StringComparison.OrdinalIgnoreCase)
+        || column.Equals("is_marked", StringComparison.OrdinalIgnoreCase);
 
     private static async Task<bool> EzfbTableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT COUNT(1)
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = @TableName
+            FROM information_schema.tables
+            WHERE table_schema = 'dbo' AND table_name = @TableName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
     }
 
     private static async Task<HashSet<string>> LoadTableColumnsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT COLUMN_NAME
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = @TableName
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'dbo' AND table_name = @TableName
             """;
         var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -752,20 +775,20 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static async Task<List<FormControlRow>> LoadFormControlsAsync(
-        SqlConnection connection,
-        object wFormIdValue,
+        NpgsqlConnection connection,
+        string wFormIdValue,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT jsonId, name, type
-            FROM dbo.wFormControl
-            WHERE wFormId = @FormId
-              AND isDeleted = 0
-              AND jsonId IS NOT NULL
-              AND LTRIM(RTRIM(jsonId)) <> ''
+            SELECT "jsonId", name, type
+            FROM dbo."wFormControl"
+            WHERE "wFormId" = @FormId
+              AND "isDeleted" = false
+              AND "jsonId" IS NOT NULL
+              AND TRIM("jsonId") <> ''
             """;
         var rows = new List<FormControlRow>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -779,31 +802,13 @@ public sealed class FormEntryService : IFormEntryService
         return rows;
     }
 
-    private static async Task<object> ResolveWFormIdParameterAsync(
-        SqlConnection connection,
-        string formId,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = N'dbo' AND TABLE_NAME = N'wFormControl' AND COLUMN_NAME = N'wFormId'
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        var type = (await cmd.ExecuteScalarAsync(cancellationToken))?.ToString()?.ToLowerInvariant();
-        if (type is "int" or "bigint" or "smallint" or "tinyint")
-        {
-            if (int.TryParse(formId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n))
-                return n;
-            var hex = new string(formId.Where(Uri.IsHexDigit).ToArray());
-            if (hex.Length > 8)
-                hex = hex[..8];
-            if (uint.TryParse(hex.PadLeft(8, '0'), NumberStyles.HexNumber, CultureInfo.InvariantCulture, out var u))
-                return unchecked((int)u);
-        }
-
-        return formId;
-    }
+    /// <summary>
+    /// PHASE 4: dbo."wFormControl"."wFormId" is always varchar(64) on Postgres (see
+    /// FormService.cs's CREATE TABLE) — there is no INT-typed legacy shape to detect the way SQL
+    /// Server had, so the numeric/hex-id-parsing branch was dropped rather than translated. Same
+    /// precedent as FormService.cs / other ResolveWFormIdParameterAsync call sites.
+    /// </summary>
+    private static Task<string> ResolveWFormIdParameterAsync(string formId) => Task.FromResult(formId);
 
     private static bool TryResolveControlForField(
         string fieldKey,
@@ -844,7 +849,7 @@ public sealed class FormEntryService : IFormEntryService
         return false;
     }
 
-    private static string EscapeColumn(string column) => column.Replace("]", "]]", StringComparison.Ordinal);
+    private static string EscapeColumn(string column) => column.Replace("\"", "\"\"", StringComparison.Ordinal);
 
     private static bool TryResolveEzfbColumn(string jsonId, IReadOnlySet<string> ezfbColumns, out string column)
     {
@@ -892,14 +897,14 @@ public sealed class FormEntryService : IFormEntryService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var formMeta = await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken);
         if (formMeta == null)
             return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.FormNotFound, normalizedFormId, wFormControlName, null, null, null);
 
-        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
+        var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
         var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
 
         var control = controls.FirstOrDefault(c =>
@@ -929,23 +934,23 @@ public sealed class FormEntryService : IFormEntryService
     }
 
     private static async Task<List<string>> LoadDistinctColumnValuesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string column,
         CancellationToken cancellationToken)
     {
         var escaped = EscapeColumn(column);
         var sql = $"""
-            SELECT DISTINCT [{escaped}]
-            FROM dbo.[{tableName}]
-            WHERE (isDeleted = 0 OR isDeleted IS NULL)
-              AND [{escaped}] IS NOT NULL
-              AND LTRIM(RTRIM(CAST([{escaped}] AS NVARCHAR(MAX)))) <> ''
-            ORDER BY [{escaped}]
+            SELECT DISTINCT "{escaped}"
+            FROM dbo.{tableName}
+            WHERE (is_deleted = false OR is_deleted IS NULL)
+              AND "{escaped}" IS NOT NULL
+              AND TRIM(CAST("{escaped}" AS text)) <> ''
+            ORDER BY "{escaped}"
             """;
 
         var values = new List<string>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SaaSApp.Workflow.Application.Contracts;
@@ -81,7 +81,7 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
             var category = string.IsNullOrWhiteSpace(_options.Category) ? "workflow" : _options.Category.Trim();
             var review = context.Review?.Trim() ?? string.Empty;
 
-            await using var connection = new SqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
 
             await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);

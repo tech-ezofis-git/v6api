@@ -1,4 +1,5 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
+using NpgsqlTypes;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Storage;
@@ -22,7 +23,7 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var repositoryName = await LoadRepositoryNameAsync(connection, repositoryId, tenantId, cancellationToken)
@@ -100,39 +101,40 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         return new RepositoryFolderResolveResult(leafFolderId, folderChain, folderNames, repositoryName);    }
 
     private static async Task<string?> LoadRepositoryNameAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid repositoryId,
         Guid tenantId,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT TOP 1 Name
-            FROM repository.Repositories
-            WHERE Id = @RepositoryId AND TenantId = @TenantId AND IsDeleted = 0;
+            SELECT "Name"
+            FROM repository."Repositories"
+            WHERE "Id" = @RepositoryId AND "TenantId" = @TenantId AND "IsDeleted" = false
+            LIMIT 1;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         return (await cmd.ExecuteScalarAsync(cancellationToken)) as string;
     }
 
     private static async Task<IReadOnlyList<RepositoryFieldDto>> LoadFolderStructureFieldsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid repositoryId,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT Id, Name, SqlColumnName, DataType, Level, IsMandatory, IncludeInFolderStructure, OptionsJson, OrderId, IsReadOnly
-            FROM repository.RepositoryFields
-            WHERE RepositoryId = @RepositoryId
-              AND IsDeleted = 0
-              AND IncludeInFolderStructure = 1
-            ORDER BY Level, OrderId, Name;
+            SELECT "Id", "Name", "SqlColumnName", "DataType", "Level", "IsMandatory", "IncludeInFolderStructure", "OptionsJson", "OrderId", "IsReadOnly"
+            FROM repository."RepositoryFields"
+            WHERE "RepositoryId" = @RepositoryId
+              AND "IsDeleted" = false
+              AND "IncludeInFolderStructure" = true
+            ORDER BY "Level", "OrderId", "Name";
             """;
 
         var list = new List<RepositoryFieldDto>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -154,7 +156,7 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
     }
 
     private static async Task<Guid> FindOrCreateFolderAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantId,
         Guid repositoryId,
         Guid? parentId,
@@ -165,26 +167,35 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
         CancellationToken cancellationToken)
     {
         const string findSql = """
-            SELECT TOP 1 Id
-            FROM repository.Folders
-            WHERE TenantId = @TenantId
-              AND RepositoryId = @RepositoryId
-              AND IsDeleted = 0
-              AND LevelId = @LevelId
-              AND Name = @Name
+            SELECT "Id"
+            FROM repository."Folders"
+            WHERE "TenantId" = @TenantId
+              AND "RepositoryId" = @RepositoryId
+              AND "IsDeleted" = false
+              AND "LevelId" = @LevelId
+              AND "Name" = @Name
               AND (
-                    (@ParentId IS NULL AND ParentId IS NULL)
-                 OR (ParentId = @ParentId)
-              );
+                    (@ParentId IS NULL AND "ParentId" IS NULL)
+                 OR ("ParentId" = @ParentId)
+              )
+            LIMIT 1;
             """;
 
-        await using (var findCmd = new SqlCommand(findSql, connection))
+        await using (var findCmd = new NpgsqlCommand(findSql, connection))
         {
             findCmd.Parameters.AddWithValue("@TenantId", tenantId);
             findCmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
             findCmd.Parameters.AddWithValue("@LevelId", levelId);
             findCmd.Parameters.AddWithValue("@Name", name);
-            findCmd.Parameters.AddWithValue("@ParentId", (object?)parentId ?? DBNull.Value);
+            // Explicit NpgsqlDbType.Uuid (not AddWithValue): @ParentId is also used in a bare
+            // "@ParentId IS NULL" test with no column context at that node, and Postgres can
+            // fail to infer the parameter's type from the other, typed usage ("ParentId" =
+            // @ParentId) alone -- confirmed empirically elsewhere in this migration (42P08
+            // "could not determine data type of parameter"), so this is typed defensively.
+            findCmd.Parameters.Add(new NpgsqlParameter("ParentId", NpgsqlDbType.Uuid)
+            {
+                Value = (object?)parentId ?? DBNull.Value
+            });
 
             var existing = await findCmd.ExecuteScalarAsync(cancellationToken);
             if (existing is Guid g)
@@ -197,13 +208,13 @@ public sealed class RepositoryFolderService : IRepositoryFolderService
             : $"{parentPathId}/{name}";
 
         const string insertSql = """
-            INSERT INTO repository.Folders
-                (Id, TenantId, RepositoryId, Name, ParentId, LevelId, PathId, CreatedAtUtc, CreatedBy, IsDeleted)
+            INSERT INTO repository."Folders"
+                ("Id", "TenantId", "RepositoryId", "Name", "ParentId", "LevelId", "PathId", "CreatedAtUtc", "CreatedBy", "IsDeleted")
             VALUES
-                (@Id, @TenantId, @RepositoryId, @Name, @ParentId, @LevelId, @PathId, SYSUTCDATETIME(), @CreatedBy, 0);
+                (@Id, @TenantId, @RepositoryId, @Name, @ParentId, @LevelId, @PathId, now(), @CreatedBy, false);
             """;
 
-        await using var insertCmd = new SqlCommand(insertSql, connection);
+        await using var insertCmd = new NpgsqlCommand(insertSql, connection);
         insertCmd.Parameters.AddWithValue("@Id", newId);
         insertCmd.Parameters.AddWithValue("@TenantId", tenantId);
         insertCmd.Parameters.AddWithValue("@RepositoryId", repositoryId);

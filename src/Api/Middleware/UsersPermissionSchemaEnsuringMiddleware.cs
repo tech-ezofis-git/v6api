@@ -95,13 +95,13 @@ public sealed class UsersPermissionSchemaEnsuringMiddleware
         CancellationToken cancellationToken)
     {
         var optionsBuilder = new DbContextOptionsBuilder<UsersDbContext>();
-        optionsBuilder.UseSqlServer(connectionString, sql =>
+        optionsBuilder.UseNpgsql(connectionString, npgsql =>
         {
-            sql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
-            sql.EnableRetryOnFailure(
+            npgsql.MigrationsHistoryTable("__EFMigrationsHistory", UsersDbContext.SchemaName);
+            npgsql.EnableRetryOnFailure(
                 maxRetryCount: 5,
                 maxRetryDelay: TimeSpan.FromSeconds(30),
-                errorNumbersToAdd: null);
+                errorCodesToAdd: null);
         });
         await using var usersContext = new UsersDbContext(optionsBuilder.Options, new StaticTenantProvider(tenantId));
         await BuiltinRoleProvisioning.EnsureAsync(usersContext, tenantId, cancellationToken);

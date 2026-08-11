@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 
 namespace SaaSApp.Users.Infrastructure.Persistence;
@@ -6,42 +6,31 @@ namespace SaaSApp.Users.Infrastructure.Persistence;
 /// <summary>Idempotent users schema patches for tenant provisioning and upgrades.</summary>
 public static class UsersSchemaEnsurer
 {
+    // PHASE 4: users."Users" is 100% EF-managed on Postgres (Phase 2) -- all of these columns
+    // already exist as properties on Users.Domain/Entities/User.cs, so `dotnet ef database
+    // update` against UsersDbContext already creates users."Users" with them from the start.
+    // Kept as a cheap idempotent safety net (ALTER TABLE IF EXISTS ... ADD COLUMN IF NOT EXISTS,
+    // Postgres's native equivalent of the SQL Server COL_LENGTH-guarded ALTER) rather than
+    // dropped outright, since older tenant DBs provisioned before a column was added still need it.
     internal const string EnsureExtendedUserColumnsSql = """
-        IF COL_LENGTH('users.Users', 'PasswordExpiryDays') IS NULL
-            ALTER TABLE [users].[Users] ADD [PasswordExpiryDays] int NOT NULL CONSTRAINT [DF_users_Users_PasswordExpiryDays] DEFAULT 90;
-
-        IF COL_LENGTH('users.Users', 'AccountExpiryDate') IS NULL
-            ALTER TABLE [users].[Users] ADD [AccountExpiryDate] datetime2 NULL;
-
-        IF COL_LENGTH('users.Users', 'ForcePasswordResetOnLogin') IS NULL
-            ALTER TABLE [users].[Users] ADD [ForcePasswordResetOnLogin] bit NOT NULL CONSTRAINT [DF_users_Users_ForcePasswordResetOnLogin] DEFAULT 0;
-
-        IF COL_LENGTH('users.Users', 'EmployeeId') IS NULL
-            ALTER TABLE [users].[Users] ADD [EmployeeId] nvarchar(128) NULL;
-
-        IF COL_LENGTH('users.Users', 'BusinessUnit') IS NULL
-            ALTER TABLE [users].[Users] ADD [BusinessUnit] nvarchar(128) NULL;
-
-        IF COL_LENGTH('users.Users', 'Location') IS NULL
-            ALTER TABLE [users].[Users] ADD [Location] nvarchar(128) NULL;
-
-        IF COL_LENGTH('users.Users', 'GroupName') IS NULL
-            ALTER TABLE [users].[Users] ADD [GroupName] nvarchar(128) NULL;
-
-        IF COL_LENGTH('users.Users', 'MfaMethods') IS NULL
-            ALTER TABLE [users].[Users] ADD [MfaMethods] nvarchar(64) NULL;
-
-        IF COL_LENGTH('users.Users', 'Configuration') IS NULL
-            ALTER TABLE [users].[Users] ADD [Configuration] int NOT NULL CONSTRAINT [DF_users_Users_Configuration] DEFAULT 0;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "PasswordExpiryDays" integer NOT NULL DEFAULT 90;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "AccountExpiryDate" timestamptz NULL;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "ForcePasswordResetOnLogin" boolean NOT NULL DEFAULT false;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "EmployeeId" varchar(128) NULL;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "BusinessUnit" varchar(128) NULL;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "Location" varchar(128) NULL;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "GroupName" varchar(128) NULL;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "MfaMethods" varchar(64) NULL;
+        ALTER TABLE IF EXISTS users."Users" ADD COLUMN IF NOT EXISTS "Configuration" integer NOT NULL DEFAULT 0;
         """;
 
     public static async Task EnsureExtendedUserColumnsAsync(
         string connectionString,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(EnsureExtendedUserColumnsSql, connection) { CommandTimeout = 120 };
+        await using var command = new NpgsqlCommand(EnsureExtendedUserColumnsSql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -52,48 +41,39 @@ public static class UsersSchemaEnsurer
         await context.Database.ExecuteSqlRawAsync(EnsureExtendedUserColumnsSql, cancellationToken);
     }
 
+    // PHASE 4: users."Groups"/"UserGroups" are already created by the EF Postgres migration
+    // (Migrations/20260810110117_InitialPostgres.cs). Kept as a defensive CREATE TABLE/INDEX IF
+    // NOT EXISTS safety net for older tenant DBs provisioned before that migration existed.
     internal const string EnsureGroupsTablesSql = """
-        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = N'Groups' AND schema_id = SCHEMA_ID(N'users'))
-        BEGIN
-            CREATE TABLE [users].[Groups] (
-                [Id] uniqueidentifier NOT NULL,
-                [TenantId] uniqueidentifier NOT NULL,
-                [Name] nvarchar(128) NOT NULL,
-                [Description] nvarchar(512) NULL,
-                [CreatedAtUtc] datetime2 NOT NULL,
-                [IsDeleted] bit NOT NULL,
-                CONSTRAINT [PK_Groups] PRIMARY KEY ([Id])
-            );
-        END
+        CREATE TABLE IF NOT EXISTS users."Groups" (
+            "Id" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "Name" varchar(128) NOT NULL,
+            "Description" varchar(512) NULL,
+            "CreatedAtUtc" timestamptz NOT NULL,
+            "IsDeleted" boolean NOT NULL,
+            CONSTRAINT "PK_Groups" PRIMARY KEY ("Id")
+        );
 
-        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = N'UserGroups' AND schema_id = SCHEMA_ID(N'users'))
-        BEGIN
-            CREATE TABLE [users].[UserGroups] (
-                [GroupId] uniqueidentifier NOT NULL,
-                [UserId] uniqueidentifier NOT NULL,
-                [TenantId] uniqueidentifier NOT NULL,
-                CONSTRAINT [PK_UserGroups] PRIMARY KEY ([GroupId], [UserId]),
-                CONSTRAINT [FK_UserGroups_Groups_GroupId] FOREIGN KEY ([GroupId])
-                    REFERENCES [users].[Groups] ([Id]) ON DELETE CASCADE
-            );
-        END
+        CREATE TABLE IF NOT EXISTS users."UserGroups" (
+            "GroupId" uuid NOT NULL,
+            "UserId" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            CONSTRAINT "PK_UserGroups" PRIMARY KEY ("GroupId", "UserId"),
+            CONSTRAINT "FK_UserGroups_Groups_GroupId" FOREIGN KEY ("GroupId")
+                REFERENCES users."Groups" ("Id") ON DELETE CASCADE
+        );
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.indexes
-            WHERE name = N'IX_Groups_TenantId_Name'
-              AND object_id = OBJECT_ID(N'users.Groups'))
-        BEGIN
-            CREATE UNIQUE INDEX [IX_Groups_TenantId_Name] ON [users].[Groups] ([TenantId], [Name]);
-        END
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_Groups_TenantId_Name" ON users."Groups" ("TenantId", "Name");
         """;
 
     public static async Task EnsureGroupsTablesAsync(
         string connectionString,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(EnsureGroupsTablesSql, connection) { CommandTimeout = 120 };
+        await using var command = new NpgsqlCommand(EnsureGroupsTablesSql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -104,75 +84,64 @@ public static class UsersSchemaEnsurer
         await context.Database.ExecuteSqlRawAsync(EnsureGroupsTablesSql, cancellationToken);
     }
 
+    // PHASE 4: users."PermissionCategories" table/seed rows are already created by the EF
+    // Postgres migration; the MERGE below is kept (ported to INSERT ... ON CONFLICT DO UPDATE)
+    // as the ongoing idempotent sync for categories added/renamed in code after that migration
+    // shipped -- this is genuinely live data-sync, not legacy-drift detection, so it stays.
     internal const string EnsurePermissionCategoriesSql = """
-        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = N'PermissionCategories' AND schema_id = SCHEMA_ID(N'users'))
-        BEGIN
-            CREATE TABLE [users].[PermissionCategories] (
-                [Id] uniqueidentifier NOT NULL,
-                [Key] nvarchar(64) NOT NULL,
-                [Name] nvarchar(128) NOT NULL,
-                [SortOrder] int NOT NULL,
-                [IsActive] bit NOT NULL CONSTRAINT [DF_users_PermissionCategories_IsActive] DEFAULT 1,
-                CONSTRAINT [PK_PermissionCategories] PRIMARY KEY ([Id])
-            );
-        END
+        CREATE TABLE IF NOT EXISTS users."PermissionCategories" (
+            "Id" uuid NOT NULL,
+            "Key" varchar(64) NOT NULL,
+            "Name" varchar(128) NOT NULL,
+            "SortOrder" integer NOT NULL,
+            "IsActive" boolean NOT NULL DEFAULT true,
+            CONSTRAINT "PK_PermissionCategories" PRIMARY KEY ("Id")
+        );
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.indexes
-            WHERE name = N'IX_PermissionCategories_Key'
-              AND object_id = OBJECT_ID(N'users.PermissionCategories'))
-        BEGIN
-            CREATE UNIQUE INDEX [IX_PermissionCategories_Key] ON [users].[PermissionCategories] ([Key]);
-        END
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_PermissionCategories_Key" ON users."PermissionCategories" ("Key");
 
-        DELETE FROM [users].[PermissionCategories]
-        WHERE [Id] IN (
-            'a1000001-0000-4000-8000-000000000007',
-            'a1000001-0000-4000-8000-000000000008');
+        DELETE FROM users."PermissionCategories"
+        WHERE "Id" IN (
+            'a1000001-0000-4000-8000-000000000007'::uuid,
+            'a1000001-0000-4000-8000-000000000008'::uuid);
 
-        DELETE FROM [users].[PermissionCategories]
-        WHERE [Key] IN (
-            N'invoices',
-            N'ocr-document-processing',
-            N'workflow-approvals',
-            N'reports-analytics',
-            N'user-management',
-            N'integrations',
-            N'system-settings')
-           OR ([Key] = N'dashboard' AND [Id] = 'a1000001-0000-4000-8000-000000000001');
+        DELETE FROM users."PermissionCategories"
+        WHERE "Key" IN (
+            'invoices',
+            'ocr-document-processing',
+            'workflow-approvals',
+            'reports-analytics',
+            'user-management',
+            'integrations',
+            'system-settings')
+           OR ("Key" = 'dashboard' AND "Id" = 'a1000001-0000-4000-8000-000000000001'::uuid);
 
-        MERGE [users].[PermissionCategories] AS target
-        USING (VALUES
-            ('a1000001-0000-4000-8000-000000000006', N'dashboard', N'Dashboard', 1),
-            ('a1000001-0000-4000-8000-000000000001', N'workflow', N'Workflow', 2),
-            ('a1000001-0000-4000-8000-000000000002', N'folder', N'Folder', 3),
-            ('a1000001-0000-4000-8000-000000000003', N'task', N'Task', 4),
-            ('a1000001-0000-4000-8000-000000000004', N'workspace', N'Workspace', 5),
-            ('a1000001-0000-4000-8000-000000000005', N'settings', N'Settings', 6)
-        ) AS source ([Id], [Key], [Name], [SortOrder])
-        ON target.[Id] = source.[Id]
-        WHEN MATCHED AND (
-            target.[Key] <> source.[Key]
-            OR target.[Name] <> source.[Name]
-            OR target.[SortOrder] <> source.[SortOrder]
-            OR target.[IsActive] <> 1)
-        THEN UPDATE SET
-            target.[Key] = source.[Key],
-            target.[Name] = source.[Name],
-            target.[SortOrder] = source.[SortOrder],
-            target.[IsActive] = 1
-        WHEN NOT MATCHED BY TARGET THEN
-            INSERT ([Id], [Key], [Name], [SortOrder], [IsActive])
-            VALUES (source.[Id], source.[Key], source.[Name], source.[SortOrder], 1);
+        INSERT INTO users."PermissionCategories" ("Id", "Key", "Name", "SortOrder", "IsActive")
+        VALUES
+            ('a1000001-0000-4000-8000-000000000006'::uuid, 'dashboard', 'Dashboard', 1, true),
+            ('a1000001-0000-4000-8000-000000000001'::uuid, 'workflow', 'Workflow', 2, true),
+            ('a1000001-0000-4000-8000-000000000002'::uuid, 'folder', 'Folder', 3, true),
+            ('a1000001-0000-4000-8000-000000000003'::uuid, 'task', 'Task', 4, true),
+            ('a1000001-0000-4000-8000-000000000004'::uuid, 'workspace', 'Workspace', 5, true),
+            ('a1000001-0000-4000-8000-000000000005'::uuid, 'settings', 'Settings', 6, true)
+        ON CONFLICT ("Id") DO UPDATE SET
+            "Key" = EXCLUDED."Key",
+            "Name" = EXCLUDED."Name",
+            "SortOrder" = EXCLUDED."SortOrder",
+            "IsActive" = true
+        WHERE users."PermissionCategories"."Key" <> EXCLUDED."Key"
+           OR users."PermissionCategories"."Name" <> EXCLUDED."Name"
+           OR users."PermissionCategories"."SortOrder" <> EXCLUDED."SortOrder"
+           OR users."PermissionCategories"."IsActive" <> true;
         """;
 
     public static async Task EnsurePermissionCategoriesAsync(
         string connectionString,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(EnsurePermissionCategoriesSql, connection) { CommandTimeout = 120 };
+        await using var command = new NpgsqlCommand(EnsurePermissionCategoriesSql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -183,87 +152,58 @@ public static class UsersSchemaEnsurer
         await context.Database.ExecuteSqlRawAsync(EnsurePermissionCategoriesSql, cancellationToken);
     }
 
+    // PHASE 4: users."Menus" table/seed rows are already created by the EF Postgres migration;
+    // kept for the same ongoing-seed reason as PermissionCategories above. ON CONFLICT ("Key")
+    // DO NOTHING replaces the IF NOT EXISTS (SELECT ...) INSERT guard (Key has a unique index).
     internal const string EnsureMenusTablesSql = """
-        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = N'Menus' AND schema_id = SCHEMA_ID(N'users'))
-        BEGIN
-            CREATE TABLE [users].[Menus] (
-                [Id] uniqueidentifier NOT NULL,
-                [Key] nvarchar(64) NOT NULL,
-                [Label] nvarchar(128) NOT NULL,
-                [RoutePath] nvarchar(256) NOT NULL,
-                [SortOrder] int NOT NULL,
-                [IsSystem] bit NOT NULL,
-                [IsDeleted] bit NOT NULL,
-                [CreatedAtUtc] datetime2 NOT NULL,
-                CONSTRAINT [PK_Menus] PRIMARY KEY ([Id])
-            );
-        END
+        CREATE TABLE IF NOT EXISTS users."Menus" (
+            "Id" uuid NOT NULL,
+            "Key" varchar(64) NOT NULL,
+            "Label" varchar(128) NOT NULL,
+            "RoutePath" varchar(256) NOT NULL,
+            "SortOrder" integer NOT NULL,
+            "IsSystem" boolean NOT NULL,
+            "IsDeleted" boolean NOT NULL,
+            "CreatedAtUtc" timestamptz NOT NULL,
+            CONSTRAINT "PK_Menus" PRIMARY KEY ("Id")
+        );
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.indexes
-            WHERE name = N'IX_Menus_Key'
-              AND object_id = OBJECT_ID(N'users.Menus'))
-        BEGIN
-            CREATE UNIQUE INDEX [IX_Menus_Key] ON [users].[Menus] ([Key]);
-        END
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_Menus_Key" ON users."Menus" ("Key");
 
-        IF NOT EXISTS (SELECT 1 FROM [users].[Menus] WHERE [Key] = N'dashboard')
-            INSERT INTO [users].[Menus] ([Id], [Key], [Label], [RoutePath], [SortOrder], [IsSystem], [IsDeleted], [CreatedAtUtc])
-            VALUES ('b2000001-0000-4000-8000-000000000001', N'dashboard', N'Dashboard', N'/dashboard', 1, 1, 0, '2025-07-02T00:00:00');
-
-        IF NOT EXISTS (SELECT 1 FROM [users].[Menus] WHERE [Key] = N'inbox')
-            INSERT INTO [users].[Menus] ([Id], [Key], [Label], [RoutePath], [SortOrder], [IsSystem], [IsDeleted], [CreatedAtUtc])
-            VALUES ('b2000001-0000-4000-8000-000000000002', N'inbox', N'Inbox', N'/inbox', 2, 1, 0, '2025-07-02T00:00:00');
-
-        IF NOT EXISTS (SELECT 1 FROM [users].[Menus] WHERE [Key] = N'ocr-review')
-            INSERT INTO [users].[Menus] ([Id], [Key], [Label], [RoutePath], [SortOrder], [IsSystem], [IsDeleted], [CreatedAtUtc])
-            VALUES ('b2000001-0000-4000-8000-000000000003', N'ocr-review', N'OCR.Review', N'/ocr-review', 3, 1, 0, '2025-07-02T00:00:00');
-
-        IF NOT EXISTS (SELECT 1 FROM [users].[Menus] WHERE [Key] = N'processed-invoices')
-            INSERT INTO [users].[Menus] ([Id], [Key], [Label], [RoutePath], [SortOrder], [IsSystem], [IsDeleted], [CreatedAtUtc])
-            VALUES ('b2000001-0000-4000-8000-000000000004', N'processed-invoices', N'Processed Invoices', N'/processed-invoices', 4, 1, 0, '2025-07-02T00:00:00');
-
-        IF NOT EXISTS (SELECT 1 FROM [users].[Menus] WHERE [Key] = N'approval-queue')
-            INSERT INTO [users].[Menus] ([Id], [Key], [Label], [RoutePath], [SortOrder], [IsSystem], [IsDeleted], [CreatedAtUtc])
-            VALUES ('b2000001-0000-4000-8000-000000000005', N'approval-queue', N'Approval Queue', N'/approval-queue', 5, 1, 0, '2025-07-02T00:00:00');
-
-        IF NOT EXISTS (SELECT 1 FROM [users].[Menus] WHERE [Key] = N'vendors')
-            INSERT INTO [users].[Menus] ([Id], [Key], [Label], [RoutePath], [SortOrder], [IsSystem], [IsDeleted], [CreatedAtUtc])
-            VALUES ('b2000001-0000-4000-8000-000000000006', N'vendors', N'Vendors', N'/vendors', 6, 1, 0, '2025-07-02T00:00:00');
+        INSERT INTO users."Menus" ("Id", "Key", "Label", "RoutePath", "SortOrder", "IsSystem", "IsDeleted", "CreatedAtUtc")
+        VALUES
+            ('b2000001-0000-4000-8000-000000000001'::uuid, 'dashboard', 'Dashboard', '/dashboard', 1, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000002'::uuid, 'inbox', 'Inbox', '/inbox', 2, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000003'::uuid, 'ocr-review', 'OCR.Review', '/ocr-review', 3, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000004'::uuid, 'processed-invoices', 'Processed Invoices', '/processed-invoices', 4, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000005'::uuid, 'approval-queue', 'Approval Queue', '/approval-queue', 5, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000006'::uuid, 'vendors', 'Vendors', '/vendors', 6, true, false, '2025-07-02T00:00:00'::timestamptz)
+        ON CONFLICT ("Key") DO NOTHING;
         """;
 
     internal const string EnsureRoleMenusTableSql = """
-        IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = N'RoleMenus' AND schema_id = SCHEMA_ID(N'users'))
-        BEGIN
-            CREATE TABLE [users].[RoleMenus] (
-                [RoleId] uniqueidentifier NOT NULL,
-                [MenuId] uniqueidentifier NOT NULL,
-                [TenantId] uniqueidentifier NOT NULL,
-                [IsDefaultLanding] bit NOT NULL,
-                CONSTRAINT [PK_RoleMenus] PRIMARY KEY ([RoleId], [MenuId]),
-                CONSTRAINT [FK_RoleMenus_Menus_MenuId] FOREIGN KEY ([MenuId])
-                    REFERENCES [users].[Menus] ([Id]) ON DELETE CASCADE,
-                CONSTRAINT [FK_RoleMenus_Roles_RoleId] FOREIGN KEY ([RoleId])
-                    REFERENCES [users].[Roles] ([Id]) ON DELETE CASCADE
-            );
-        END
+        CREATE TABLE IF NOT EXISTS users."RoleMenus" (
+            "RoleId" uuid NOT NULL,
+            "MenuId" uuid NOT NULL,
+            "TenantId" uuid NOT NULL,
+            "IsDefaultLanding" boolean NOT NULL,
+            CONSTRAINT "PK_RoleMenus" PRIMARY KEY ("RoleId", "MenuId"),
+            CONSTRAINT "FK_RoleMenus_Menus_MenuId" FOREIGN KEY ("MenuId")
+                REFERENCES users."Menus" ("Id") ON DELETE CASCADE,
+            CONSTRAINT "FK_RoleMenus_Roles_RoleId" FOREIGN KEY ("RoleId")
+                REFERENCES users."Roles" ("Id") ON DELETE CASCADE
+        );
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.indexes
-            WHERE name = N'IX_RoleMenus_MenuId'
-              AND object_id = OBJECT_ID(N'users.RoleMenus'))
-        BEGIN
-            CREATE INDEX [IX_RoleMenus_MenuId] ON [users].[RoleMenus] ([MenuId]);
-        END
+        CREATE INDEX IF NOT EXISTS "IX_RoleMenus_MenuId" ON users."RoleMenus" ("MenuId");
         """;
 
     public static async Task EnsureMenusTablesAsync(
         string connectionString,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(EnsureMenusTablesSql, connection) { CommandTimeout = 120 };
+        await using var command = new NpgsqlCommand(EnsureMenusTablesSql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -280,9 +220,9 @@ public static class UsersSchemaEnsurer
         string connectionString,
         CancellationToken cancellationToken = default)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var command = new SqlCommand(EnsureRoleMenusTablesSql, connection) { CommandTimeout = 120 };
+        await using var command = new NpgsqlCommand(EnsureRoleMenusTablesSql, connection) { CommandTimeout = 120 };
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 

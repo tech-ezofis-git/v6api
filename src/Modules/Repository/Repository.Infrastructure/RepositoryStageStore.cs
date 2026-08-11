@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure;
@@ -28,17 +28,19 @@ internal sealed class RepositoryStageRow
 
 internal static class RepositoryStageStore
 {
+    // Physical (snake_case) column names -- compared against selectCols below, which are the
+    // actual physical names read from information_schema, not the historical PascalCase form.
     private static readonly string[] CoreColumns =
     [
-        "Id", "TenantId", "RepositoryId", "FolderId", "StorageProviderId",
-        "FilePath", "FileName", "FileType", "FileSize", "TotalPages",
-        "StageStatus", "Status", "MailId", "OcrScore", "AiStatus",
-        "OcrText", "OcrJson", "SummaryJson", "PromotedItemId",
-        "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted"
+        "id", "tenant_id", "repository_id", "folder_id", "storage_provider_id",
+        "file_path", "file_name", "file_type", "file_size", "total_pages",
+        "stage_status", "status", "mail_id", "ocr_score", "ai_status",
+        "ocr_text", "ocr_json", "summary_json", "promoted_item_id",
+        "created_at_utc", "modified_at_utc", "created_by", "modified_by", "is_deleted"
     ];
 
     public static async Task<Guid> InsertAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
         Guid repositoryId,
@@ -58,15 +60,17 @@ internal static class RepositoryStageStore
 
         var columns = new List<string>();
         var values = new List<string>();
-        var parameters = new List<SqlParameter>();
+        var parameters = new List<NpgsqlParameter>();
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         void Add(string column, string param, object? value)
         {
             if (!RepositoryItemTableColumns.Has(tableColumns, column))
                 return;
-            columns.Add($"[{column}]");
+            columns.Add(RepositorySqlHelper.ColumnRef(column));
             values.Add(param);
-            parameters.Add(new SqlParameter(param, value ?? DBNull.Value));
+            parameters.Add(new NpgsqlParameter(param, value ?? DBNull.Value));
+            used.Add(column);
         }
 
         Add("Id", "@Id", stageId);
@@ -81,19 +85,23 @@ internal static class RepositoryStageStore
         Add("Status", "@Status", "Pending");
         Add("CreatedBy", "@CreatedBy", userId);
 
-        var used = new HashSet<string>(columns.Select(c => c.Trim('[', ']')), StringComparer.OrdinalIgnoreCase);
         var fieldIndex = 0;
         foreach (var (key, value) in fieldValues ?? new Dictionary<string, string>())
         {
             if (!RepositoryItemFilterHelper.TryResolveFilterColumn(key, allowedColumns, repo, out var col))
                 continue;
-            if (!RepositoryItemTableColumns.Has(tableColumns, col) || !used.Add(col))
+
+            var canonical = RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, col, out var canonicalCol)
+                ? canonicalCol
+                : col;
+
+            if (!RepositoryItemTableColumns.Has(tableColumns, canonical) || !used.Add(canonical))
                 continue;
 
             var param = $"@F{fieldIndex++}";
-            columns.Add($"[{col}]");
+            columns.Add(RepositorySqlHelper.PhysicalColumnRef(canonical));
             values.Add(param);
-            parameters.Add(new SqlParameter(param, value));
+            parameters.Add(new NpgsqlParameter(param, value));
         }
 
         var sql = $"""
@@ -101,14 +109,15 @@ internal static class RepositoryStageStore
             VALUES ({string.Join(", ", values)});
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddRange(parameters.ToArray());
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        foreach (var p in parameters)
+            cmd.Parameters.Add(p);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         return stageId;
     }
 
     public static async Task<RepositoryStageRow?> GetAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
         Guid stageId,
@@ -121,12 +130,12 @@ internal static class RepositoryStageStore
             return null;
 
         var sql = $"""
-            SELECT {string.Join(", ", selectCols.Select(c => $"[{c}]"))}
+            SELECT {string.Join(", ", selectCols.Select(c => RepositorySqlHelper.ColumnRef(c)))}
             FROM {table}
-            WHERE Id = @Id AND TenantId = @TenantId AND RepositoryId = @RepositoryId AND IsDeleted = 0;
+            WHERE id = @Id AND tenant_id = @TenantId AND repository_id = @RepositoryId AND is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", stageId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@RepositoryId", repo.Id);
@@ -141,6 +150,9 @@ internal static class RepositoryStageStore
 
         for (var i = 0; i < selectCols.Count; i++)
         {
+            // selectCols carries the physical (already-canonical) column name -- reused here
+            // as the logical key too, since it's what the CoreColumns/GetXxx lookups below
+            // are matched against case-insensitively regardless of underlying casing.
             var col = selectCols[i];
             var val = reader.IsDBNull(i) ? null : reader.GetValue(i);
             values[col] = val;
@@ -148,32 +160,35 @@ internal static class RepositoryStageStore
                 fieldValues[col] = Convert.ToString(val) ?? string.Empty;
         }
 
+        // values' keys are the physical column names read straight from information_schema
+        // (see selectCols above) -- reserved columns are always lowercase snake_case since
+        // this table is only ever created by StaticRepositoryProvisioner's BuildStageTableScript.
         return new RepositoryStageRow
         {
-            Id = GetGuid(values, "Id"),
-            TenantId = GetGuid(values, "TenantId"),
-            RepositoryId = GetGuid(values, "RepositoryId"),
-            StorageProviderId = GetGuid(values, "StorageProviderId"),
-            FilePath = GetString(values, "FilePath"),
-            FileName = GetString(values, "FileName"),
-            FileType = GetString(values, "FileType"),
-            FileSize = GetInt(values, "FileSize"),
-            StageStatus = GetString(values, "StageStatus") ?? "Pending",
-            Status = GetString(values, "Status"),
-            PromotedItemId = GetNullableGuid(values, "PromotedItemId"),
-            CreatedAtUtc = GetDateTime(values, "CreatedAtUtc") ?? DateTime.UtcNow,
-            ModifiedAtUtc = GetDateTime(values, "ModifiedAtUtc"),
-            CreatedBy = GetNullableGuid(values, "CreatedBy"),
-            ModifiedBy = GetNullableGuid(values, "ModifiedBy"),
-            IsDeleted = GetBool(values, "IsDeleted"),
-            OcrJson = GetString(values, "OcrJson"),
-            SummaryJson = GetString(values, "SummaryJson"),
+            Id = GetGuid(values, "id"),
+            TenantId = GetGuid(values, "tenant_id"),
+            RepositoryId = GetGuid(values, "repository_id"),
+            StorageProviderId = GetGuid(values, "storage_provider_id"),
+            FilePath = GetString(values, "file_path"),
+            FileName = GetString(values, "file_name"),
+            FileType = GetString(values, "file_type"),
+            FileSize = GetInt(values, "file_size"),
+            StageStatus = GetString(values, "stage_status") ?? "Pending",
+            Status = GetString(values, "status"),
+            PromotedItemId = GetNullableGuid(values, "promoted_item_id"),
+            CreatedAtUtc = GetDateTime(values, "created_at_utc") ?? DateTime.UtcNow,
+            ModifiedAtUtc = GetDateTime(values, "modified_at_utc"),
+            CreatedBy = GetNullableGuid(values, "created_by"),
+            ModifiedBy = GetNullableGuid(values, "modified_by"),
+            IsDeleted = GetBool(values, "is_deleted"),
+            OcrJson = GetString(values, "ocr_json"),
+            SummaryJson = GetString(values, "summary_json"),
             FieldValues = fieldValues
         };
     }
 
     public static async Task UpdateFieldsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
         Guid stageId,
@@ -188,7 +203,7 @@ internal static class RepositoryStageStore
         var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, repo.StageTableName, cancellationToken);
         var allowedColumns = RepositoryItemFilterHelper.BuildFilterableColumns(repo, tableColumns);
         var updates = new List<string>();
-        var parameters = new List<SqlParameter>
+        var parameters = new List<NpgsqlParameter>
         {
             new("@Id", stageId),
             new("@TenantId", tenantId),
@@ -200,46 +215,50 @@ internal static class RepositoryStageStore
         {
             if (!RepositoryItemFilterHelper.TryResolveFilterColumn(key, allowedColumns, repo, out var col))
                 continue;
-            if (!RepositoryItemTableColumns.Has(tableColumns, col))
+            var canonical = RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, col, out var canonicalCol)
+                ? canonicalCol
+                : col;
+            if (!RepositoryItemTableColumns.Has(tableColumns, canonical))
                 continue;
 
             var param = $"@U{index++}";
-            updates.Add($"[{col}] = {param}");
-            parameters.Add(new SqlParameter(param, value));
+            updates.Add($"{RepositorySqlHelper.PhysicalColumnRef(canonical)} = {param}");
+            parameters.Add(new NpgsqlParameter(param, value));
         }
 
         if (!string.IsNullOrWhiteSpace(status) && RepositoryItemTableColumns.Has(tableColumns, "Status"))
-            updates.Add("[Status] = @Status");
+            updates.Add("status = @Status");
         if (!string.IsNullOrWhiteSpace(stageStatus) && RepositoryItemTableColumns.Has(tableColumns, "StageStatus"))
-            updates.Add("[StageStatus] = @StageStatus");
+            updates.Add("stage_status = @StageStatus");
         if (!string.IsNullOrWhiteSpace(ocrResult) && RepositoryItemTableColumns.Has(tableColumns, "OcrJson"))
-            updates.Add("[OcrJson] = @OcrJson");
+            updates.Add("ocr_json = @OcrJson");
 
-        updates.Add("[ModifiedAtUtc] = SYSUTCDATETIME()");
+        updates.Add("modified_at_utc = now()");
         if (RepositoryItemTableColumns.Has(tableColumns, "ModifiedBy"))
-            updates.Add("[ModifiedBy] = @ModifiedBy");
+            updates.Add("modified_by = @ModifiedBy");
 
         if (!string.IsNullOrWhiteSpace(status))
-            parameters.Add(new SqlParameter("@Status", status));
+            parameters.Add(new NpgsqlParameter("@Status", status));
         if (!string.IsNullOrWhiteSpace(stageStatus))
-            parameters.Add(new SqlParameter("@StageStatus", stageStatus));
+            parameters.Add(new NpgsqlParameter("@StageStatus", stageStatus));
         if (!string.IsNullOrWhiteSpace(ocrResult))
-            parameters.Add(new SqlParameter("@OcrJson", ocrResult));
-        parameters.Add(new SqlParameter("@ModifiedBy", (object?)userId ?? DBNull.Value));
+            parameters.Add(new NpgsqlParameter("@OcrJson", ocrResult));
+        parameters.Add(new NpgsqlParameter("@ModifiedBy", (object?)userId ?? DBNull.Value));
 
         var sql = $"""
             UPDATE {table}
             SET {string.Join(", ", updates)}
-            WHERE Id = @Id AND TenantId = @TenantId AND RepositoryId = @RepositoryId AND IsDeleted = 0;
+            WHERE id = @Id AND tenant_id = @TenantId AND repository_id = @RepositoryId AND is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddRange(parameters.ToArray());
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        foreach (var p in parameters)
+            cmd.Parameters.Add(p);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public static async Task MarkArchivedAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string stageTableName,
         Guid tenantId,
         Guid stageId,
@@ -249,14 +268,14 @@ internal static class RepositoryStageStore
         var table = RepositorySqlHelper.QualifiedItemsTable(stageTableName);
         var sql = $"""
             UPDATE {table}
-            SET PromotedItemId = @PromotedItemId,
-                StageStatus = 'Archived',
-                Status = 'ARCHIVED',
-                ModifiedAtUtc = SYSUTCDATETIME()
-            WHERE Id = @Id AND TenantId = @TenantId AND IsDeleted = 0;
+            SET promoted_item_id = @PromotedItemId,
+                stage_status = 'Archived',
+                status = 'ARCHIVED',
+                modified_at_utc = now()
+            WHERE id = @Id AND tenant_id = @TenantId AND is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", stageId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@PromotedItemId", promotedItemId);
@@ -264,7 +283,7 @@ internal static class RepositoryStageStore
     }
 
     public static async Task<(IReadOnlyList<RepositoryStageRow> Items, int Total)> ListAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
         bool includeDeleted,
@@ -274,25 +293,25 @@ internal static class RepositoryStageStore
     {
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.StageTableName);
         var where = includeDeleted
-            ? "TenantId = @TenantId AND RepositoryId = @RepositoryId"
-            : "TenantId = @TenantId AND RepositoryId = @RepositoryId AND IsDeleted = 0 AND ISNULL(Status, '') <> 'ARCHIVED'";
+            ? "tenant_id = @TenantId AND repository_id = @RepositoryId"
+            : "tenant_id = @TenantId AND repository_id = @RepositoryId AND is_deleted = false AND COALESCE(status, '') <> 'ARCHIVED'";
 
         var countSql = $"SELECT COUNT(*) FROM {table} WHERE {where};";
-        await using var countCmd = new SqlCommand(countSql, connection);
+        await using var countCmd = new NpgsqlCommand(countSql, connection);
         countCmd.Parameters.AddWithValue("@TenantId", tenantId);
         countCmd.Parameters.AddWithValue("@RepositoryId", repo.Id);
         var total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
 
         var sql = $"""
-            SELECT Id
+            SELECT id
             FROM {table}
             WHERE {where}
-            ORDER BY CreatedAtUtc DESC
+            ORDER BY created_at_utc DESC
             OFFSET @Skip ROWS FETCH NEXT @Take ROWS ONLY;
             """;
 
         var ids = new List<Guid>();
-        await using (var listCmd = new SqlCommand(sql, connection))
+        await using (var listCmd = new NpgsqlCommand(sql, connection))
         {
             listCmd.Parameters.AddWithValue("@TenantId", tenantId);
             listCmd.Parameters.AddWithValue("@RepositoryId", repo.Id);

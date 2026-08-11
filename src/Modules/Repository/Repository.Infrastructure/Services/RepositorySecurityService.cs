@@ -1,8 +1,7 @@
 using System.Collections.Concurrent;
-using System.Data;
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -29,9 +28,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         if (SchemaEnsured.ContainsKey(cs))
             return;
 
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(EnsureSchemaSql, connection) { CommandTimeout = 120 };
+        await using var cmd = new NpgsqlCommand(EnsureSchemaSql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         SchemaEnsured.TryAdd(cs, 0);
     }
@@ -46,18 +45,18 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         await EnsureRepositoryExistsAsync(repositoryId, tenantId, cancellationToken);
 
         // Repository = folder: load repository-scoped policies (FolderId NULL or = repositoryId).
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT Id, FolderId, CanView, CanUpload, CanDownload, CanPrint, CanDelete,
-                   CanEditMetadata, CanEditDocument, CanCheckOut, CanCheckIn, CanSendForSignature
-            FROM repository.FolderSecurityPolicies
-            WHERE RepositoryId = @RepositoryId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc
+            SELECT "Id", "FolderId", "CanView", "CanUpload", "CanDownload", "CanPrint", "CanDelete",
+                   "CanEditMetadata", "CanEditDocument", "CanCheckOut", "CanCheckIn", "CanSendForSignature"
+            FROM repository."FolderSecurityPolicies"
+            WHERE "RepositoryId" = @RepositoryId AND "IsDeleted" = false
+            ORDER BY "CreatedAtUtc"
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
 
         var policies = new List<(Guid Id, RepositoryPermissionFlagsDto Perms)>();
@@ -105,27 +104,26 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         _ = NormalizeFolderId(repositoryId, request.FolderId);
         var policies = request.Policies ?? Array.Empty<RepositoryFolderSecurityPolicyDto>();
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
             // Replace all policies for this repository (any FolderId), so repo-as-folder stays simple.
-            await using (var delPrincipals = new SqlCommand("""
-                DELETE p
-                FROM repository.FolderSecurityPrincipals p
-                INNER JOIN repository.FolderSecurityPolicies pol ON pol.Id = p.PolicyId
-                WHERE pol.RepositoryId = @RepositoryId
+            await using (var delPrincipals = new NpgsqlCommand("""
+                DELETE FROM repository."FolderSecurityPrincipals" p
+                USING repository."FolderSecurityPolicies" pol
+                WHERE pol."Id" = p."PolicyId" AND pol."RepositoryId" = @RepositoryId
                 """, connection, tx))
             {
                 delPrincipals.Parameters.AddWithValue("@RepositoryId", repositoryId);
                 await delPrincipals.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            await using (var delPolicies = new SqlCommand("""
-                DELETE FROM repository.FolderSecurityPolicies
-                WHERE RepositoryId = @RepositoryId
+            await using (var delPolicies = new NpgsqlCommand("""
+                DELETE FROM repository."FolderSecurityPolicies"
+                WHERE "RepositoryId" = @RepositoryId
                 """, connection, tx))
             {
                 delPolicies.Parameters.AddWithValue("@RepositoryId", repositoryId);
@@ -143,15 +141,15 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                 var canView = perms.View;
                 var policyId = Guid.NewGuid();
 
-                await using (var insert = new SqlCommand("""
-                    INSERT INTO repository.FolderSecurityPolicies
-                        (Id, RepositoryId, FolderId, CanView, CanUpload, CanDownload, CanPrint, CanDelete,
-                         CanEditMetadata, CanEditDocument, CanCheckOut, CanCheckIn, CanSendForSignature,
-                         CreatedAtUtc, CreatedBy, IsDeleted)
+                await using (var insert = new NpgsqlCommand("""
+                    INSERT INTO repository."FolderSecurityPolicies"
+                        ("Id", "RepositoryId", "FolderId", "CanView", "CanUpload", "CanDownload", "CanPrint", "CanDelete",
+                         "CanEditMetadata", "CanEditDocument", "CanCheckOut", "CanCheckIn", "CanSendForSignature",
+                         "CreatedAtUtc", "CreatedBy", "IsDeleted")
                     VALUES
                         (@Id, @RepositoryId, NULL, @CanView, @CanUpload, @CanDownload, @CanPrint, @CanDelete,
                          @CanEditMetadata, @CanEditDocument, @CanCheckOut, @CanCheckIn, @CanSendForSignature,
-                         SYSUTCDATETIME(), @CreatedBy, 0)
+                         now(), @CreatedBy, false)
                     """, connection, tx))
                 {
                     insert.Parameters.AddWithValue("@Id", policyId);
@@ -193,17 +191,17 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         await EnsureSchemaAsync(cancellationToken);
         await EnsureRepositoryExistsAsync(repositoryId, tenantId, cancellationToken);
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT Id, Action, MatchMode, ConditionsJson, SortOrder, Source
-            FROM repository.DocumentSecurityRules
-            WHERE RepositoryId = @RepositoryId AND IsDeleted = 0
-            ORDER BY SortOrder, CreatedAtUtc
+            SELECT "Id", "Action", "MatchMode", "ConditionsJson", "SortOrder", "Source"
+            FROM repository."DocumentSecurityRules"
+            WHERE "RepositoryId" = @RepositoryId AND "IsDeleted" = false
+            ORDER BY "SortOrder", "CreatedAtUtc"
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
 
         var rows = new List<(Guid Id, string Action, string Match, string ConditionsJson, string? Source)>();
@@ -251,28 +249,28 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             .Where(r => !string.Equals(r.Source, "Share", StringComparison.OrdinalIgnoreCase))
             .ToList();
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
-            await using (var delPrincipals = new SqlCommand("""
-                DELETE p
-                FROM repository.DocumentSecurityPrincipals p
-                INNER JOIN repository.DocumentSecurityRules r ON r.Id = p.RuleId
-                WHERE r.RepositoryId = @RepositoryId
-                  AND (r.Source IS NULL OR r.Source <> N'Share')
+            await using (var delPrincipals = new NpgsqlCommand("""
+                DELETE FROM repository."DocumentSecurityPrincipals" p
+                USING repository."DocumentSecurityRules" r
+                WHERE r."Id" = p."RuleId"
+                  AND r."RepositoryId" = @RepositoryId
+                  AND (r."Source" IS NULL OR r."Source" <> 'Share')
                 """, connection, tx))
             {
                 delPrincipals.Parameters.AddWithValue("@RepositoryId", repositoryId);
                 await delPrincipals.ExecuteNonQueryAsync(cancellationToken);
             }
 
-            await using (var delRules = new SqlCommand("""
-                DELETE FROM repository.DocumentSecurityRules
-                WHERE RepositoryId = @RepositoryId
-                  AND (Source IS NULL OR Source <> N'Share')
+            await using (var delRules = new NpgsqlCommand("""
+                DELETE FROM repository."DocumentSecurityRules"
+                WHERE "RepositoryId" = @RepositoryId
+                  AND ("Source" IS NULL OR "Source" <> 'Share')
                 """, connection, tx))
             {
                 delRules.Parameters.AddWithValue("@RepositoryId", repositoryId);
@@ -301,11 +299,11 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                     value = c.Value
                 }));
 
-                await using (var insert = new SqlCommand("""
-                    INSERT INTO repository.DocumentSecurityRules
-                        (Id, RepositoryId, Action, MatchMode, ConditionsJson, SortOrder, CreatedAtUtc, CreatedBy, IsDeleted, Source)
+                await using (var insert = new NpgsqlCommand("""
+                    INSERT INTO repository."DocumentSecurityRules"
+                        ("Id", "RepositoryId", "Action", "MatchMode", "ConditionsJson", "SortOrder", "CreatedAtUtc", "CreatedBy", "IsDeleted", "Source")
                     VALUES
-                        (@Id, @RepositoryId, @Action, @MatchMode, @ConditionsJson, @SortOrder, SYSUTCDATETIME(), @CreatedBy, 0, NULL)
+                        (@Id, @RepositoryId, @Action, @MatchMode, @ConditionsJson, @SortOrder, now(), @CreatedBy, false, NULL)
                     """, connection, tx))
                 {
                     insert.Parameters.AddWithValue("@Id", ruleId);
@@ -348,25 +346,21 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         await EnsureSchemaAsync(cancellationToken);
         await EnsureRepositoryExistsAsync(repositoryId, tenantId, cancellationToken);
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
-            // Upsert share-scoped recipient (does not lock repo for other users).
-            await using (var upsert = new SqlCommand("""
-                MERGE repository.ShareRecipients AS t
-                USING (SELECT @RepositoryId AS RepositoryId, @UserId AS UserId) AS s
-                ON t.RepositoryId = s.RepositoryId AND t.UserId = s.UserId
-                WHEN MATCHED THEN
-                    UPDATE SET
-                        CanUpload = CASE WHEN @CanUpload = 1 OR t.CanUpload = 1 THEN 1 ELSE 0 END,
-                        IsDeleted = 0,
-                        ModifiedAtUtc = SYSUTCDATETIME()
-                WHEN NOT MATCHED THEN
-                    INSERT (Id, RepositoryId, UserId, CanUpload, CreatedAtUtc, CreatedBy, IsDeleted)
-                    VALUES (@Id, @RepositoryId, @UserId, @CanUpload, SYSUTCDATETIME(), @CreatedBy, 0);
+            // Upsert share-scoped recipient (does not lock repo for other users). ON CONFLICT
+            // targets the IX_ShareRecipients_Repo_User unique index (Postgres's MERGE equivalent).
+            await using (var upsert = new NpgsqlCommand("""
+                INSERT INTO repository."ShareRecipients" ("Id", "RepositoryId", "UserId", "CanUpload", "CreatedAtUtc", "CreatedBy", "IsDeleted")
+                VALUES (@Id, @RepositoryId, @UserId, @CanUpload, now(), @CreatedBy, false)
+                ON CONFLICT ("RepositoryId", "UserId") DO UPDATE SET
+                    "CanUpload" = (EXCLUDED."CanUpload" OR repository."ShareRecipients"."CanUpload"),
+                    "IsDeleted" = false,
+                    "ModifiedAtUtc" = now()
                 """, connection, tx))
             {
                 upsert.Parameters.AddWithValue("@Id", Guid.NewGuid());
@@ -560,16 +554,16 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         CancellationToken cancellationToken)
     {
         var groupIds = new HashSet<Guid>();
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
 
         // users.UserGroups may not exist on every DB — fail soft.
         try
         {
-            await using var cmd = new SqlCommand("""
-                SELECT GroupId
-                FROM users.UserGroups
-                WHERE TenantId = @TenantId AND UserId = @UserId
+            await using var cmd = new NpgsqlCommand("""
+                SELECT "GroupId"
+                FROM users."UserGroups"
+                WHERE "TenantId" = @TenantId AND "UserId" = @UserId
                 """, connection);
             cmd.Parameters.AddWithValue("@TenantId", tenantId);
             cmd.Parameters.AddWithValue("@UserId", userId);
@@ -577,7 +571,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             while (await reader.ReadAsync(cancellationToken))
                 groupIds.Add(reader.GetGuid(0));
         }
-        catch (SqlException)
+        catch (PostgresException)
         {
             // ignore missing schema
         }
@@ -590,31 +584,31 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         PrincipalSet principals,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
 
         // Repository = folder: any FolderId on the row is ignored (legacy clients sent repo id as folderId).
         const string sql = """
-            SELECT pol.CanView, pol.CanUpload, pol.CanDownload, pol.CanPrint, pol.CanDelete,
-                   pol.CanEditMetadata, pol.CanEditDocument, pol.CanCheckOut, pol.CanCheckIn, pol.CanSendForSignature,
-                   p.PrincipalType, p.PrincipalId
-            FROM repository.FolderSecurityPolicies pol
-            INNER JOIN repository.FolderSecurityPrincipals p ON p.PolicyId = pol.Id
-            WHERE pol.RepositoryId = @RepositoryId
-              AND pol.IsDeleted = 0
+            SELECT pol."CanView", pol."CanUpload", pol."CanDownload", pol."CanPrint", pol."CanDelete",
+                   pol."CanEditMetadata", pol."CanEditDocument", pol."CanCheckOut", pol."CanCheckIn", pol."CanSendForSignature",
+                   p."PrincipalType", p."PrincipalId"
+            FROM repository."FolderSecurityPolicies" pol
+            INNER JOIN repository."FolderSecurityPrincipals" p ON p."PolicyId" = pol."Id"
+            WHERE pol."RepositoryId" = @RepositoryId
+              AND pol."IsDeleted" = false
             """;
 
-        await using var countCmd = new SqlCommand("""
-            SELECT COUNT(1) FROM repository.FolderSecurityPolicies
-            WHERE RepositoryId = @RepositoryId
-              AND IsDeleted = 0
+        await using var countCmd = new NpgsqlCommand("""
+            SELECT COUNT(1) FROM repository."FolderSecurityPolicies"
+            WHERE "RepositoryId" = @RepositoryId
+              AND "IsDeleted" = false
             """, connection);
         countCmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         var anyPolicyExists = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture) > 0;
         if (!anyPolicyExists)
             return new FolderAccessEvaluation(PoliciesConfigured: false, Permissions: null);
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
 
         RepositoryPermissionFlagsDto? merged = null;
@@ -743,7 +737,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
     }
 
     private static async Task<(IReadOnlyList<Guid> UserIds, IReadOnlyList<Guid> GroupIds)> LoadPrincipalsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string fkColumn,
         Guid parentId,
@@ -752,11 +746,11 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         var users = new List<Guid>();
         var groups = new List<Guid>();
         var sql = $"""
-            SELECT PrincipalType, PrincipalId
-            FROM repository.[{tableName}]
-            WHERE [{fkColumn}] = @ParentId
+            SELECT "PrincipalType", "PrincipalId"
+            FROM repository."{tableName}"
+            WHERE "{fkColumn}" = @ParentId
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ParentId", parentId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -773,8 +767,8 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
     }
 
     private static async Task InsertPrincipalsAsync(
-        SqlConnection connection,
-        SqlTransaction tx,
+        NpgsqlConnection connection,
+        NpgsqlTransaction tx,
         string tableName,
         string fkColumn,
         Guid parentId,
@@ -785,10 +779,10 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         foreach (var userId in userIds)
         {
             var sql = $"""
-                INSERT INTO repository.[{tableName}] (Id, [{fkColumn}], PrincipalType, PrincipalId)
-                VALUES (@Id, @ParentId, N'User', @PrincipalId)
+                INSERT INTO repository."{tableName}" ("Id", "{fkColumn}", "PrincipalType", "PrincipalId")
+                VALUES (@Id, @ParentId, 'User', @PrincipalId)
                 """;
-            await using var cmd = new SqlCommand(sql, connection, tx);
+            await using var cmd = new NpgsqlCommand(sql, connection, tx);
             cmd.Parameters.AddWithValue("@Id", Guid.NewGuid());
             cmd.Parameters.AddWithValue("@ParentId", parentId);
             cmd.Parameters.AddWithValue("@PrincipalId", userId);
@@ -798,10 +792,10 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         foreach (var groupId in groupIds)
         {
             var sql = $"""
-                INSERT INTO repository.[{tableName}] (Id, [{fkColumn}], PrincipalType, PrincipalId)
-                VALUES (@Id, @ParentId, N'Group', @PrincipalId)
+                INSERT INTO repository."{tableName}" ("Id", "{fkColumn}", "PrincipalType", "PrincipalId")
+                VALUES (@Id, @ParentId, 'Group', @PrincipalId)
                 """;
-            await using var cmd = new SqlCommand(sql, connection, tx);
+            await using var cmd = new NpgsqlCommand(sql, connection, tx);
             cmd.Parameters.AddWithValue("@Id", Guid.NewGuid());
             cmd.Parameters.AddWithValue("@ParentId", parentId);
             cmd.Parameters.AddWithValue("@PrincipalId", groupId);
@@ -858,14 +852,14 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         Guid userId,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            SELECT CanUpload
-            FROM repository.ShareRecipients
-            WHERE RepositoryId = @RepositoryId
-              AND UserId = @UserId
-              AND IsDeleted = 0
+        await using var cmd = new NpgsqlCommand("""
+            SELECT "CanUpload"
+            FROM repository."ShareRecipients"
+            WHERE "RepositoryId" = @RepositoryId
+              AND "UserId" = @UserId
+              AND "IsDeleted" = false
             """, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@UserId", userId);
@@ -876,8 +870,8 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
     }
 
     private static async Task EnsureShareGrantRuleAsync(
-        SqlConnection connection,
-        SqlTransaction tx,
+        NpgsqlConnection connection,
+        NpgsqlTransaction tx,
         Guid repositoryId,
         Guid recipientUserId,
         string field,
@@ -886,16 +880,16 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         CancellationToken cancellationToken)
     {
         // Avoid duplicate share grants for same user+field+value.
-        await using (var find = new SqlCommand("""
-            SELECT r.Id, r.ConditionsJson
-            FROM repository.DocumentSecurityRules r
-            INNER JOIN repository.DocumentSecurityPrincipals p ON p.RuleId = r.Id
-            WHERE r.RepositoryId = @RepositoryId
-              AND r.IsDeleted = 0
-              AND r.Source = N'Share'
-              AND r.Action = N'grant'
-              AND p.PrincipalType = N'User'
-              AND p.PrincipalId = @UserId
+        await using (var find = new NpgsqlCommand("""
+            SELECT r."Id", r."ConditionsJson"
+            FROM repository."DocumentSecurityRules" r
+            INNER JOIN repository."DocumentSecurityPrincipals" p ON p."RuleId" = r."Id"
+            WHERE r."RepositoryId" = @RepositoryId
+              AND r."IsDeleted" = false
+              AND r."Source" = 'Share'
+              AND r."Action" = 'grant'
+              AND p."PrincipalType" = 'User'
+              AND p."PrincipalId" = @UserId
             """, connection, tx))
         {
             find.Parameters.AddWithValue("@RepositoryId", repositoryId);
@@ -920,11 +914,11 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             new { field, op = "equals", value }
         });
 
-        await using (var insert = new SqlCommand("""
-            INSERT INTO repository.DocumentSecurityRules
-                (Id, RepositoryId, Action, MatchMode, ConditionsJson, SortOrder, CreatedAtUtc, CreatedBy, IsDeleted, Source)
+        await using (var insert = new NpgsqlCommand("""
+            INSERT INTO repository."DocumentSecurityRules"
+                ("Id", "RepositoryId", "Action", "MatchMode", "ConditionsJson", "SortOrder", "CreatedAtUtc", "CreatedBy", "IsDeleted", "Source")
             VALUES
-                (@Id, @RepositoryId, N'grant', N'all', @ConditionsJson, 0, SYSUTCDATETIME(), @CreatedBy, 0, N'Share')
+                (@Id, @RepositoryId, 'grant', 'all', @ConditionsJson, 0, now(), @CreatedBy, false, 'Share')
             """, connection, tx))
         {
             insert.Parameters.AddWithValue("@Id", ruleId);
@@ -953,114 +947,88 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                 : GroupIds.Contains(principalId);
     }
 
+    // Matches scripts/postgres/CreateRepositorySchema.sql's shape for these 5 tables exactly
+    // (including the two Phase 4 findings patched into that script: DocumentSecurityRules.Source
+    // and the ShareRecipients table, both of which only ever existed via this inline path on
+    // SQL Server too). Native CREATE TABLE/ADD COLUMN IF NOT EXISTS replaces the sys.tables
+    // existence-check ceremony.
     private const string EnsureSchemaSql = """
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'FolderSecurityPolicies')
-        BEGIN
-            CREATE TABLE repository.FolderSecurityPolicies (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_FolderSecurityPolicies PRIMARY KEY,
-                RepositoryId UNIQUEIDENTIFIER NOT NULL,
-                FolderId UNIQUEIDENTIFIER NULL,
-                CanView BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanView DEFAULT (1),
-                CanUpload BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanUpload DEFAULT (0),
-                CanDownload BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanDownload DEFAULT (0),
-                CanPrint BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanPrint DEFAULT (0),
-                CanDelete BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanDelete DEFAULT (0),
-                CanEditMetadata BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanEditMetadata DEFAULT (0),
-                CanEditDocument BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanEditDocument DEFAULT (0),
-                CanCheckOut BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanCheckOut DEFAULT (0),
-                CanCheckIn BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanCheckIn DEFAULT (0),
-                CanSendForSignature BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CanSendForSignature DEFAULT (0),
-                CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_FolderSecurityPolicies_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
-                ModifiedAtUtc DATETIME2(3) NULL,
-                CreatedBy UNIQUEIDENTIFIER NULL,
-                ModifiedBy UNIQUEIDENTIFIER NULL,
-                IsDeleted BIT NOT NULL CONSTRAINT DF_FolderSecurityPolicies_IsDeleted DEFAULT (0)
-            );
-            CREATE INDEX IX_FolderSecurityPolicies_Repo_Folder
-                ON repository.FolderSecurityPolicies (RepositoryId, FolderId, IsDeleted);
-        END
+        CREATE TABLE IF NOT EXISTS repository."FolderSecurityPolicies" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_FolderSecurityPolicies" PRIMARY KEY,
+            "RepositoryId" uuid NOT NULL,
+            "FolderId" uuid NULL,
+            "CanView" boolean NOT NULL DEFAULT true,
+            "CanUpload" boolean NOT NULL DEFAULT false,
+            "CanDownload" boolean NOT NULL DEFAULT false,
+            "CanPrint" boolean NOT NULL DEFAULT false,
+            "CanDelete" boolean NOT NULL DEFAULT false,
+            "CanEditMetadata" boolean NOT NULL DEFAULT false,
+            "CanEditDocument" boolean NOT NULL DEFAULT false,
+            "CanCheckOut" boolean NOT NULL DEFAULT false,
+            "CanCheckIn" boolean NOT NULL DEFAULT false,
+            "CanSendForSignature" boolean NOT NULL DEFAULT false,
+            "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+            "ModifiedAtUtc" timestamptz NULL,
+            "CreatedBy" uuid NULL,
+            "ModifiedBy" uuid NULL,
+            "IsDeleted" boolean NOT NULL DEFAULT false
+        );
+        CREATE INDEX IF NOT EXISTS "IX_FolderSecurityPolicies_Repo_Folder"
+            ON repository."FolderSecurityPolicies" ("RepositoryId", "FolderId", "IsDeleted");
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'FolderSecurityPrincipals')
-        BEGIN
-            CREATE TABLE repository.FolderSecurityPrincipals (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_FolderSecurityPrincipals PRIMARY KEY,
-                PolicyId UNIQUEIDENTIFIER NOT NULL,
-                PrincipalType NVARCHAR(16) NOT NULL,
-                PrincipalId UNIQUEIDENTIFIER NOT NULL,
-                CONSTRAINT FK_FolderSecurityPrincipals_Policy
-                    FOREIGN KEY (PolicyId) REFERENCES repository.FolderSecurityPolicies (Id) ON DELETE CASCADE
-            );
-            CREATE INDEX IX_FolderSecurityPrincipals_Policy ON repository.FolderSecurityPrincipals (PolicyId);
-            CREATE INDEX IX_FolderSecurityPrincipals_Principal
-                ON repository.FolderSecurityPrincipals (PrincipalType, PrincipalId);
-        END
+        CREATE TABLE IF NOT EXISTS repository."FolderSecurityPrincipals" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_FolderSecurityPrincipals" PRIMARY KEY,
+            "PolicyId" uuid NOT NULL,
+            "PrincipalType" varchar(16) NOT NULL,
+            "PrincipalId" uuid NOT NULL,
+            CONSTRAINT "FK_FolderSecurityPrincipals_Policy"
+                FOREIGN KEY ("PolicyId") REFERENCES repository."FolderSecurityPolicies" ("Id") ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS "IX_FolderSecurityPrincipals_Policy" ON repository."FolderSecurityPrincipals" ("PolicyId");
+        CREATE INDEX IF NOT EXISTS "IX_FolderSecurityPrincipals_Principal"
+            ON repository."FolderSecurityPrincipals" ("PrincipalType", "PrincipalId");
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'DocumentSecurityRules')
-        BEGIN
-            CREATE TABLE repository.DocumentSecurityRules (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_DocumentSecurityRules PRIMARY KEY,
-                RepositoryId UNIQUEIDENTIFIER NOT NULL,
-                Action NVARCHAR(16) NOT NULL,
-                MatchMode NVARCHAR(8) NOT NULL CONSTRAINT DF_DocumentSecurityRules_MatchMode DEFAULT (N'all'),
-                ConditionsJson NVARCHAR(MAX) NOT NULL,
-                SortOrder INT NOT NULL CONSTRAINT DF_DocumentSecurityRules_SortOrder DEFAULT (0),
-                CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_DocumentSecurityRules_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
-                ModifiedAtUtc DATETIME2(3) NULL,
-                CreatedBy UNIQUEIDENTIFIER NULL,
-                ModifiedBy UNIQUEIDENTIFIER NULL,
-                IsDeleted BIT NOT NULL CONSTRAINT DF_DocumentSecurityRules_IsDeleted DEFAULT (0)
-            );
-            CREATE INDEX IX_DocumentSecurityRules_Repo
-                ON repository.DocumentSecurityRules (RepositoryId, IsDeleted, SortOrder);
-        END
+        CREATE TABLE IF NOT EXISTS repository."DocumentSecurityRules" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_DocumentSecurityRules" PRIMARY KEY,
+            "RepositoryId" uuid NOT NULL,
+            "Action" varchar(16) NOT NULL,
+            "MatchMode" varchar(8) NOT NULL CONSTRAINT "DF_DocumentSecurityRules_MatchMode" DEFAULT 'all',
+            "ConditionsJson" text NOT NULL,
+            "SortOrder" integer NOT NULL CONSTRAINT "DF_DocumentSecurityRules_SortOrder" DEFAULT 0,
+            "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+            "ModifiedAtUtc" timestamptz NULL,
+            "CreatedBy" uuid NULL,
+            "ModifiedBy" uuid NULL,
+            "IsDeleted" boolean NOT NULL DEFAULT false
+        );
+        CREATE INDEX IF NOT EXISTS "IX_DocumentSecurityRules_Repo"
+            ON repository."DocumentSecurityRules" ("RepositoryId", "IsDeleted", "SortOrder");
 
-        IF COL_LENGTH('repository.DocumentSecurityRules', 'Source') IS NULL
-            ALTER TABLE repository.DocumentSecurityRules ADD Source NVARCHAR(32) NULL;
+        ALTER TABLE repository."DocumentSecurityRules" ADD COLUMN IF NOT EXISTS "Source" varchar(32) NULL;
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'DocumentSecurityPrincipals')
-        BEGIN
-            CREATE TABLE repository.DocumentSecurityPrincipals (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_DocumentSecurityPrincipals PRIMARY KEY,
-                RuleId UNIQUEIDENTIFIER NOT NULL,
-                PrincipalType NVARCHAR(16) NOT NULL,
-                PrincipalId UNIQUEIDENTIFIER NOT NULL,
-                CONSTRAINT FK_DocumentSecurityPrincipals_Rule
-                    FOREIGN KEY (RuleId) REFERENCES repository.DocumentSecurityRules (Id) ON DELETE CASCADE
-            );
-            CREATE INDEX IX_DocumentSecurityPrincipals_Rule ON repository.DocumentSecurityPrincipals (RuleId);
-            CREATE INDEX IX_DocumentSecurityPrincipals_Principal
-                ON repository.DocumentSecurityPrincipals (PrincipalType, PrincipalId);
-        END
+        CREATE TABLE IF NOT EXISTS repository."DocumentSecurityPrincipals" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_DocumentSecurityPrincipals" PRIMARY KEY,
+            "RuleId" uuid NOT NULL,
+            "PrincipalType" varchar(16) NOT NULL,
+            "PrincipalId" uuid NOT NULL,
+            CONSTRAINT "FK_DocumentSecurityPrincipals_Rule"
+                FOREIGN KEY ("RuleId") REFERENCES repository."DocumentSecurityRules" ("Id") ON DELETE CASCADE
+        );
+        CREATE INDEX IF NOT EXISTS "IX_DocumentSecurityPrincipals_Rule" ON repository."DocumentSecurityPrincipals" ("RuleId");
+        CREATE INDEX IF NOT EXISTS "IX_DocumentSecurityPrincipals_Principal"
+            ON repository."DocumentSecurityPrincipals" ("PrincipalType", "PrincipalId");
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'ShareRecipients')
-        BEGIN
-            CREATE TABLE repository.ShareRecipients (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_ShareRecipients PRIMARY KEY,
-                RepositoryId UNIQUEIDENTIFIER NOT NULL,
-                UserId UNIQUEIDENTIFIER NOT NULL,
-                CanUpload BIT NOT NULL CONSTRAINT DF_ShareRecipients_CanUpload DEFAULT (0),
-                CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_ShareRecipients_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
-                ModifiedAtUtc DATETIME2(3) NULL,
-                CreatedBy UNIQUEIDENTIFIER NULL,
-                IsDeleted BIT NOT NULL CONSTRAINT DF_ShareRecipients_IsDeleted DEFAULT (0)
-            );
-            CREATE UNIQUE INDEX IX_ShareRecipients_Repo_User
-                ON repository.ShareRecipients (RepositoryId, UserId);
-        END
+        CREATE TABLE IF NOT EXISTS repository."ShareRecipients" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_ShareRecipients" PRIMARY KEY,
+            "RepositoryId" uuid NOT NULL,
+            "UserId" uuid NOT NULL,
+            "CanUpload" boolean NOT NULL CONSTRAINT "DF_ShareRecipients_CanUpload" DEFAULT false,
+            "CreatedAtUtc" timestamptz NOT NULL CONSTRAINT "DF_ShareRecipients_CreatedAtUtc" DEFAULT now(),
+            "ModifiedAtUtc" timestamptz NULL,
+            "CreatedBy" uuid NULL,
+            "IsDeleted" boolean NOT NULL CONSTRAINT "DF_ShareRecipients_IsDeleted" DEFAULT false
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_ShareRecipients_Repo_User"
+            ON repository."ShareRecipients" ("RepositoryId", "UserId");
         """;
 }

@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Contracts;
@@ -62,9 +62,9 @@ public sealed class WorkflowInboxShareAssignmentService : IWorkflowInboxShareAss
         await _tableCreator.EnsureLegacyMailboxTablesAsync(workflowId, connectionString, cancellationToken);
 
         var suffix = workflowId.ToString("N")[..8];
-        var transactionTable = $"workflow.[transaction_{suffix}]";
+        var transactionTable = $"workflow.transaction_{suffix}";
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var openTransaction = await FindOpenTransactionAsync(
@@ -108,21 +108,22 @@ public sealed class WorkflowInboxShareAssignmentService : IWorkflowInboxShareAss
     }
 
     private static async Task<(int TransactionId, string? ActivityId)?> FindOpenTransactionAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTable,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
         var sql = $@"
-SELECT TOP 1 Id, ActivityId
+SELECT id, activity_id
 FROM {transactionTable}
-WHERE WorkflowInstanceId = @WorkflowInstanceId
-  AND IsDeleted = 0
-  AND ActionStatus = @ActionStatusOpen
-  AND UPPER(LTRIM(RTRIM(ISNULL(StageType, N'')))) <> @EndStageType
-ORDER BY Id DESC;";
+WHERE workflow_instance_id = @WorkflowInstanceId
+  AND is_deleted = false
+  AND action_status = @ActionStatusOpen
+  AND UPPER(TRIM(COALESCE(stage_type, ''))) <> @EndStageType
+ORDER BY id DESC
+LIMIT 1;";
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         cmd.Parameters.AddWithValue("@ActionStatusOpen", ActionStatusOpen);
         cmd.Parameters.AddWithValue("@EndStageType", EndStageType);
@@ -135,7 +136,7 @@ ORDER BY Id DESC;";
     }
 
     private static async Task UpdateTransactionAssigneeAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTable,
         int transactionId,
         Guid guestUserId,
@@ -144,12 +145,12 @@ ORDER BY Id DESC;";
     {
         var sql = $@"
 UPDATE {transactionTable}
-SET ActivityUserId = @ActivityUserId,
-    ModifiedAt = SYSUTCDATETIME(),
-    ModifiedBy = @ModifiedBy
-WHERE Id = @Id AND IsDeleted = 0;";
+SET activity_user_id = @ActivityUserId,
+    modified_at = now(),
+    modified_by = @ModifiedBy
+WHERE id = @Id AND is_deleted = false;";
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@ActivityUserId", guestUserId);
         cmd.Parameters.AddWithValue("@ModifiedBy", modifiedByUserId);
         cmd.Parameters.AddWithValue("@Id", transactionId);

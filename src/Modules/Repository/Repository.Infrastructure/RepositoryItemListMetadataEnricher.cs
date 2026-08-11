@@ -1,5 +1,5 @@
 using System.Globalization;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -46,7 +46,7 @@ internal static class RepositoryItemListMetadataEnricher
         string? ocrJson,
         string? summaryJson,
         RepositoryDetailDto? repository = null,
-        SqlDataReader? reader = null,
+        NpgsqlDataReader? reader = null,
         HashSet<string>? tableColumns = null)
     {
         var extracted = RepositoryOcrJsonMetadataExtractor.Extract(ocrJson, summaryJson);
@@ -86,7 +86,7 @@ internal static class RepositoryItemListMetadataEnricher
 
     private static Dictionary<string, string> ReadRepositoryFieldScalars(
         RepositoryDetailDto? repository,
-        SqlDataReader? reader,
+        NpgsqlDataReader? reader,
         HashSet<string>? tableColumns)
     {
         var values = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -116,7 +116,7 @@ internal static class RepositoryItemListMetadataEnricher
         return values;
     }
 
-    private static bool HasColumn(SqlDataReader reader, string columnName)
+    private static bool HasColumn(NpgsqlDataReader reader, string columnName)
     {
         for (var i = 0; i < reader.FieldCount; i++)
         {

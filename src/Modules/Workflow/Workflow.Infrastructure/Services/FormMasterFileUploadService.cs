@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Azure.Storage.Blobs;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -66,7 +66,7 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await EnsureMasterFileProcessTableAsync(connection, cancellationToken);
@@ -387,7 +387,7 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
     }
 
     private static async Task<Guid?> ResolveWorkflowIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantGuid,
         string formId,
         string? workflowIdFromRequest,
@@ -405,18 +405,19 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
             return null;
 
         const string sql = """
-            SELECT TOP 1 WorkflowId
-            FROM workflow.WorkflowInitiateInfo
-            WHERE TenantId = @TenantId
+            SELECT "WorkflowId"
+            FROM workflow."WorkflowInitiateInfo"
+            WHERE "TenantId" = @TenantId
               AND (
-                    InputJson LIKE @FormGuidPattern
-                 OR InputJson LIKE @FormGuidPattern2
-                 OR InputJson LIKE @LegacyFormPattern
+                    "InputJson" LIKE @FormGuidPattern
+                 OR "InputJson" LIKE @FormGuidPattern2
+                 OR "InputJson" LIKE @LegacyFormPattern
               )
-            ORDER BY Id DESC;
+            ORDER BY "Id" DESC
+            LIMIT 1;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
         cmd.Parameters.AddWithValue("@FormGuidPattern", $"%\"formGuid\":\"{formId}\"%");
         cmd.Parameters.AddWithValue("@FormGuidPattern2", $"%\"masterFormId\":\"{formId}\"%");
@@ -434,7 +435,7 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
     private sealed record FormMasterMeta(string FormId, string? UniqueColumns);
 
     private static async Task<FormMasterMeta?> LoadFormAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
@@ -442,12 +443,13 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
             return null;
 
         const string sql = """
-            SELECT TOP 1 id, uniqueColumns
-            FROM dbo.wForm
-            WHERE id = @FormId AND isDeleted = 0;
+            SELECT id, "uniqueColumns"
+            FROM dbo."wForm"
+            WHERE id = @FormId AND "isDeleted" = false
+            LIMIT 1;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", formId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -459,7 +461,7 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
     }
 
     private static async Task<int> InsertMasterFileProcessAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         int tenantIntId,
         int inputId,
         string fileName,
@@ -474,16 +476,16 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         CancellationToken cancellationToken)
     {
         const string sql = """
-            INSERT INTO dbo.masterFileprocess (
-                tenantId, inputType, inputId, totalRows, fileName, filePath, fileType, fileSize,
-                status, remarks, cloudFileServer, createdAt, createdBy, isDeleted, settingsJson, workflowId)
-            OUTPUT INSERTED.id
+            INSERT INTO dbo."masterFileprocess" (
+                "tenantId", "inputType", "inputId", "totalRows", "fileName", "filePath", "fileType", "fileSize",
+                status, remarks, "cloudFileServer", "createdAt", "createdBy", "isDeleted", "settingsJson", "workflowId")
             VALUES (
                 @TenantId, @InputType, @InputId, 0, @FileName, @FilePath, @FileType, @FileSize,
-                0, '', @CloudFileServer, @CreatedAt, @CreatedBy, 0, @SettingsJson, @WorkflowId);
+                0, '', @CloudFileServer, @CreatedAt, @CreatedBy, false, @SettingsJson, @WorkflowId)
+            RETURNING id;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantIntId);
         cmd.Parameters.AddWithValue("@InputType", "FORM");
         cmd.Parameters.AddWithValue("@InputId", inputId);
@@ -502,92 +504,65 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
-    private static async Task EnsureMasterFileProcessTableAsync(SqlConnection connection, CancellationToken cancellationToken)
+    /// <summary>
+    /// PHASE 4: dbo.masterFileprocess is always created fresh on Postgres tenant DBs with
+    /// "workflowId" already varchar(50) from day one (see CREATE TABLE below) — the SQL Server
+    /// EnsureMasterFileProcessWorkflowIdIsGuidAsync legacy-drift-detection (int-typed workflowId
+    /// on older installs, ALTER COLUMN to widen it) has nothing to detect here, so it was dropped
+    /// rather than translated. Same precedent as FormService.cs / ResolveWFormIdParameterAsync.
+    /// </summary>
+    private static async Task EnsureMasterFileProcessTableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
-        if (!await TableExistsAsync(connection, "masterFileprocess", "dbo", cancellationToken))
-        {
-            const string createSql = """
-                CREATE TABLE dbo.masterFileprocess (
-                    id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                    tenantId INT NOT NULL,
-                    inputType NVARCHAR(500) NULL,
-                    inputId INT NOT NULL,
-                    totalRows BIGINT NOT NULL DEFAULT(0),
-                    fileName NVARCHAR(500) NULL,
-                    filePath NVARCHAR(1000) NULL,
-                    fileType NVARCHAR(50) NULL,
-                    fileSize BIGINT NULL,
-                    status INT NOT NULL DEFAULT(0),
-                    remarks NVARCHAR(MAX) NULL,
-                    cloudFileServer NVARCHAR(100) NULL,
-                    createdAt NVARCHAR(50) NULL,
-                    modifiedAt NVARCHAR(50) NULL,
-                    createdBy NVARCHAR(50) NULL,
-                    modifiedBy NVARCHAR(50) NULL,
-                    isDeleted BIT NOT NULL DEFAULT(0),
-                    settingsJson NVARCHAR(MAX) NULL,
-                    workflowId NVARCHAR(50) NULL
-                );
-                CREATE INDEX IX_masterFileprocess_tenantId ON dbo.masterFileprocess(tenantId);
-                CREATE INDEX IX_masterFileprocess_workflowId ON dbo.masterFileprocess(workflowId);
-                """;
-
-            await using var createCmd = new SqlCommand(createSql, connection) { CommandTimeout = 120 };
-            await createCmd.ExecuteNonQueryAsync(cancellationToken);
-            return;
-        }
-
-        await EnsureMasterFileProcessWorkflowIdIsGuidAsync(connection, cancellationToken);
-    }
-
-    private static async Task EnsureMasterFileProcessWorkflowIdIsGuidAsync(
-        SqlConnection connection,
-        CancellationToken cancellationToken)
-    {
-        if (!await ColumnExistsAsync(connection, "masterFileprocess", "workflowId", "dbo", cancellationToken))
-        {
-            const string addSql = "ALTER TABLE dbo.masterFileprocess ADD workflowId NVARCHAR(50) NULL;";
-            await using var addCmd = new SqlCommand(addSql, connection);
-            await addCmd.ExecuteNonQueryAsync(cancellationToken);
-            return;
-        }
-
-        const string typeSql = """
-            SELECT t.name
-            FROM sys.columns c
-            INNER JOIN sys.types t ON c.user_type_id = t.user_type_id
-            INNER JOIN sys.tables tab ON c.object_id = tab.object_id
-            INNER JOIN sys.schemas s ON tab.schema_id = s.schema_id
-            WHERE tab.name = 'masterFileprocess' AND s.name = 'dbo' AND c.name = 'workflowId';
+        const string createSql = """
+            CREATE SCHEMA IF NOT EXISTS dbo;
+            CREATE TABLE IF NOT EXISTS dbo."masterFileprocess" (
+                id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,
+                "tenantId" integer NOT NULL,
+                "inputType" varchar(500) NULL,
+                "inputId" integer NOT NULL,
+                "totalRows" bigint NOT NULL DEFAULT 0,
+                "fileName" varchar(500) NULL,
+                "filePath" varchar(1000) NULL,
+                "fileType" varchar(50) NULL,
+                "fileSize" bigint NULL,
+                status integer NOT NULL DEFAULT 0,
+                remarks text NULL,
+                "cloudFileServer" varchar(100) NULL,
+                "createdAt" varchar(50) NULL,
+                "modifiedAt" varchar(50) NULL,
+                "createdBy" varchar(50) NULL,
+                "modifiedBy" varchar(50) NULL,
+                "isDeleted" boolean NOT NULL DEFAULT false,
+                "settingsJson" text NULL,
+                "workflowId" varchar(50) NULL
+            );
+            CREATE INDEX IF NOT EXISTS "IX_masterFileprocess_tenantId" ON dbo."masterFileprocess"("tenantId");
+            CREATE INDEX IF NOT EXISTS "IX_masterFileprocess_workflowId" ON dbo."masterFileprocess"("workflowId");
             """;
 
-        await using var typeCmd = new SqlCommand(typeSql, connection);
-        var typeName = (await typeCmd.ExecuteScalarAsync(cancellationToken))?.ToString();
-        if (string.Equals(typeName, "int", StringComparison.OrdinalIgnoreCase))
-        {
-            const string alterSql = "ALTER TABLE dbo.masterFileprocess ALTER COLUMN workflowId NVARCHAR(50) NULL;";
-            await using var alterCmd = new SqlCommand(alterSql, connection);
-            await alterCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
+        await using var createCmd = new NpgsqlCommand(createSql, connection) { CommandTimeout = 120 };
+        await createCmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<int> EnsureTenantIntIdAsync(SqlConnection conn, Guid tenantGuid, CancellationToken cancellationToken)
+    /// <summary>
+    /// dbo."TenantIdMap" is retained (not eliminated like other legacy-drift shims) because the
+    /// external Python master-file-import job reads dbo.masterFileprocess."tenantId" as a small
+    /// integer for v5 parity — this side table is the source of that integer, not drift detection.
+    /// </summary>
+    private static async Task<int> EnsureTenantIntIdAsync(NpgsqlConnection conn, Guid tenantGuid, CancellationToken cancellationToken)
     {
         const string ensureSql = """
-            IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = 'TenantIdMap' AND schema_id = SCHEMA_ID('dbo'))
-            BEGIN
-                CREATE TABLE dbo.TenantIdMap(
-                    TenantGuid UNIQUEIDENTIFIER NOT NULL PRIMARY KEY,
-                    TenantIntId INT IDENTITY(1,1) NOT NULL UNIQUE,
-                    CreatedAtUtc DATETIME2(3) NOT NULL DEFAULT SYSUTCDATETIME()
-                );
-            END
+            CREATE TABLE IF NOT EXISTS dbo."TenantIdMap"(
+                "TenantGuid" uuid NOT NULL PRIMARY KEY,
+                "TenantIntId" integer GENERATED ALWAYS AS IDENTITY NOT NULL UNIQUE,
+                "CreatedAtUtc" timestamptz NOT NULL DEFAULT now()
+            );
             """;
-        await using (var ensureCmd = new SqlCommand(ensureSql, conn))
+        await using (var ensureCmd = new NpgsqlCommand(ensureSql, conn) { CommandTimeout = 120 })
             await ensureCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        const string getSql = "SELECT TenantIntId FROM dbo.TenantIdMap WHERE TenantGuid = @TenantGuid";
-        await using (var getCmd = new SqlCommand(getSql, conn))
+        const string getSql = """SELECT "TenantIntId" FROM dbo."TenantIdMap" WHERE "TenantGuid" = @TenantGuid""";
+        await using (var getCmd = new NpgsqlCommand(getSql, conn))
         {
             getCmd.Parameters.AddWithValue("@TenantGuid", tenantGuid);
             var existing = await getCmd.ExecuteScalarAsync(cancellationToken);
@@ -596,12 +571,20 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         }
 
         const string insertSql = """
-            INSERT INTO dbo.TenantIdMap(TenantGuid) VALUES(@TenantGuid);
-            SELECT TenantIntId FROM dbo.TenantIdMap WHERE TenantGuid = @TenantGuid;
+            INSERT INTO dbo."TenantIdMap"("TenantGuid") VALUES(@TenantGuid)
+            ON CONFLICT ("TenantGuid") DO NOTHING
+            RETURNING "TenantIntId";
             """;
-        await using var insertCmd = new SqlCommand(insertSql, conn);
+        await using var insertCmd = new NpgsqlCommand(insertSql, conn);
         insertCmd.Parameters.AddWithValue("@TenantGuid", tenantGuid);
-        return Convert.ToInt32(await insertCmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        var inserted = await insertCmd.ExecuteScalarAsync(cancellationToken);
+        if (inserted != null && inserted != DBNull.Value)
+            return Convert.ToInt32(inserted, CultureInfo.InvariantCulture);
+
+        // Concurrent insert from another request won the race; re-read.
+        await using var reGetCmd = new NpgsqlCommand(getSql, conn);
+        reGetCmd.Parameters.AddWithValue("@TenantGuid", tenantGuid);
+        return Convert.ToInt32(await reGetCmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
 
     private bool TryGetBlobClient(Guid tenantGuid, string blobPath, out BlobClient blobClient)
@@ -627,42 +610,18 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         string schema,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT 1
-            FROM sys.tables t
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @TableName AND s.name = @Schema;
+            SELECT 1 FROM information_schema.tables
+            WHERE table_name = @TableName AND table_schema = @Schema;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         cmd.Parameters.AddWithValue("@Schema", schema);
-        var result = await cmd.ExecuteScalarAsync(cancellationToken);
-        return result != null && result != DBNull.Value;
-    }
-
-    private static async Task<bool> ColumnExistsAsync(
-        SqlConnection connection,
-        string tableName,
-        string columnName,
-        string schema,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT 1
-            FROM sys.columns c
-            INNER JOIN sys.tables t ON c.object_id = t.object_id
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @TableName AND s.name = @Schema AND c.name = @ColumnName;
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@TableName", tableName);
-        cmd.Parameters.AddWithValue("@Schema", schema);
-        cmd.Parameters.AddWithValue("@ColumnName", columnName);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         return result != null && result != DBNull.Value;
     }

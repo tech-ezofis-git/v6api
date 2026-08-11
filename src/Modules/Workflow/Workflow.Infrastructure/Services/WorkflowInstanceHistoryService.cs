@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Domain.Enums;
 
@@ -35,10 +35,10 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
             throw new InvalidOperationException("Tenant connection string not resolved.");
 
         var suffix = workflowId.ToString("N")[..8];
-        var instancesTable = $"workflow.[WorkflowInstances_{suffix}]";
-        var transactionTable = $"workflow.[transaction_{suffix}]";
+        var instancesTable = $"workflow.workflow_instances_{suffix}";
+        var transactionTable = $"workflow.transaction_{suffix}";
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var instance = await LoadInstanceHeaderAsync(
@@ -262,23 +262,24 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
     }
 
     private static async Task<InstanceHeaderRow?> LoadInstanceHeaderAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string instancesTable,
         string suffix,
         Guid workflowId,
         Guid instanceId,
         CancellationToken cancellationToken)
     {
-        if (!await TableExistsAsync(connection, $"WorkflowInstances_{suffix}", cancellationToken))
+        if (!await TableExistsAsync(connection, $"workflow_instances_{suffix}", cancellationToken))
             return null;
 
         var sql = $"""
-            SELECT TOP 1 WorkflowName, ReferenceNumber, Status
+            SELECT workflow_name, reference_number, status
             FROM {instancesTable}
-            WHERE Id = @InstanceId AND WorkflowId = @WorkflowId;
+            WHERE id = @InstanceId AND workflow_id = @WorkflowId
+            LIMIT 1;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
         cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -292,32 +293,32 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
     }
 
     private static async Task<IReadOnlyList<TransactionHistoryRow>> LoadTransactionsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string transactionTable,
         Guid instanceId,
         CancellationToken cancellationToken)
     {
         var sql = $"""
             SELECT
-                Id,
-                ActivityId,
-                StageType,
-                StageName,
-                Review,
-                ActionStatus,
-                CreatedAt,
-                ModifiedAt,
-                CreatedBy,
-                ModifiedBy,
-                ActivityUserId
+                id,
+                activity_id,
+                stage_type,
+                stage_name,
+                review,
+                action_status,
+                created_at,
+                modified_at,
+                created_by,
+                modified_by,
+                activity_user_id
             FROM {transactionTable}
-            WHERE WorkflowInstanceId = @InstanceId
-              AND IsDeleted = 0
-            ORDER BY CreatedAt ASC, Id ASC;
+            WHERE workflow_instance_id = @InstanceId
+              AND is_deleted = false
+            ORDER BY created_at ASC, id ASC;
             """;
 
         var list = new List<TransactionHistoryRow>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@InstanceId", instanceId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -340,18 +341,17 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableName,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT 1
-            FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'workflow' AND t.name = @TableName;
+            FROM information_schema.tables
+            WHERE table_schema = 'workflow' AND table_name = @TableName;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", tableName);
         return await cmd.ExecuteScalarAsync(cancellationToken) != null;
     }

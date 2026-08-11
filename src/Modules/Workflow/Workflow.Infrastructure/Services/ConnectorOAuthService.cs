@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -222,15 +222,15 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
         await using var connection = await OpenTenantConnectionAsync(cancellationToken);
         await EnsureOAuthColumnsAsync(connection, cancellationToken);
         const string sql = """
-            UPDATE dbo.connector
-            SET AccessToken = NULL,
-                RefreshToken = NULL,
-                TokenExpiresAtUtc = NULL,
-                OAuthStatus = N'Revoked',
-                ModifiedAtUtc = @Now
-            WHERE Id = @Id AND IsDeleted = 0;
+            UPDATE dbo."connector"
+            SET "AccessToken" = NULL,
+                "RefreshToken" = NULL,
+                "TokenExpiresAtUtc" = NULL,
+                "OAuthStatus" = 'Revoked',
+                "ModifiedAtUtc" = @Now
+            WHERE "Id" = @Id AND "IsDeleted" = false;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", connectorId);
         cmd.Parameters.AddWithValue("@Now", DateTime.UtcNow);
         var updated = await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -444,17 +444,17 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
         await EnsureOAuthColumnsAsync(connection, cancellationToken);
 
         const string sql = """
-            UPDATE dbo.connector
-            SET AccessToken = @AccessToken,
-                RefreshToken = COALESCE(@RefreshToken, RefreshToken),
-                TokenExpiresAtUtc = @Expires,
-                ExternalAccountEmail = COALESCE(@Email, ExternalAccountEmail),
-                ExternalAccountId = COALESCE(@ExternalId, ExternalAccountId),
-                OAuthStatus = @Status,
-                ModifiedAtUtc = @Now
-            WHERE Id = @Id AND IsDeleted = 0;
+            UPDATE dbo."connector"
+            SET "AccessToken" = @AccessToken,
+                "RefreshToken" = COALESCE(@RefreshToken, "RefreshToken"),
+                "TokenExpiresAtUtc" = @Expires,
+                "ExternalAccountEmail" = COALESCE(@Email, "ExternalAccountEmail"),
+                "ExternalAccountId" = COALESCE(@ExternalId, "ExternalAccountId"),
+                "OAuthStatus" = @Status,
+                "ModifiedAtUtc" = @Now
+            WHERE "Id" = @Id AND "IsDeleted" = false;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", connectorId);
         cmd.Parameters.AddWithValue("@AccessToken", token.AccessToken);
         cmd.Parameters.AddWithValue("@RefreshToken", (object?)token.RefreshToken ?? DBNull.Value);
@@ -472,8 +472,8 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
     {
         await using var connection = await OpenTenantConnectionAsync(cancellationToken);
         await EnsureOAuthColumnsAsync(connection, cancellationToken);
-        const string sql = "UPDATE dbo.connector SET OAuthStatus = @Status, ModifiedAtUtc = @Now WHERE Id = @Id AND IsDeleted = 0;";
-        await using var cmd = new SqlCommand(sql, connection);
+        const string sql = """UPDATE dbo."connector" SET "OAuthStatus" = @Status, "ModifiedAtUtc" = @Now WHERE "Id" = @Id AND "IsDeleted" = false;""";
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", connectorId);
         cmd.Parameters.AddWithValue("@Status", status);
         cmd.Parameters.AddWithValue("@Now", DateTime.UtcNow);
@@ -485,12 +485,12 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
         await using var connection = await OpenTenantConnectionAsync(cancellationToken);
         await EnsureOAuthColumnsAsync(connection, cancellationToken);
         const string sql = """
-            SELECT ProviderCode, ConfigJson, AccessToken, RefreshToken, TokenExpiresAtUtc,
-                   ExternalAccountEmail, ExternalAccountId, OAuthStatus
-            FROM dbo.connector
-            WHERE Id = @Id AND IsDeleted = 0;
+            SELECT "ProviderCode", "ConfigJson", "AccessToken", "RefreshToken", "TokenExpiresAtUtc",
+                   "ExternalAccountEmail", "ExternalAccountId", "OAuthStatus"
+            FROM dbo."connector"
+            WHERE "Id" = @Id AND "IsDeleted" = false;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", connectorId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         if (!await reader.ReadAsync(cancellationToken))
@@ -507,44 +507,44 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
             reader.IsDBNull(7) ? "Pending" : reader.GetString(7));
     }
 
-    private async Task EnsureOAuthColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private async Task EnsureOAuthColumnsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         if (!await TableExistsAsync(connection, cancellationToken))
         {
             throw new InvalidOperationException(
-                "dbo.connector does not exist. Run scripts/Create-Connector-Table.sql on the tenant database.");
+                "dbo.\"connector\" does not exist. Run scripts/postgres/Create-Connector-Table.sql on the tenant database.");
         }
 
         // Modern schema check
         const string check = """
-            SELECT COUNT(1) FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'connector' AND COLUMN_NAME = 'ProviderCode';
+            SELECT COUNT(1) FROM information_schema.columns
+            WHERE table_schema = 'dbo' AND table_name = 'connector' AND column_name = 'ProviderCode';
             """;
-        await using var cmd = new SqlCommand(check, connection);
-        var ok = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
+        await using var cmd = new NpgsqlCommand(check, connection);
+        var ok = Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
         if (!ok)
         {
             throw new InvalidOperationException(
-                "dbo.connector is on a legacy schema. Run scripts/Create-Connector-Table.sql to migrate.");
+                "dbo.\"connector\" is on a legacy schema. Run scripts/postgres/Create-Connector-Table.sql to migrate.");
         }
     }
 
-    private static async Task<bool> TableExistsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    private static async Task<bool> TableExistsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT COUNT(1) FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = 'connector';
+            SELECT COUNT(1) FROM information_schema.tables
+            WHERE table_schema = 'dbo' AND table_name = 'connector';
             """;
-        await using var cmd = new SqlCommand(sql, connection);
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
-    private async Task<SqlConnection> OpenTenantConnectionAsync(CancellationToken cancellationToken)
+    private async Task<NpgsqlConnection> OpenTenantConnectionAsync(CancellationToken cancellationToken)
     {
         var cs = _tenantContext.ConnectionString
             ?? _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
-        var connection = new SqlConnection(cs);
+        var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
         return connection;
     }

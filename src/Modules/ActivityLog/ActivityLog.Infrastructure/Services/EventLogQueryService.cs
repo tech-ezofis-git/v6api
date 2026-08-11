@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.ActivityLog.Application.Contracts;
 using SaaSApp.MultiTenancy;
 
@@ -27,70 +27,70 @@ public sealed class EventLogQueryService : IEventLogQueryService
 
         var where = new List<string>
         {
-            "TenantId = @TenantId",
-            "(HttpMethod IS NULL OR UPPER(HttpMethod) NOT IN (N'GET', N'HEAD'))",
-            "EventType NOT LIKE N'%Viewed'",
-            "EventType NOT LIKE N'%Listed'",
-            "(Path IS NULL OR Path NOT LIKE N'%/search%')"
+            "\"TenantId\" = @TenantId",
+            "(\"HttpMethod\" IS NULL OR UPPER(\"HttpMethod\") NOT IN ('GET', 'HEAD'))",
+            "\"EventType\" NOT LIKE '%Viewed'",
+            "\"EventType\" NOT LIKE '%Listed'",
+            "(\"Path\" IS NULL OR \"Path\" NOT LIKE '%/search%')"
         };
-        var parameters = new List<SqlParameter> { new("@TenantId", tenantId) };
+        var parameters = new List<NpgsqlParameter> { new("@TenantId", tenantId) };
 
         if (!string.IsNullOrWhiteSpace(query.Category))
         {
-            where.Add("Category = @Category");
-            parameters.Add(new SqlParameter("@Category", query.Category.Trim()));
+            where.Add("\"Category\" = @Category");
+            parameters.Add(new NpgsqlParameter("@Category", query.Category.Trim()));
         }
 
         if (!string.IsNullOrWhiteSpace(query.Severity))
         {
-            where.Add("Severity = @Severity");
-            parameters.Add(new SqlParameter("@Severity", query.Severity.Trim()));
+            where.Add("\"Severity\" = @Severity");
+            parameters.Add(new NpgsqlParameter("@Severity", query.Severity.Trim()));
         }
 
         if (!string.IsNullOrWhiteSpace(query.UserEmail))
         {
-            where.Add("UserEmail LIKE @UserEmail");
-            parameters.Add(new SqlParameter("@UserEmail", $"%{query.UserEmail.Trim()}%"));
+            where.Add("\"UserEmail\" LIKE @UserEmail");
+            parameters.Add(new NpgsqlParameter("@UserEmail", $"%{query.UserEmail.Trim()}%"));
         }
 
         if (query.DateFrom.HasValue)
         {
-            where.Add("CreatedAtUtc >= @DateFrom");
-            parameters.Add(new SqlParameter("@DateFrom", query.DateFrom.Value));
+            where.Add("\"CreatedAtUtc\" >= @DateFrom");
+            parameters.Add(new NpgsqlParameter("@DateFrom", query.DateFrom.Value));
         }
 
         if (query.DateTo.HasValue)
         {
-            where.Add("CreatedAtUtc <= @DateTo");
-            parameters.Add(new SqlParameter("@DateTo", query.DateTo.Value));
+            where.Add("\"CreatedAtUtc\" <= @DateTo");
+            parameters.Add(new NpgsqlParameter("@DateTo", query.DateTo.Value));
         }
 
         if (!string.IsNullOrWhiteSpace(query.Search))
         {
-            where.Add("EventTitle LIKE @Search");
-            parameters.Add(new SqlParameter("@Search", $"%{query.Search.Trim()}%"));
+            where.Add("\"EventTitle\" LIKE @Search");
+            parameters.Add(new NpgsqlParameter("@Search", $"%{query.Search.Trim()}%"));
         }
 
         var whereClause = string.Join(" AND ", where);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var countSql = $"SELECT COUNT(1) FROM activitylog.EventLogs WHERE {whereClause}";
-        await using var countCmd = new SqlCommand(countSql, connection);
+        var countSql = $"""SELECT COUNT(1) FROM activitylog."EventLogs" WHERE {whereClause}""";
+        await using var countCmd = new NpgsqlCommand(countSql, connection);
         AddParameters(countCmd, parameters);
-        var total = (int)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+        var total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
 
         var dataSql = $"""
-            SELECT Id, EventTitle, EventType, UserDisplayName, UserEmail,
-                   Category, Severity, IpAddress, CreatedAtUtc
-            FROM activitylog.EventLogs
+            SELECT "Id", "EventTitle", "EventType", "UserDisplayName", "UserEmail",
+                   "Category", "Severity", "IpAddress", "CreatedAtUtc"
+            FROM activitylog."EventLogs"
             WHERE {whereClause}
-            ORDER BY CreatedAtUtc DESC
+            ORDER BY "CreatedAtUtc" DESC
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             """;
 
-        await using var dataCmd = new SqlCommand(dataSql, connection);
+        await using var dataCmd = new NpgsqlCommand(dataSql, connection);
         AddParameters(dataCmd, parameters);
         dataCmd.Parameters.AddWithValue("@Offset", offset);
         dataCmd.Parameters.AddWithValue("@PageSize", pageSize);
@@ -114,9 +114,9 @@ public sealed class EventLogQueryService : IEventLogQueryService
         return new PagedResult<EventLogEntryDto>(list, page, pageSize, total);
     }
 
-    private static void AddParameters(SqlCommand command, IReadOnlyList<SqlParameter> parameters)
+    private static void AddParameters(NpgsqlCommand command, IReadOnlyList<NpgsqlParameter> parameters)
     {
         foreach (var p in parameters)
-            command.Parameters.Add(new SqlParameter(p.ParameterName, p.Value));
+            command.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
     }
 }

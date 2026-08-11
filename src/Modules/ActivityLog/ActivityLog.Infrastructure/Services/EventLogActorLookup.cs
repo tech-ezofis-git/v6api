@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.ActivityLog.Infrastructure.Services;
 
@@ -15,16 +15,17 @@ public static class EventLogActorLookup
 
         try
         {
-            await using var connection = new SqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
 
             const string sql = """
-                SELECT TOP 1 DisplayName, Email
-                FROM users.Users
-                WHERE Id = @Id
+                SELECT "DisplayName", "Email"
+                FROM users."Users"
+                WHERE "Id" = @Id
+                LIMIT 1
                 """;
 
-            await using var command = new SqlCommand(sql, connection) { CommandTimeout = 5 };
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 5 };
             command.Parameters.AddWithValue("@Id", userId);
 
             await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -53,16 +54,17 @@ public static class EventLogActorLookup
 
         try
         {
-            await using var connection = new SqlConnection(connectionString);
+            await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
 
             const string sql = """
-                SELECT TOP 1 Name
-                FROM users.Roles
-                WHERE Id = @Id AND IsDeleted = 0
+                SELECT "Name"
+                FROM users."Roles"
+                WHERE "Id" = @Id AND "IsDeleted" = false
+                LIMIT 1
                 """;
 
-            await using var command = new SqlCommand(sql, connection) { CommandTimeout = 5 };
+            await using var command = new NpgsqlCommand(sql, connection) { CommandTimeout = 5 };
             command.Parameters.AddWithValue("@Id", roleId);
 
             var result = await command.ExecuteScalarAsync(cancellationToken);

@@ -1,5 +1,5 @@
 using Hangfire;
-using Hangfire.SqlServer;
+using Hangfire.PostgreSql;
 using MediatR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Identity.Web;
@@ -187,7 +187,7 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 var hangfireEnabled = !string.IsNullOrWhiteSpace(connectionString);
 if (hangfireEnabled)
 {
-    var hangfireStorageOptions = new SqlServerStorageOptions
+    var hangfireStorageOptions = new PostgreSqlStorageOptions
     {
         // Reduce catalog DB polling so HTTP requests are not competing with Hangfire every few seconds.
         QueuePollInterval = TimeSpan.FromSeconds(15),
@@ -198,7 +198,7 @@ if (hangfireEnabled)
         .SetDataCompatibilityLevel(Hangfire.CompatibilityLevel.Version_180)
         .UseSimpleAssemblyNameTypeSerializer()
         .UseRecommendedSerializerSettings()
-        .UseSqlServerStorage(connectionString, hangfireStorageOptions));
+        .UsePostgreSqlStorage(connectionString, hangfireStorageOptions));
 
     if (builder.Configuration.GetValue<bool?>("Hangfire:RunServerInApi") ?? true)
     {

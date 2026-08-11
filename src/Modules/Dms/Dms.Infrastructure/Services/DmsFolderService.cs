@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Dms.Domain.Models;
 using SaaSApp.MultiTenancy;
 
@@ -27,30 +27,33 @@ public sealed class DmsFolderService : IDmsFolderService
         string sql;
         if (year == null)
         {
-            sql = $@"
-                SELECT CAST([Year] AS NVARCHAR(4)) AS Name, COUNT(*) AS DocumentCount,
-                       CAST([Year] AS NVARCHAR(4)) AS Path
-                FROM dms.[{table}]
-                WHERE IsDeleted = 0 AND RepositoryId = @RepoId
-                GROUP BY [Year] ORDER BY [Year] DESC";
+            sql = $"""
+                SELECT CAST("Year" AS varchar(4)) AS "Name", COUNT(*) AS "DocumentCount",
+                       CAST("Year" AS varchar(4)) AS "Path"
+                FROM dms."{table}"
+                WHERE "IsDeleted" = false AND "RepositoryId" = @RepoId
+                GROUP BY "Year" ORDER BY "Year" DESC
+                """;
         }
         else if (invoiceType == null)
         {
-            sql = $@"
-                SELECT InvoiceType AS Name, COUNT(*) AS DocumentCount,
-                       CAST([Year] AS NVARCHAR(4)) + N'/' + InvoiceType AS Path
-                FROM dms.[{table}]
-                WHERE IsDeleted = 0 AND RepositoryId = @RepoId AND [Year] = @Year
-                GROUP BY [Year], InvoiceType ORDER BY InvoiceType";
+            sql = $"""
+                SELECT "InvoiceType" AS "Name", COUNT(*) AS "DocumentCount",
+                       CAST("Year" AS varchar(4)) || '/' || "InvoiceType" AS "Path"
+                FROM dms."{table}"
+                WHERE "IsDeleted" = false AND "RepositoryId" = @RepoId AND "Year" = @Year
+                GROUP BY "Year", "InvoiceType" ORDER BY "InvoiceType"
+                """;
         }
         else if (vendorName == null)
         {
-            sql = $@"
-                SELECT VendorName AS Name, COUNT(*) AS DocumentCount,
-                       CAST([Year] AS NVARCHAR(4)) + N'/' + InvoiceType + N'/' + VendorName AS Path
-                FROM dms.[{table}]
-                WHERE IsDeleted = 0 AND RepositoryId = @RepoId AND [Year] = @Year AND InvoiceType = @InvoiceType
-                GROUP BY [Year], InvoiceType, VendorName ORDER BY VendorName";
+            sql = $"""
+                SELECT "VendorName" AS "Name", COUNT(*) AS "DocumentCount",
+                       CAST("Year" AS varchar(4)) || '/' || "InvoiceType" || '/' || "VendorName" AS "Path"
+                FROM dms."{table}"
+                WHERE "IsDeleted" = false AND "RepositoryId" = @RepoId AND "Year" = @Year AND "InvoiceType" = @InvoiceType
+                GROUP BY "Year", "InvoiceType", "VendorName" ORDER BY "VendorName"
+                """;
         }
         else
         {
@@ -58,9 +61,9 @@ public sealed class DmsFolderService : IDmsFolderService
         }
 
         var children = new List<FolderNode>();
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(ct);
-        await using var cmd = new SqlCommand(sql, conn);
+        await using var cmd = new NpgsqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@RepoId", repositoryId);
         if (year != null) cmd.Parameters.AddWithValue("@Year", short.Parse(year));
         if (invoiceType != null) cmd.Parameters.AddWithValue("@InvoiceType", invoiceType);
@@ -87,32 +90,34 @@ public sealed class DmsFolderService : IDmsFolderService
         var table = EscapeTableName(tableName);
         var connStr = _connectionProvider.ConnectionString ?? throw new InvalidOperationException("Tenant connection not set.");
 
-        await using var conn = new SqlConnection(connStr);
+        await using var conn = new NpgsqlConnection(connStr);
         await conn.OpenAsync(ct);
 
-        var countSql = $@"
-            SELECT COUNT(*) FROM dms.[{table}]
-            WHERE IsDeleted = 0 AND RepositoryId = @RepoId AND [Year] = @Year AND InvoiceType = @InvoiceType AND VendorName = @VendorName";
+        var countSql = $"""
+            SELECT COUNT(*) FROM dms."{table}"
+            WHERE "IsDeleted" = false AND "RepositoryId" = @RepoId AND "Year" = @Year AND "InvoiceType" = @InvoiceType AND "VendorName" = @VendorName
+            """;
 
         int total;
-        await using (var countCmd = new SqlCommand(countSql, conn))
+        await using (var countCmd = new NpgsqlCommand(countSql, conn))
         {
             countCmd.Parameters.AddWithValue("@RepoId", repositoryId);
             countCmd.Parameters.AddWithValue("@Year", short.Parse(year));
             countCmd.Parameters.AddWithValue("@InvoiceType", invoiceType);
             countCmd.Parameters.AddWithValue("@VendorName", vendorName);
-            total = (int)(await countCmd.ExecuteScalarAsync(ct) ?? 0);
+            total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(ct) ?? 0);
         }
 
-        var dataSql = $@"
-            SELECT Id, FileName, Status, SignStatus, CreatedAt, WorkflowInstanceId, ReportNo, ReferenceNo
-            FROM dms.[{table}]
-            WHERE IsDeleted = 0 AND RepositoryId = @RepoId AND [Year] = @Year AND InvoiceType = @InvoiceType AND VendorName = @VendorName
-            ORDER BY CreatedAt DESC
-            OFFSET @Skip ROWS FETCH NEXT @PageSize ROWS ONLY";
+        var dataSql = $"""
+            SELECT "Id", "FileName", "Status", "SignStatus", "CreatedAt", "WorkflowInstanceId", "ReportNo", "ReferenceNo"
+            FROM dms."{table}"
+            WHERE "IsDeleted" = false AND "RepositoryId" = @RepoId AND "Year" = @Year AND "InvoiceType" = @InvoiceType AND "VendorName" = @VendorName
+            ORDER BY "CreatedAt" DESC
+            OFFSET @Skip ROWS FETCH NEXT @PageSize ROWS ONLY
+            """;
 
         var items = new List<DocumentListItem>();
-        await using var dataCmd = new SqlCommand(dataSql, conn);
+        await using var dataCmd = new NpgsqlCommand(dataSql, conn);
         dataCmd.Parameters.AddWithValue("@RepoId", repositoryId);
         dataCmd.Parameters.AddWithValue("@Year", short.Parse(year));
         dataCmd.Parameters.AddWithValue("@InvoiceType", invoiceType);
@@ -126,8 +131,8 @@ public sealed class DmsFolderService : IDmsFolderService
             items.Add(new DocumentListItem(
                 r.GetGuid(0),
                 r.GetString(1),
-                r.GetByte(2),
-                r.GetByte(3),
+                r.GetInt16(2),
+                r.GetInt16(3),
                 r.GetDateTime(4),
                 r.IsDBNull(5) ? null : r.GetGuid(5),
                 r.IsDBNull(6) ? null : r.GetString(6),
@@ -143,5 +148,5 @@ public sealed class DmsFolderService : IDmsFolderService
         return path.Split('/', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
     }
 
-    private static string EscapeTableName(string name) => name.Replace("]", "]]");
+    private static string EscapeTableName(string name) => name.Replace("\"", "\"\"", StringComparison.Ordinal);
 }

@@ -1,0 +1,10 @@
+-- Add extended user profile / auth columns to users.Users -- Postgres
+-- Ported from scripts/AddUsersExtendedColumns.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL ALTER SCRIPT. users.Users is 100% EF-managed on Postgres
+-- (Phase 2) -- confirmed all 9 columns this script adds (PasswordExpiryDays,
+-- AccountExpiryDate, ForcePasswordResetOnLogin, EmployeeId, BusinessUnit, Location,
+-- GroupName, MfaMethods, Configuration) already exist as properties on
+-- Users.Domain/Entities/User.cs, so `dotnet ef database update` against UsersDbContext
+-- already creates users.Users with all of them from the start. Nothing left for an
+-- incremental ALTER to do; this script is superseded, not ported.

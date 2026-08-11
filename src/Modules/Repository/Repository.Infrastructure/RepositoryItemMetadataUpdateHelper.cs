@@ -1,4 +1,5 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
+using NpgsqlTypes;
 using SaaSApp.Repository.Application.Contracts;
 
 namespace SaaSApp.Repository.Infrastructure;
@@ -14,7 +15,7 @@ internal static class RepositoryItemMetadataUpdateHelper
     };
 
     public static async Task<int> UpdateAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
         Guid repositoryId,
@@ -38,27 +39,26 @@ internal static class RepositoryItemMetadataUpdateHelper
         }
 
         var sets = new List<string>();
-        var parameters = new List<SqlParameter>();
+        var parameters = new List<NpgsqlParameter>();
         var index = 0;
 
         foreach (var (column, value) in columnUpdates)
         {
             var param = $"@U{index++}";
-            sets.Add($"[{column}] = {param}");
+            sets.Add($"{RepositorySqlHelper.PhysicalColumnRef(column)} = {param}");
             parameters.Add(CreateParameter(param, column, value));
         }
 
-        sets.Add("ModifiedAtUtc = SYSUTCDATETIME()");
-        sets.Add("ModifiedBy = @ModifiedBy");
+        sets.Add("modified_at_utc = now()");
+        sets.Add("modified_by = @ModifiedBy");
 
         var sql = $"""
             UPDATE {table}
             SET {string.Join(", ", sets)}
-            WHERE Id = @ItemId AND TenantId = @TenantId AND RepositoryId = @RepositoryId AND IsDeleted = 0;
-            SELECT CAST(@@ROWCOUNT AS int);
+            WHERE id = @ItemId AND tenant_id = @TenantId AND repository_id = @RepositoryId AND is_deleted = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         foreach (var p in parameters)
             cmd.Parameters.Add(p);
         cmd.Parameters.AddWithValue("@ModifiedBy", (object?)userId ?? DBNull.Value);
@@ -66,7 +66,7 @@ internal static class RepositoryItemMetadataUpdateHelper
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
 
-        var rows = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
+        var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
         return rows == 0 ? -1 : columnUpdates.Count;
     }
 
@@ -90,13 +90,13 @@ internal static class RepositoryItemMetadataUpdateHelper
                 ? canonicalCol
                 : logicalCol;
 
-            updates[column] = CoerceValue(column, rawValue);
+            updates[column] = CoerceValue(column, rawValue, repo.Fields);
         }
 
         return updates;
     }
 
-    private static object? CoerceValue(string column, string rawValue)
+    private static object? CoerceValue(string column, string rawValue, IReadOnlyList<RepositoryFieldDto> fields)
     {
         if (string.Equals(column, "Amount", StringComparison.OrdinalIgnoreCase)
             || string.Equals(column, "POAmount", StringComparison.OrdinalIgnoreCase)
@@ -118,20 +118,20 @@ internal static class RepositoryItemMetadataUpdateHelper
             return byte.TryParse(rawValue, out var score) ? score : rawValue;
         }
 
-        return rawValue;
+        // Fall back to the repository's own field-definition DataType for arbitrary custom columns not
+        // in the fixed "core column" list above (same 42804 text-into-typed-column issue as the insert
+        // path -- see RepositoryFieldValueCoercion).
+        return RepositoryFieldValueCoercion.TryCoerce(fields, column, rawValue) ?? rawValue;
     }
 
-    private static SqlParameter CreateParameter(string name, string column, object? value)
+    private static NpgsqlParameter CreateParameter(string name, string column, object? value)
     {
-        if (value is decimal d)
-            return new SqlParameter(name, System.Data.SqlDbType.Decimal) { Value = d, Precision = 18, Scale = 2 };
-
-        if (value is DateTime dt)
-            return new SqlParameter(name, System.Data.SqlDbType.Date) { Value = dt };
-
         if (value is byte b)
-            return new SqlParameter(name, System.Data.SqlDbType.TinyInt) { Value = b };
+            // ocr_score is smallint (Postgres has no 1-byte integer type); widen to short.
+            return new NpgsqlParameter(name, NpgsqlDbType.Smallint) { Value = (short)b };
 
-        return new SqlParameter(name, value ?? DBNull.Value);
+        // decimal/DateTime/int/bool (from RepositoryFieldValueCoercion.TryCoerce, custom-field fallback
+        // above) and the plain-string/DBNull case all share the same typed-parameter construction.
+        return RepositoryFieldValueCoercion.CreateParameter(name, value);
     }
 }

@@ -1,0 +1,8 @@
+-- Per-workflow attachment table -- manual create/upgrade tool -- Postgres
+-- Ported from scripts/Create_WorkflowAttachments_OnWorkflowCreate.sql -- Phase 3.
+-- NOT PORTED -- see Alter_WorkflowAttachments_IntToUniqueIdentifier.sql (postgres/)
+-- for the full reasoning. This script's own header already says the real source of
+-- truth is WorkflowTableCreator.GenerateAttachmentsTableScript (Phase 4), which
+-- creates workflow.WorkflowAttachments_{suffix} automatically at publish time with
+-- GUID/uuid RepositoryId/ItemId columns -- this manual/standalone variant has nothing
+-- left to do on Postgres.

@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows.Commands.CreateWorkflow;
@@ -33,23 +33,21 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
             return;
 
         var now = DateTime.UtcNow;
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         // Default row in WorkflowUsers (old API parity).
-        const string usersSql = @"
-            IF NOT EXISTS (
-                SELECT 1 FROM workflow.WorkflowUsers
-                WHERE WorkflowId = @WorkflowId AND UserId = @UserId AND IsDeleted = 0
-            )
-            BEGIN
-                INSERT INTO workflow.WorkflowUsers
-                    (TenantId, WorkflowId, UserId, GroupId, UserCategory, CreatedAtUtc, ModifiedAtUtc, CreatedBy, ModifiedBy, IsDeleted)
-                VALUES
-                    (@TenantId, @WorkflowId, @UserId, NULL, NULL, @CreatedAt, NULL, @CreatedBy, NULL, 0)
-            END";
+        const string usersSql = """
+            INSERT INTO workflow."WorkflowUsers"
+                ("TenantId", "WorkflowId", "UserId", "GroupId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+            SELECT @TenantId, @WorkflowId, @UserId, NULL, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+            WHERE NOT EXISTS (
+                SELECT 1 FROM workflow."WorkflowUsers"
+                WHERE "WorkflowId" = @WorkflowId AND "UserId" = @UserId AND "IsDeleted" = false
+            );
+            """;
 
-        await using (var command = new SqlCommand(usersSql, connection))
+        await using (var command = new NpgsqlCommand(usersSql, connection))
         {
             command.Parameters.AddWithValue("@TenantId", tenantId.Value);
             command.Parameters.AddWithValue("@WorkflowId", workflowId);
@@ -60,19 +58,17 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         }
 
         // Default row in WorkflowSecurity (old API parity).
-        const string securitySql = @"
-            IF NOT EXISTS (
-                SELECT 1 FROM workflow.WorkflowSecurity
-                WHERE WorkflowId = @WorkflowId AND UserId = @UserId AND IsDeleted = 0
-            )
-            BEGIN
-                INSERT INTO workflow.WorkflowSecurity
-                    (TenantId, WorkflowId, UserId, UserCategory, CreatedAtUtc, ModifiedAtUtc, CreatedBy, ModifiedBy, IsDeleted)
-                VALUES
-                    (@TenantId, @WorkflowId, @UserId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, 0)
-            END";
+        const string securitySql = """
+            INSERT INTO workflow."WorkflowSecurity"
+                ("TenantId", "WorkflowId", "UserId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+            SELECT @TenantId, @WorkflowId, @UserId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+            WHERE NOT EXISTS (
+                SELECT 1 FROM workflow."WorkflowSecurity"
+                WHERE "WorkflowId" = @WorkflowId AND "UserId" = @UserId AND "IsDeleted" = false
+            );
+            """;
 
-        await using (var command = new SqlCommand(securitySql, connection))
+        await using (var command = new NpgsqlCommand(securitySql, connection))
         {
             command.Parameters.AddWithValue("@TenantId", tenantId.Value);
             command.Parameters.AddWithValue("@WorkflowId", workflowId);
@@ -151,22 +147,23 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         }
 
         // Insert workflow users
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         foreach (var user in userList)
         {
             if (Guid.TryParse(user, out var userIdGuid))
             {
-                var sql = @"
-                    IF NOT EXISTS (SELECT 1 FROM workflow.WorkflowUsers 
-                                   WHERE WorkflowId = @WorkflowId AND UserId = @UserId AND IsDeleted = 0)
-                    BEGIN
-                        INSERT INTO workflow.WorkflowUsers (TenantId, WorkflowId, UserId, GroupId, UserCategory, CreatedAtUtc, ModifiedAtUtc, CreatedBy, ModifiedBy, IsDeleted)
-                        VALUES (@TenantId, @WorkflowId, @UserId, NULL, NULL, @CreatedAt, NULL, @CreatedBy, NULL, 0)
-                    END";
+                const string sql = """
+                    INSERT INTO workflow."WorkflowUsers" ("TenantId", "WorkflowId", "UserId", "GroupId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+                    SELECT @TenantId, @WorkflowId, @UserId, NULL, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM workflow."WorkflowUsers"
+                        WHERE "WorkflowId" = @WorkflowId AND "UserId" = @UserId AND "IsDeleted" = false
+                    );
+                    """;
 
-                await using var command = new SqlCommand(sql, connection);
+                await using var command = new NpgsqlCommand(sql, connection);
                 command.Parameters.AddWithValue("@TenantId", tenantId.Value);
                 command.Parameters.AddWithValue("@WorkflowId", workflowId);
                 command.Parameters.AddWithValue("@UserId", userIdGuid);
@@ -174,14 +171,15 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
                 command.Parameters.AddWithValue("@CreatedBy", userId.Value);
                 await command.ExecuteNonQueryAsync(cancellationToken);
 
-                var securitySql = @"
-                    IF NOT EXISTS (SELECT 1 FROM workflow.WorkflowSecurity 
-                                   WHERE WorkflowId = @WorkflowId AND UserId = @UserId AND IsDeleted = 0)
-                    BEGIN
-                        INSERT INTO workflow.WorkflowSecurity (TenantId, WorkflowId, UserId, UserCategory, CreatedAtUtc, ModifiedAtUtc, CreatedBy, ModifiedBy, IsDeleted)
-                        VALUES (@TenantId, @WorkflowId, @UserId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, 0)
-                    END";
-                await using var securityCommand = new SqlCommand(securitySql, connection);
+                const string securitySql = """
+                    INSERT INTO workflow."WorkflowSecurity" ("TenantId", "WorkflowId", "UserId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+                    SELECT @TenantId, @WorkflowId, @UserId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM workflow."WorkflowSecurity"
+                        WHERE "WorkflowId" = @WorkflowId AND "UserId" = @UserId AND "IsDeleted" = false
+                    );
+                    """;
+                await using var securityCommand = new NpgsqlCommand(securitySql, connection);
                 securityCommand.Parameters.AddWithValue("@TenantId", tenantId.Value);
                 securityCommand.Parameters.AddWithValue("@WorkflowId", workflowId);
                 securityCommand.Parameters.AddWithValue("@UserId", userIdGuid);
@@ -196,15 +194,16 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         {
             if (int.TryParse(group, out var groupId))
             {
-                var sql = @"
-                    IF NOT EXISTS (SELECT 1 FROM workflow.WorkflowUsers 
-                                   WHERE WorkflowId = @WorkflowId AND GroupId = @GroupId AND IsDeleted = 0)
-                    BEGIN
-                        INSERT INTO workflow.WorkflowUsers (TenantId, WorkflowId, UserId, GroupId, UserCategory, CreatedAtUtc, ModifiedAtUtc, CreatedBy, ModifiedBy, IsDeleted)
-                        VALUES (@TenantId, @WorkflowId, NULL, @GroupId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, 0)
-                    END";
+                const string sql = """
+                    INSERT INTO workflow."WorkflowUsers" ("TenantId", "WorkflowId", "UserId", "GroupId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+                    SELECT @TenantId, @WorkflowId, NULL, @GroupId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+                    WHERE NOT EXISTS (
+                        SELECT 1 FROM workflow."WorkflowUsers"
+                        WHERE "WorkflowId" = @WorkflowId AND "GroupId" = @GroupId AND "IsDeleted" = false
+                    );
+                    """;
 
-                await using var command = new SqlCommand(sql, connection);
+                await using var command = new NpgsqlCommand(sql, connection);
                 command.Parameters.AddWithValue("@TenantId", tenantId.Value);
                 command.Parameters.AddWithValue("@WorkflowId", workflowId);
                 command.Parameters.AddWithValue("@GroupId", groupId);
@@ -236,37 +235,37 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
             return;
 
         // Build domain filter
-        var domainConditions = string.Join(" OR ", domains.Select(d => $"Email LIKE '%@{d}'"));
+        var domainConditions = string.Join(" OR ", domains.Select(d => $"\"Email\" LIKE '%@{d}'"));
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         // Update existing deleted users
         var updateSql = $@"
-            UPDATE workflow.WorkflowUsers 
-            SET IsDeleted = 0
-            WHERE WorkflowId = @WorkflowId 
-            AND UserId IN (
-                SELECT Id FROM [users].[Users]
-                WHERE IsDeleted = 0 
+            UPDATE workflow.""WorkflowUsers""
+            SET ""IsDeleted"" = false
+            WHERE ""WorkflowId"" = @WorkflowId
+            AND ""UserId"" IN (
+                SELECT ""Id"" FROM users.""Users""
+                WHERE ""IsDeleted"" = false
                 AND ({domainConditions})
-                AND Id IN (SELECT UserId FROM workflow.WorkflowUsers WHERE WorkflowId = @WorkflowId AND IsDeleted = 1)
-            )";
+                AND ""Id"" IN (SELECT ""UserId"" FROM workflow.""WorkflowUsers"" WHERE ""WorkflowId"" = @WorkflowId AND ""IsDeleted"" = true)
+            );";
 
-        await using var updateCommand = new SqlCommand(updateSql, connection);
+        await using var updateCommand = new NpgsqlCommand(updateSql, connection);
         updateCommand.Parameters.AddWithValue("@WorkflowId", workflowId);
         await updateCommand.ExecuteNonQueryAsync(cancellationToken);
 
         // Insert new users
         var insertSql = $@"
-            INSERT INTO workflow.WorkflowUsers (TenantId, WorkflowId, UserId, GroupId, CreatedAtUtc, CreatedBy, IsDeleted)
-            SELECT @TenantId, @WorkflowId, Id, 0, @CreatedAt, @CreatedBy, 0
-            FROM [users].[Users]
-            WHERE IsDeleted = 0
+            INSERT INTO workflow.""WorkflowUsers"" (""TenantId"", ""WorkflowId"", ""UserId"", ""GroupId"", ""CreatedAtUtc"", ""CreatedBy"", ""IsDeleted"")
+            SELECT @TenantId, @WorkflowId, ""Id"", 0, @CreatedAt, @CreatedBy, false
+            FROM users.""Users""
+            WHERE ""IsDeleted"" = false
             AND ({domainConditions})
-            AND Id NOT IN (SELECT UserId FROM workflow.WorkflowUsers WHERE WorkflowId = @WorkflowId AND IsDeleted = 0)";
+            AND ""Id"" NOT IN (SELECT ""UserId"" FROM workflow.""WorkflowUsers"" WHERE ""WorkflowId"" = @WorkflowId AND ""IsDeleted"" = false);";
 
-        await using var insertCommand = new SqlCommand(insertSql, connection);
+        await using var insertCommand = new NpgsqlCommand(insertSql, connection);
         insertCommand.Parameters.AddWithValue("@TenantId", tenantId.Value);
         insertCommand.Parameters.AddWithValue("@WorkflowId", workflowId);
         insertCommand.Parameters.AddWithValue("@CreatedAt", currentTime);
@@ -276,4 +275,3 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         _logger.LogInformation("Workflow users set by domain for workflow {WorkflowId}", workflowId);
     }
 }
-

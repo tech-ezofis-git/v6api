@@ -17,13 +17,13 @@ public static class CatalogServiceCollectionExtensions
 
         services.AddDbContextFactory<CatalogDbContext>(options =>
         {
-            options.UseSqlServer(connectionString, sql =>
+            options.UseNpgsql(connectionString, npgsql =>
             {
-                sql.MigrationsHistoryTable("__EFMigrationsHistory", CatalogDbContext.SchemaName);
-                sql.EnableRetryOnFailure(
+                npgsql.MigrationsHistoryTable("__EFMigrationsHistory", CatalogDbContext.SchemaName);
+                npgsql.EnableRetryOnFailure(
                     maxRetryCount: 5,
                     maxRetryDelay: TimeSpan.FromSeconds(30),
-                    errorNumbersToAdd: null);
+                    errorCodesToAdd: null);
             });
             var slowQueryThresholdMs = configuration.GetValue<int?>("Performance:SlowSqlThresholdMs") ?? 500;
             options.LogTo(message =>

@@ -1,10 +1,9 @@
 using System.Collections.Concurrent;
-using System.Data;
 using System.Net;
 using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -58,9 +57,9 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         if (SchemaEnsured.ContainsKey(cs))
             return;
 
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(EnsureSchemaSql, connection) { CommandTimeout = 120 };
+        await using var cmd = new NpgsqlCommand(EnsureSchemaSql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         SchemaEnsured.TryAdd(cs, 0);
     }
@@ -120,19 +119,19 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             await _guestProvisioning.EnsureGuestUserAsync(tenantId, s.Email, cancellationToken);
         }
 
-        await using (var connection = new SqlConnection(RequireConnectionString()))
+        await using (var connection = new NpgsqlConnection(RequireConnectionString()))
         {
             await connection.OpenAsync(cancellationToken);
-            await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var tx = await connection.BeginTransactionAsync(cancellationToken);
             try
             {
-                await using (var insert = new SqlCommand("""
-                    INSERT INTO repository.SignRequests
-                        (Id, TenantId, RepositoryId, ItemId, FileName, SigningMode, Status, Message,
-                         InitiatedByUserId, InitiatedByEmail, InitiatedByName, ExpiresAtUtc, CreatedAtUtc, IsDeleted)
+                await using (var insert = new NpgsqlCommand("""
+                    INSERT INTO repository."SignRequests"
+                        ("Id", "TenantId", "RepositoryId", "ItemId", "FileName", "SigningMode", "Status", "Message",
+                         "InitiatedByUserId", "InitiatedByEmail", "InitiatedByName", "ExpiresAtUtc", "CreatedAtUtc", "IsDeleted")
                     VALUES
                         (@Id, @TenantId, @RepositoryId, @ItemId, @FileName, @SigningMode, @Status, @Message,
-                         @InitiatedByUserId, @InitiatedByEmail, @InitiatedByName, @ExpiresAtUtc, SYSUTCDATETIME(), 0)
+                         @InitiatedByUserId, @InitiatedByEmail, @InitiatedByName, @ExpiresAtUtc, now(), false)
                     """, connection, tx))
                 {
                     insert.Parameters.AddWithValue("@Id", requestId);
@@ -152,13 +151,13 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
                 foreach (var row in signerRows)
                 {
-                    await using var insertSigner = new SqlCommand("""
-                        INSERT INTO repository.SignRequestSigners
-                            (Id, SignRequestId, Email, Name, SortOrder, Status, InviteToken, InvitedAtUtc, CreatedAtUtc, IsDeleted)
+                    await using var insertSigner = new NpgsqlCommand("""
+                        INSERT INTO repository."SignRequestSigners"
+                            ("Id", "SignRequestId", "Email", "Name", "SortOrder", "Status", "InviteToken", "InvitedAtUtc", "CreatedAtUtc", "IsDeleted")
                         VALUES
                             (@Id, @SignRequestId, @Email, @Name, @SortOrder, @Status, @InviteToken,
-                             CASE WHEN @Status = N'Pending' THEN SYSUTCDATETIME() ELSE NULL END,
-                             SYSUTCDATETIME(), 0)
+                             CASE WHEN @Status = 'Pending' THEN now() ELSE NULL END,
+                             now(), false)
                         """, connection, tx);
                     insertSigner.Parameters.AddWithValue("@Id", row.Id);
                     insertSigner.Parameters.AddWithValue("@SignRequestId", requestId);
@@ -237,12 +236,12 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await EnsureSchemaAsync(cancellationToken);
         await EnsureTenantConnectionAsync(tenantId, cancellationToken);
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            SELECT Id FROM repository.SignRequests
-            WHERE TenantId = @TenantId AND RepositoryId = @RepositoryId AND ItemId = @ItemId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC
+        await using var cmd = new NpgsqlCommand("""
+            SELECT "Id" FROM repository."SignRequests"
+            WHERE "TenantId" = @TenantId AND "RepositoryId" = @RepositoryId AND "ItemId" = @ItemId AND "IsDeleted" = false
+            ORDER BY "CreatedAtUtc" DESC
             """, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
@@ -278,22 +277,22 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await EnsureTenantConnectionAsync(tenantId, cancellationToken);
 
         var email = signerEmail.Trim().ToLowerInvariant();
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            SELECT r.Id, r.RepositoryId, r.ItemId, r.FileName, r.SigningMode, r.Status,
-                   s.Status, s.SortOrder, r.Message, r.InitiatedByName, r.InitiatedByEmail,
-                   r.ExpiresAtUtc, r.CreatedAtUtc, s.InviteToken
-            FROM repository.SignRequestSigners s
-            INNER JOIN repository.SignRequests r ON r.Id = s.SignRequestId
-            WHERE r.TenantId = @TenantId
-              AND r.IsDeleted = 0
-              AND s.IsDeleted = 0
-              AND r.Status = N'InProgress'
-              AND r.ExpiresAtUtc > SYSUTCDATETIME()
-              AND LOWER(s.Email) = @Email
-              AND s.Status = N'Pending'
-            ORDER BY r.CreatedAtUtc DESC
+        await using var cmd = new NpgsqlCommand("""
+            SELECT r."Id", r."RepositoryId", r."ItemId", r."FileName", r."SigningMode", r."Status",
+                   s."Status", s."SortOrder", r."Message", r."InitiatedByName", r."InitiatedByEmail",
+                   r."ExpiresAtUtc", r."CreatedAtUtc", s."InviteToken"
+            FROM repository."SignRequestSigners" s
+            INNER JOIN repository."SignRequests" r ON r."Id" = s."SignRequestId"
+            WHERE r."TenantId" = @TenantId
+              AND r."IsDeleted" = false
+              AND s."IsDeleted" = false
+              AND r."Status" = 'InProgress'
+              AND r."ExpiresAtUtc" > now()
+              AND LOWER(s."Email") = @Email
+              AND s."Status" = 'Pending'
+            ORDER BY r."CreatedAtUtc" DESC
             """, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@Email", email);
@@ -514,20 +513,20 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         string? nextName = null;
         var completed = false;
 
-        await using (var connection = new SqlConnection(RequireConnectionString()))
+        await using (var connection = new NpgsqlConnection(RequireConnectionString()))
         {
             await connection.OpenAsync(cancellationToken);
-            await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+            await using var tx = await connection.BeginTransactionAsync(cancellationToken);
             try
             {
-                await using (var updateSigner = new SqlCommand("""
-                    UPDATE repository.SignRequestSigners
-                    SET Status = N'Signed',
-                        SignedAtUtc = SYSUTCDATETIME(),
-                        UserId = COALESCE(@UserId, UserId),
-                        SignatureMetaJson = @Meta,
-                        ModifiedAtUtc = SYSUTCDATETIME()
-                    WHERE Id = @SignerId AND Status = N'Pending'
+                await using (var updateSigner = new NpgsqlCommand("""
+                    UPDATE repository."SignRequestSigners"
+                    SET "Status" = 'Signed',
+                        "SignedAtUtc" = now(),
+                        "UserId" = COALESCE(@UserId, "UserId"),
+                        "SignatureMetaJson" = @Meta,
+                        "ModifiedAtUtc" = now()
+                    WHERE "Id" = @SignerId AND "Status" = 'Pending'
                     """, connection, tx))
                 {
                     updateSigner.Parameters.AddWithValue("@SignerId", ctx.SignerId);
@@ -540,11 +539,12 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
                 if (string.Equals(ctx.SigningMode, SignRequestModes.Sequential, StringComparison.OrdinalIgnoreCase))
                 {
-                    await using var nextCmd = new SqlCommand("""
-                        SELECT TOP 1 Id, Email, Name, InviteToken
-                        FROM repository.SignRequestSigners
-                        WHERE SignRequestId = @RequestId AND IsDeleted = 0 AND Status = N'Waiting'
-                        ORDER BY SortOrder, CreatedAtUtc
+                    await using var nextCmd = new NpgsqlCommand("""
+                        SELECT "Id", "Email", "Name", "InviteToken"
+                        FROM repository."SignRequestSigners"
+                        WHERE "SignRequestId" = @RequestId AND "IsDeleted" = false AND "Status" = 'Waiting'
+                        ORDER BY "SortOrder", "CreatedAtUtc"
+                        LIMIT 1
                         """, connection, tx);
                     nextCmd.Parameters.AddWithValue("@RequestId", ctx.SignRequestId);
                     await using var reader = await nextCmd.ExecuteReaderAsync(cancellationToken);
@@ -559,29 +559,29 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
                 if (nextSignerId is Guid nid)
                 {
-                    await using var activate = new SqlCommand("""
-                        UPDATE repository.SignRequestSigners
-                        SET Status = N'Pending', InvitedAtUtc = SYSUTCDATETIME(), ModifiedAtUtc = SYSUTCDATETIME()
-                        WHERE Id = @Id
+                    await using var activate = new NpgsqlCommand("""
+                        UPDATE repository."SignRequestSigners"
+                        SET "Status" = 'Pending', "InvitedAtUtc" = now(), "ModifiedAtUtc" = now()
+                        WHERE "Id" = @Id
                         """, connection, tx);
                     activate.Parameters.AddWithValue("@Id", nid);
                     await activate.ExecuteNonQueryAsync(cancellationToken);
                 }
                 else
                 {
-                    await using var pendingCount = new SqlCommand("""
-                        SELECT COUNT(1) FROM repository.SignRequestSigners
-                        WHERE SignRequestId = @RequestId AND IsDeleted = 0
-                          AND Status IN (N'Pending', N'Waiting')
+                    await using var pendingCount = new NpgsqlCommand("""
+                        SELECT COUNT(1) FROM repository."SignRequestSigners"
+                        WHERE "SignRequestId" = @RequestId AND "IsDeleted" = false
+                          AND "Status" IN ('Pending', 'Waiting')
                         """, connection, tx);
                     pendingCount.Parameters.AddWithValue("@RequestId", ctx.SignRequestId);
                     var remaining = Convert.ToInt32(await pendingCount.ExecuteScalarAsync(cancellationToken));
                     if (remaining == 0)
                     {
-                        await using var complete = new SqlCommand("""
-                            UPDATE repository.SignRequests
-                            SET Status = N'Completed', CompletedAtUtc = SYSUTCDATETIME(), ModifiedAtUtc = SYSUTCDATETIME()
-                            WHERE Id = @Id
+                        await using var complete = new NpgsqlCommand("""
+                            UPDATE repository."SignRequests"
+                            SET "Status" = 'Completed', "CompletedAtUtc" = now(), "ModifiedAtUtc" = now()
+                            WHERE "Id" = @Id
                             """, connection, tx);
                         complete.Parameters.AddWithValue("@Id", ctx.SignRequestId);
                         await complete.ExecuteNonQueryAsync(cancellationToken);
@@ -650,23 +650,23 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
     {
         await EnsureTenantConnectionAsync(ctx.TenantId, cancellationToken);
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            UPDATE repository.SignRequestSigners
-            SET Status = N'Declined',
-                DeclineReason = @Reason,
-                ModifiedAtUtc = SYSUTCDATETIME()
-            WHERE Id = @Id AND Status = N'Pending'
+        await using var cmd = new NpgsqlCommand("""
+            UPDATE repository."SignRequestSigners"
+            SET "Status" = 'Declined',
+                "DeclineReason" = @Reason,
+                "ModifiedAtUtc" = now()
+            WHERE "Id" = @Id AND "Status" = 'Pending'
             """, connection);
         cmd.Parameters.AddWithValue("@Id", ctx.SignerId);
         cmd.Parameters.AddWithValue("@Reason", (object?)NullIfWhite(request.Reason) ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
 
-        await using var cancel = new SqlCommand("""
-            UPDATE repository.SignRequests
-            SET Status = N'Cancelled', ModifiedAtUtc = SYSUTCDATETIME()
-            WHERE Id = @Id AND Status = N'InProgress'
+        await using var cancel = new NpgsqlCommand("""
+            UPDATE repository."SignRequests"
+            SET "Status" = 'Cancelled', "ModifiedAtUtc" = now()
+            WHERE "Id" = @Id AND "Status" = 'InProgress'
             """, connection);
         cancel.Parameters.AddWithValue("@Id", ctx.SignRequestId);
         await cancel.ExecuteNonQueryAsync(cancellationToken);
@@ -701,12 +701,12 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await EnsureSchemaAsync(cancellationToken);
         await EnsureTenantConnectionAsync(tenantId, cancellationToken);
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            UPDATE repository.SignRequests
-            SET Status = N'Cancelled', ModifiedAtUtc = SYSUTCDATETIME()
-            WHERE Id = @Id AND TenantId = @TenantId AND InitiatedByUserId = @UserId AND Status = N'InProgress'
+        await using var cmd = new NpgsqlCommand("""
+            UPDATE repository."SignRequests"
+            SET "Status" = 'Cancelled', "ModifiedAtUtc" = now()
+            WHERE "Id" = @Id AND "TenantId" = @TenantId AND "InitiatedByUserId" = @UserId AND "Status" = 'InProgress'
             """, connection);
         cmd.Parameters.AddWithValue("@Id", signRequestId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
@@ -725,30 +725,29 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         Guid? userId,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
 
         string? itemsTable = null;
-        await using (var find = new SqlCommand("""
-            SELECT ItemsTableName FROM repository.Repositories WHERE Id = @Id AND IsDeleted = 0
+        await using (var find = new NpgsqlCommand("""
+            SELECT "ItemsTableName" FROM repository."Repositories" WHERE "Id" = @Id AND "IsDeleted" = false
             """, connection))
         {
             find.Parameters.AddWithValue("@Id", repositoryId);
             itemsTable = (await find.ExecuteScalarAsync(cancellationToken)) as string;
         }
 
-        if (string.IsNullOrWhiteSpace(itemsTable))
+        if (string.IsNullOrWhiteSpace(itemsTable) || !RepositorySqlHelper.IsValidItemsTableName(itemsTable))
             return;
 
-        var safeTable = itemsTable.Replace("]", "]]", StringComparison.Ordinal);
         var sql = $"""
-            UPDATE repository.[{safeTable}]
-            SET FileSize = @FileSize,
-                ModifiedAtUtc = SYSUTCDATETIME(),
-                ModifiedBy = COALESCE(@UserId, ModifiedBy)
-            WHERE Id = @ItemId AND IsDeleted = 0
+            UPDATE repository.{itemsTable}
+            SET file_size = @FileSize,
+                modified_at_utc = now(),
+                modified_by = COALESCE(@UserId, modified_by)
+            WHERE id = @ItemId AND is_deleted = false
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FileSize", fileSize);
         cmd.Parameters.AddWithValue("@UserId", (object?)userId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
@@ -760,14 +759,14 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         Guid tenantId,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
 
-        await using var cmd = new SqlCommand("""
-            SELECT Id, RepositoryId, ItemId, FileName, SigningMode, Status, Message,
-                   InitiatedByUserId, InitiatedByEmail, InitiatedByName, ExpiresAtUtc, CreatedAtUtc, CompletedAtUtc
-            FROM repository.SignRequests
-            WHERE Id = @Id AND TenantId = @TenantId AND IsDeleted = 0
+        await using var cmd = new NpgsqlCommand("""
+            SELECT "Id", "RepositoryId", "ItemId", "FileName", "SigningMode", "Status", "Message",
+                   "InitiatedByUserId", "InitiatedByEmail", "InitiatedByName", "ExpiresAtUtc", "CreatedAtUtc", "CompletedAtUtc"
+            FROM repository."SignRequests"
+            WHERE "Id" = @Id AND "TenantId" = @TenantId AND "IsDeleted" = false
             """, connection);
         cmd.Parameters.AddWithValue("@Id", signRequestId);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
@@ -805,11 +804,11 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         }
 
         var signerRows = new List<(Guid Id, string Email, string? Name, int Order, string Status, string Token, DateTime? InvitedAt, DateTime? SignedAt)>();
-        await using (var sCmd = new SqlCommand("""
-            SELECT Id, Email, Name, SortOrder, Status, InviteToken, InvitedAtUtc, SignedAtUtc
-            FROM repository.SignRequestSigners
-            WHERE SignRequestId = @RequestId AND IsDeleted = 0
-            ORDER BY SortOrder, CreatedAtUtc
+        await using (var sCmd = new NpgsqlCommand("""
+            SELECT "Id", "Email", "Name", "SortOrder", "Status", "InviteToken", "InvitedAtUtc", "SignedAtUtc"
+            FROM repository."SignRequestSigners"
+            WHERE "SignRequestId" = @RequestId AND "IsDeleted" = false
+            ORDER BY "SortOrder", "CreatedAtUtc"
             """, connection))
         {
             sCmd.Parameters.AddWithValue("@RequestId", signRequestId);
@@ -898,19 +897,19 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await EnsureTenantConnectionAsync(tenantId, cancellationToken);
         await EnsureSchemaAsync(cancellationToken);
 
-        await using var connection = new SqlConnection(RequireConnectionString());
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
-        await using var load = new SqlCommand("""
-            SELECT s.Id, s.InviteToken, r.Id, r.TenantId, r.RepositoryId, r.ItemId, r.FileName, r.SigningMode, r.Status,
-                   s.Status, s.Email, s.SortOrder,
-                   (SELECT COUNT(1) FROM repository.SignRequestSigners x WHERE x.SignRequestId = r.Id AND x.IsDeleted = 0),
-                   r.InitiatedByEmail, r.InitiatedByName, r.Message, r.ExpiresAtUtc
-            FROM repository.SignRequestSigners s
-            INNER JOIN repository.SignRequests r ON r.Id = s.SignRequestId
-            WHERE r.Id = @RequestId
-              AND r.TenantId = @TenantId
-              AND s.IsDeleted = 0 AND r.IsDeleted = 0
-              AND LOWER(s.Email) = @Email
+        await using var load = new NpgsqlCommand("""
+            SELECT s."Id", s."InviteToken", r."Id", r."TenantId", r."RepositoryId", r."ItemId", r."FileName", r."SigningMode", r."Status",
+                   s."Status", s."Email", s."SortOrder",
+                   (SELECT COUNT(1) FROM repository."SignRequestSigners" x WHERE x."SignRequestId" = r."Id" AND x."IsDeleted" = false),
+                   r."InitiatedByEmail", r."InitiatedByName", r."Message", r."ExpiresAtUtc"
+            FROM repository."SignRequestSigners" s
+            INNER JOIN repository."SignRequests" r ON r."Id" = s."SignRequestId"
+            WHERE r."Id" = @RequestId
+              AND r."TenantId" = @TenantId
+              AND s."IsDeleted" = false AND r."IsDeleted" = false
+              AND LOWER(s."Email") = @Email
             """, connection);
         load.Parameters.AddWithValue("@RequestId", signRequestId);
         load.Parameters.AddWithValue("@TenantId", tenantId);
@@ -955,11 +954,11 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         {
             var cs = catalog.Database.GetConnectionString()
                 ?? throw new InvalidOperationException("Catalog connection string is not configured.");
-            await using var connection = new SqlConnection(cs);
+            await using var connection = new NpgsqlConnection(cs);
             await connection.OpenAsync(cancellationToken);
-            await using var cmd = new SqlCommand("""
-                SELECT TenantId FROM catalog.SignRequestInviteIndex
-                WHERE InviteToken = @Token
+            await using var cmd = new NpgsqlCommand("""
+                SELECT "TenantId" FROM catalog."SignRequestInviteIndex"
+                WHERE "InviteToken" = @Token
                 """, connection);
             cmd.Parameters.AddWithValue("@Token", inviteToken.Trim());
             var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -975,16 +974,16 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await EnsureTenantConnectionAsync(tenantId.Value, cancellationToken);
         await EnsureSchemaAsync(cancellationToken);
 
-        await using var tenantConn = new SqlConnection(RequireConnectionString());
+        await using var tenantConn = new NpgsqlConnection(RequireConnectionString());
         await tenantConn.OpenAsync(cancellationToken);
-        await using var load = new SqlCommand("""
-            SELECT s.Id, s.InviteToken, r.Id, r.TenantId, r.RepositoryId, r.ItemId, r.FileName, r.SigningMode, r.Status,
-                   s.Status, s.Email, s.SortOrder,
-                   (SELECT COUNT(1) FROM repository.SignRequestSigners x WHERE x.SignRequestId = r.Id AND x.IsDeleted = 0),
-                   r.InitiatedByEmail, r.InitiatedByName, r.Message, r.ExpiresAtUtc
-            FROM repository.SignRequestSigners s
-            INNER JOIN repository.SignRequests r ON r.Id = s.SignRequestId
-            WHERE s.InviteToken = @Token AND s.IsDeleted = 0 AND r.IsDeleted = 0
+        await using var load = new NpgsqlCommand("""
+            SELECT s."Id", s."InviteToken", r."Id", r."TenantId", r."RepositoryId", r."ItemId", r."FileName", r."SigningMode", r."Status",
+                   s."Status", s."Email", s."SortOrder",
+                   (SELECT COUNT(1) FROM repository."SignRequestSigners" x WHERE x."SignRequestId" = r."Id" AND x."IsDeleted" = false),
+                   r."InitiatedByEmail", r."InitiatedByName", r."Message", r."ExpiresAtUtc"
+            FROM repository."SignRequestSigners" s
+            INNER JOIN repository."SignRequests" r ON r."Id" = s."SignRequestId"
+            WHERE s."InviteToken" = @Token AND s."IsDeleted" = false AND r."IsDeleted" = false
             """, tenantConn);
         load.Parameters.AddWithValue("@Token", inviteToken.Trim());
         await using var reader = await load.ExecuteReaderAsync(cancellationToken);
@@ -1020,12 +1019,14 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await EnsureCatalogInviteIndexAsync(cancellationToken);
         await using var catalog = await _catalogFactory.CreateDbContextAsync(cancellationToken);
         var cs = catalog.Database.GetConnectionString()!;
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            IF NOT EXISTS (SELECT 1 FROM catalog.SignRequestInviteIndex WHERE InviteToken = @Token)
-                INSERT INTO catalog.SignRequestInviteIndex (InviteToken, TenantId, CreatedAtUtc)
-                VALUES (@Token, @TenantId, SYSUTCDATETIME())
+        // InviteToken is the primary key -- ON CONFLICT DO NOTHING is the direct equivalent of
+        // the original's IF NOT EXISTS guard.
+        await using var cmd = new NpgsqlCommand("""
+            INSERT INTO catalog."SignRequestInviteIndex" ("InviteToken", "TenantId", "CreatedAtUtc")
+            VALUES (@Token, @TenantId, now())
+            ON CONFLICT ("InviteToken") DO NOTHING
             """, connection);
         cmd.Parameters.AddWithValue("@Token", inviteToken);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
@@ -1037,23 +1038,16 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         await using var catalog = await _catalogFactory.CreateDbContextAsync(cancellationToken);
         var cs = catalog.Database.GetConnectionString()
             ?? throw new InvalidOperationException("Catalog connection string is not configured.");
-        await using var connection = new SqlConnection(cs);
+        await using var connection = new NpgsqlConnection(cs);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand("""
-            IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'catalog')
-                EXEC(N'CREATE SCHEMA catalog');
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.tables t
-                INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = N'catalog' AND t.name = N'SignRequestInviteIndex')
-            BEGIN
-                CREATE TABLE catalog.SignRequestInviteIndex (
-                    InviteToken NVARCHAR(128) NOT NULL CONSTRAINT PK_SignRequestInviteIndex PRIMARY KEY,
-                    TenantId UNIQUEIDENTIFIER NOT NULL,
-                    CreatedAtUtc DATETIME2 NOT NULL CONSTRAINT DF_SignRequestInviteIndex_CreatedAt DEFAULT SYSUTCDATETIME()
-                );
-                CREATE INDEX IX_SignRequestInviteIndex_Tenant ON catalog.SignRequestInviteIndex (TenantId);
-            END
+        await using var cmd = new NpgsqlCommand("""
+            CREATE SCHEMA IF NOT EXISTS catalog;
+            CREATE TABLE IF NOT EXISTS catalog."SignRequestInviteIndex" (
+                "InviteToken" varchar(128) NOT NULL CONSTRAINT "PK_SignRequestInviteIndex" PRIMARY KEY,
+                "TenantId" uuid NOT NULL,
+                "CreatedAtUtc" timestamptz NOT NULL CONSTRAINT "DF_SignRequestInviteIndex_CreatedAt" DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS "IX_SignRequestInviteIndex_Tenant" ON catalog."SignRequestInviteIndex" ("TenantId");
             """, connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
@@ -1331,61 +1325,50 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         }
     }
 
-    // Fix CreateAsync to index invite tokens in catalog — patch after write via search_replace
-
+    // Matches scripts/postgres/CreateRepositorySchema.sql's repository schema conventions
+    // (PascalCase quoted). These two tables have no static-script counterpart on SQL Server
+    // either -- only ever created via this inline path.
     private const string EnsureSchemaSql = """
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'SignRequests')
-        BEGIN
-            CREATE TABLE repository.SignRequests (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_SignRequests PRIMARY KEY,
-                TenantId UNIQUEIDENTIFIER NOT NULL,
-                RepositoryId UNIQUEIDENTIFIER NOT NULL,
-                ItemId UNIQUEIDENTIFIER NOT NULL,
-                FileName NVARCHAR(512) NULL,
-                SigningMode NVARCHAR(32) NOT NULL,
-                Status NVARCHAR(32) NOT NULL,
-                Message NVARCHAR(2000) NULL,
-                InitiatedByUserId UNIQUEIDENTIFIER NOT NULL,
-                InitiatedByEmail NVARCHAR(256) NOT NULL,
-                InitiatedByName NVARCHAR(256) NOT NULL,
-                ExpiresAtUtc DATETIME2(3) NOT NULL,
-                CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_SignRequests_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
-                ModifiedAtUtc DATETIME2(3) NULL,
-                CompletedAtUtc DATETIME2(3) NULL,
-                IsDeleted BIT NOT NULL CONSTRAINT DF_SignRequests_IsDeleted DEFAULT (0)
-            );
-            CREATE INDEX IX_SignRequests_Item ON repository.SignRequests (TenantId, RepositoryId, ItemId, IsDeleted);
-        END
+        CREATE TABLE IF NOT EXISTS repository."SignRequests" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_SignRequests" PRIMARY KEY,
+            "TenantId" uuid NOT NULL,
+            "RepositoryId" uuid NOT NULL,
+            "ItemId" uuid NOT NULL,
+            "FileName" varchar(512) NULL,
+            "SigningMode" varchar(32) NOT NULL,
+            "Status" varchar(32) NOT NULL,
+            "Message" varchar(2000) NULL,
+            "InitiatedByUserId" uuid NOT NULL,
+            "InitiatedByEmail" varchar(256) NOT NULL,
+            "InitiatedByName" varchar(256) NOT NULL,
+            "ExpiresAtUtc" timestamptz NOT NULL,
+            "CreatedAtUtc" timestamptz NOT NULL CONSTRAINT "DF_SignRequests_CreatedAtUtc" DEFAULT now(),
+            "ModifiedAtUtc" timestamptz NULL,
+            "CompletedAtUtc" timestamptz NULL,
+            "IsDeleted" boolean NOT NULL CONSTRAINT "DF_SignRequests_IsDeleted" DEFAULT false
+        );
+        CREATE INDEX IF NOT EXISTS "IX_SignRequests_Item" ON repository."SignRequests" ("TenantId", "RepositoryId", "ItemId", "IsDeleted");
 
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'SignRequestSigners')
-        BEGIN
-            CREATE TABLE repository.SignRequestSigners (
-                Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_SignRequestSigners PRIMARY KEY,
-                SignRequestId UNIQUEIDENTIFIER NOT NULL,
-                Email NVARCHAR(256) NOT NULL,
-                Name NVARCHAR(256) NULL,
-                UserId UNIQUEIDENTIFIER NULL,
-                SortOrder INT NOT NULL,
-                Status NVARCHAR(32) NOT NULL,
-                InviteToken NVARCHAR(128) NOT NULL,
-                InvitedAtUtc DATETIME2(3) NULL,
-                SignedAtUtc DATETIME2(3) NULL,
-                SignatureMetaJson NVARCHAR(MAX) NULL,
-                DeclineReason NVARCHAR(1000) NULL,
-                CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_SignRequestSigners_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
-                ModifiedAtUtc DATETIME2(3) NULL,
-                IsDeleted BIT NOT NULL CONSTRAINT DF_SignRequestSigners_IsDeleted DEFAULT (0),
-                CONSTRAINT FK_SignRequestSigners_Request FOREIGN KEY (SignRequestId)
-                    REFERENCES repository.SignRequests (Id) ON DELETE CASCADE
-            );
-            CREATE UNIQUE INDEX IX_SignRequestSigners_Token ON repository.SignRequestSigners (InviteToken);
-            CREATE INDEX IX_SignRequestSigners_Request ON repository.SignRequestSigners (SignRequestId, SortOrder);
-        END
+        CREATE TABLE IF NOT EXISTS repository."SignRequestSigners" (
+            "Id" uuid NOT NULL CONSTRAINT "PK_SignRequestSigners" PRIMARY KEY,
+            "SignRequestId" uuid NOT NULL,
+            "Email" varchar(256) NOT NULL,
+            "Name" varchar(256) NULL,
+            "UserId" uuid NULL,
+            "SortOrder" integer NOT NULL,
+            "Status" varchar(32) NOT NULL,
+            "InviteToken" varchar(128) NOT NULL,
+            "InvitedAtUtc" timestamptz NULL,
+            "SignedAtUtc" timestamptz NULL,
+            "SignatureMetaJson" text NULL,
+            "DeclineReason" varchar(1000) NULL,
+            "CreatedAtUtc" timestamptz NOT NULL CONSTRAINT "DF_SignRequestSigners_CreatedAtUtc" DEFAULT now(),
+            "ModifiedAtUtc" timestamptz NULL,
+            "IsDeleted" boolean NOT NULL CONSTRAINT "DF_SignRequestSigners_IsDeleted" DEFAULT false,
+            CONSTRAINT "FK_SignRequestSigners_Request" FOREIGN KEY ("SignRequestId")
+                REFERENCES repository."SignRequests" ("Id") ON DELETE CASCADE
+        );
+        CREATE UNIQUE INDEX IF NOT EXISTS "IX_SignRequestSigners_Token" ON repository."SignRequestSigners" ("InviteToken");
+        CREATE INDEX IF NOT EXISTS "IX_SignRequestSigners_Request" ON repository."SignRequestSigners" ("SignRequestId", "SortOrder");
         """;
 }

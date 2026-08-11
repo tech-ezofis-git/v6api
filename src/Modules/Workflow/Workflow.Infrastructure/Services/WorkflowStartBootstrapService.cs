@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using Azure.Storage.Blobs;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
@@ -276,7 +276,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             throw new InvalidOperationException("Workflow FormId is not configured. Set InitiateUsing.FormId on the workflow.");
 
         var tableSuffix = FormIdNaming.GetEzfbTableSuffix(formId);
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         if (!await EzfbTableExistsAsync(connection, tableSuffix, cancellationToken))
@@ -285,62 +285,69 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         return await InsertEzfbItemRowAsync(connection, tableSuffix, userId, cancellationToken);
     }
 
+    /// <summary>Minimal fallback shape matching FormService.cs's ezfb_{suffix}_items system columns (snake_case).</summary>
     private static async Task EnsureMinimalEzfbTableAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableSuffix,
         CancellationToken cancellationToken)
     {
-        var table = $"dbo.[ezfb_{tableSuffix}_items]";
-        var sql = $@"
-IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name = N'ezfb_{tableSuffix}_items' AND schema_id = SCHEMA_ID('dbo'))
-BEGIN
-    CREATE TABLE {table} (
-        itemId INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-        createdAt NVARCHAR(50) NULL,
-        modifiedAt NVARCHAR(50) NULL,
-        createdBy NVARCHAR(50) NOT NULL CONSTRAINT DF_ezfb_{tableSuffix}_createdBy DEFAULT('0'),
-        modifiedBy NVARCHAR(50) NOT NULL CONSTRAINT DF_ezfb_{tableSuffix}_modifiedBy DEFAULT('0'),
-        isDeleted BIT NOT NULL CONSTRAINT DF_ezfb_{tableSuffix}_isDeleted DEFAULT(0)
-    );
-END";
-        await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+        var sql = $"""
+            CREATE SCHEMA IF NOT EXISTS dbo;
+            CREATE TABLE IF NOT EXISTS dbo.ezfb_{tableSuffix}_items (
+                item_id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,
+                created_at varchar(50) NULL,
+                modified_at varchar(50) NULL,
+                created_by varchar(50) NOT NULL DEFAULT '0',
+                modified_by varchar(50) NOT NULL DEFAULT '0',
+                is_deleted boolean NOT NULL DEFAULT false
+            );
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task<bool> EzfbTableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableSuffix,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT COUNT(1)
-            FROM INFORMATION_SCHEMA.TABLES
-            WHERE TABLE_SCHEMA = 'dbo' AND TABLE_NAME = @TableName
+            FROM information_schema.tables
+            WHERE table_schema = 'dbo' AND table_name = @TableName
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TableName", $"ezfb_{tableSuffix}_items");
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
     private static async Task<int> InsertEzfbItemRowAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string tableSuffix,
         Guid userId,
         CancellationToken cancellationToken)
     {
-        var table = $"dbo.[ezfb_{tableSuffix}_items]";
+        var table = $"dbo.ezfb_{tableSuffix}_items";
         var createdBy = userId.ToString("D");
-        var sql = $@"
-INSERT INTO {table} (createdAt, createdBy, isDeleted)
-OUTPUT INSERTED.itemId
-VALUES (CONVERT(NVARCHAR(50), SYSUTCDATETIME(), 127), @CreatedBy, 0);";
-        await using var cmd = new SqlCommand(sql, connection);
+        var sql = $"""
+            INSERT INTO {table} (created_at, created_by, is_deleted)
+            VALUES (to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.MS"Z"'), @CreatedBy, false)
+            RETURNING item_id;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@CreatedBy", createdBy);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
     }
 
     /// <summary>
-    /// Legacy workflow.processForm_{suffix}: FormEntryId = ezfb itemId; WorkflowInstanceId = instance (no ProcessId).
+    /// PHASE 4: workflow.process_form_{suffix} is created by WorkflowTableCreator.cs's
+    /// GenerateProcessFormTableScript with a single fixed modern shape from day one
+    /// (workflow_instance_id uuid, w_form_id varchar(64), form_entry_id integer, no ProcessId
+    /// column ever existed) -- there is no cross-install drift to detect or migrate away from on
+    /// Postgres, so EnsureProcessFormTableAsync / MigrateProcessFormDropProcessIdAsync /
+    /// MigrateProcessFormWFormIdToNvarcharAsync / DropIndexesOnColumnAsync were dropped entirely
+    /// rather than translated (same precedent as FormService.cs). A matching CREATE TABLE IF NOT
+    /// EXISTS is kept inline as a cheap safety net for the (normally publish-time-created) table.
     /// </summary>
     private static async Task InsertProcessFormRowAsync(
         string connectionString,
@@ -351,281 +358,59 @@ VALUES (CONVERT(NVARCHAR(50), SYSUTCDATETIME(), 127), @CreatedBy, 0);";
         Guid userId,
         CancellationToken cancellationToken)
     {
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await EnsureProcessFormTableAsync(connection, workflowSuffix, cancellationToken);
 
-        const string schema = "workflow";
-        var tableName = $"processForm_{workflowSuffix}";
-        var table = $"workflow.[{tableName}]";
+        var table = $"workflow.process_form_{workflowSuffix}";
+        var wFormIdValue = NormalizeFormIdForStorage(formId);
 
-        var wFormIdSqlType = await GetColumnSqlTypeAsync(connection, schema, tableName, "WFormId", cancellationToken);
-        var wFormIdValue = CoerceWFormIdValue(formId, wFormIdSqlType);
+        var sql = $"""
+            INSERT INTO {table}
+                (workflow_instance_id, w_form_id, form_entry_id, created_at, created_by, is_deleted)
+            VALUES
+                (@WorkflowInstanceId, @WFormId, @FormEntryId, now(), @CreatedBy, false);
+            """;
 
-        var createdAtCol = await ColumnExistsAsync(connection, schema, tableName, "CreatedAt", cancellationToken)
-            ? "CreatedAt"
-            : "CreatedAtUtc";
-
-        var createdBySqlType = await GetColumnSqlTypeAsync(connection, schema, tableName, "CreatedBy", cancellationToken);
-        var createdByValue = createdBySqlType == "uniqueidentifier"
-            ? (object)userId
-            : userId.ToString("D");
-
-        var hasWorkflowInstanceId = await ColumnExistsAsync(connection, schema, tableName, "WorkflowInstanceId", cancellationToken);
-        var hasProcessId = await ColumnExistsAsync(connection, schema, tableName, "ProcessId", cancellationToken);
-
-        var cols = new List<string>();
-        var vals = new List<string>();
-        if (hasWorkflowInstanceId)
-        {
-            cols.Add("WorkflowInstanceId");
-            vals.Add("@WorkflowInstanceId");
-        }
-        else if (hasProcessId)
-        {
-            cols.Add("ProcessId");
-            vals.Add("@ProcessId");
-        }
-
-        cols.AddRange(["WFormId", "FormEntryId", createdAtCol, "CreatedBy", "IsDeleted"]);
-        vals.AddRange(["@WFormId", "@FormEntryId", "SYSUTCDATETIME()", "@CreatedBy", "0"]);
-
-        var sql = $@"
-INSERT INTO {table}
-    ({string.Join(", ", cols)})
-VALUES
-    ({string.Join(", ", vals)});";
-
-        await using var cmd = new SqlCommand(sql, connection);
-        if (hasWorkflowInstanceId)
-            cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
-        else if (hasProcessId)
-            cmd.Parameters.AddWithValue("@ProcessId", 0);
-        cmd.Parameters.AddWithValue("@WFormId", wFormIdValue);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        cmd.Parameters.AddWithValue("@WFormId", (object?)wFormIdValue ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@FormEntryId", formEntryItemId);
-        cmd.Parameters.AddWithValue("@CreatedBy", createdByValue);
+        cmd.Parameters.AddWithValue("@CreatedBy", userId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task EnsureProcessFormTableAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string workflowSuffix,
         CancellationToken cancellationToken)
     {
-        var tableName = $"processForm_{workflowSuffix}";
-        if (await TableExistsAsync(connection, "workflow", tableName, cancellationToken))
-        {
-            const string schema = "workflow";
-            var hasWorkflowInstanceId = await ColumnExistsAsync(connection, schema, tableName, "WorkflowInstanceId", cancellationToken);
-            var hasProcessId = await ColumnExistsAsync(connection, schema, tableName, "ProcessId", cancellationToken);
-            if (hasWorkflowInstanceId && !hasProcessId)
-                return;
-
-            await MigrateProcessFormDropProcessIdAsync(connection, workflowSuffix, cancellationToken);
-            return;
-        }
-
-        var idx = workflowSuffix.Replace("-", "_");
-        var sql = $@"
-CREATE TABLE workflow.[{tableName}] (
-    Id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-    WorkflowInstanceId UNIQUEIDENTIFIER NOT NULL,
-    WFormId NVARCHAR(64) NOT NULL,
-    FormEntryId INT NOT NULL,
-    CreatedAt DATETIME2 NOT NULL CONSTRAINT DF_processForm_{idx}_CreatedAt DEFAULT (SYSUTCDATETIME()),
-    CreatedBy UNIQUEIDENTIFIER NOT NULL,
-    IsDeleted BIT NOT NULL CONSTRAINT DF_processForm_{idx}_IsDeleted DEFAULT (0)
-);
-CREATE INDEX IX_processForm_{idx}_WorkflowInstanceId_IsDeleted
-    ON workflow.[{tableName}](WorkflowInstanceId, IsDeleted);";
-        await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+        var sql = $"""
+            CREATE SCHEMA IF NOT EXISTS workflow;
+            CREATE TABLE IF NOT EXISTS workflow.process_form_{workflowSuffix} (
+                id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                workflow_instance_id uuid NOT NULL,
+                w_form_id varchar(64) NOT NULL,
+                form_entry_id integer NOT NULL,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                created_by uuid NOT NULL,
+                is_deleted boolean NOT NULL DEFAULT false
+            );
+            CREATE INDEX IF NOT EXISTS ix_process_form_{workflowSuffix}_workflow_instance_id_is_deleted ON workflow.process_form_{workflowSuffix} (workflow_instance_id, is_deleted);
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task MigrateProcessFormDropProcessIdAsync(
-        SqlConnection connection,
-        string workflowSuffix,
-        CancellationToken cancellationToken)
-    {
-        const string schema = "workflow";
-        var tableName = $"processForm_{workflowSuffix}";
-        var tableFull = $"{schema}.{tableName}";
-        var idx = workflowSuffix.Replace("-", "_");
-
-        var ensureInstanceCol = $@"
-IF COL_LENGTH('{tableFull}', 'WorkflowInstanceId') IS NULL
-    ALTER TABLE workflow.[{tableName}] ADD WorkflowInstanceId UNIQUEIDENTIFIER NULL;";
-        await using (var cmd = new SqlCommand(ensureInstanceCol, connection) { CommandTimeout = 120 })
-            await cmd.ExecuteNonQueryAsync(cancellationToken);
-
-        if (await ColumnExistsAsync(connection, schema, tableName, "ProcessId", cancellationToken))
-        {
-            await DropIndexesOnColumnAsync(connection, schema, tableName, "ProcessId", cancellationToken);
-
-            var dropProcessId = $@"
-IF COL_LENGTH('{tableFull}', 'ProcessId') IS NOT NULL
-    ALTER TABLE workflow.[{tableName}] DROP COLUMN ProcessId;";
-            await using var drop = new SqlCommand(dropProcessId, connection) { CommandTimeout = 120 };
-            await drop.ExecuteNonQueryAsync(cancellationToken);
-        }
-
-        var ensureIndexSql = $@"
-IF COL_LENGTH('{tableFull}', 'WorkflowInstanceId') IS NOT NULL
-  AND NOT EXISTS (
-    SELECT 1 FROM sys.indexes i
-    INNER JOIN sys.tables t ON i.object_id = t.object_id
-    INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-    WHERE s.name = N'workflow' AND t.name = N'{tableName}'
-      AND i.name = N'IX_processForm_{idx}_WorkflowInstanceId_IsDeleted')
-BEGIN
-    CREATE INDEX IX_processForm_{idx}_WorkflowInstanceId_IsDeleted
-        ON workflow.[{tableName}](WorkflowInstanceId, IsDeleted);
-END";
-        await using var indexCmd = new SqlCommand(ensureIndexSql, connection) { CommandTimeout = 120 };
-        await indexCmd.ExecuteNonQueryAsync(cancellationToken);
-
-        await MigrateProcessFormWFormIdToNvarcharAsync(connection, workflowSuffix, cancellationToken);
-    }
-
-    /// <summary>Legacy processForm had WFormId INT (hex-truncated). Align with dbo.wForm.id (dashed GUID string).</summary>
-    private static async Task MigrateProcessFormWFormIdToNvarcharAsync(
-        SqlConnection connection,
-        string workflowSuffix,
-        CancellationToken cancellationToken)
-    {
-        const string schema = "workflow";
-        var tableName = $"processForm_{workflowSuffix}";
-
-        if (!await ColumnExistsAsync(connection, schema, tableName, "WFormId", cancellationToken))
-            return;
-
-        var wFormIdType = await GetColumnSqlTypeAsync(connection, schema, tableName, "WFormId", cancellationToken);
-        if (!IsNumericSqlType(wFormIdType))
-            return;
-
-        await DropIndexesOnColumnAsync(connection, schema, tableName, "WFormId", cancellationToken);
-
-        var alterSql = $"ALTER TABLE workflow.[{tableName}] ALTER COLUMN WFormId NVARCHAR(64) NOT NULL;";
-        await using var alterCmd = new SqlCommand(alterSql, connection) { CommandTimeout = 120 };
-        await alterCmd.ExecuteNonQueryAsync(cancellationToken);
-    }
-
-    private static async Task DropIndexesOnColumnAsync(
-        SqlConnection connection,
-        string schema,
-        string tableName,
-        string columnName,
-        CancellationToken cancellationToken)
-    {
-        const string getIndexesSql = """
-            SELECT DISTINCT i.name
-            FROM sys.indexes i
-            INNER JOIN sys.index_columns ic ON i.object_id = ic.object_id AND i.index_id = ic.index_id
-            INNER JOIN sys.columns c ON ic.object_id = c.object_id AND ic.column_id = c.column_id
-            INNER JOIN sys.tables t ON i.object_id = t.object_id
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE s.name = @Schema AND t.name = @TableName AND c.name = @ColumnName
-              AND i.name IS NOT NULL AND i.type > 0;
-            """;
-
-        var indexNames = new List<string>();
-        await using (var getCmd = new SqlCommand(getIndexesSql, connection))
-        {
-            getCmd.Parameters.AddWithValue("@Schema", schema);
-            getCmd.Parameters.AddWithValue("@TableName", tableName);
-            getCmd.Parameters.AddWithValue("@ColumnName", columnName);
-            await using var reader = await getCmd.ExecuteReaderAsync(cancellationToken);
-            while (await reader.ReadAsync(cancellationToken))
-                indexNames.Add(reader.GetString(0));
-        }
-
-        foreach (var indexName in indexNames)
-        {
-            var escapedIndex = indexName.Replace("]", "]]");
-            var dropSql = $"DROP INDEX [{escapedIndex}] ON [{schema}].[{tableName}];";
-            await using var dropCmd = new SqlCommand(dropSql, connection) { CommandTimeout = 120 };
-            await dropCmd.ExecuteNonQueryAsync(cancellationToken);
-        }
-    }
-
-    private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
-        string schema,
-        string tableName,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT COUNT(1)
-            FROM sys.tables t
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE s.name = @Schema AND t.name = @TableName
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Schema", schema);
-        cmd.Parameters.AddWithValue("@TableName", tableName);
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
-    }
-
-    private static async Task<bool> ColumnExistsAsync(
-        SqlConnection connection,
-        string schema,
-        string tableName,
-        string columnName,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT COUNT(1)
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @Table AND COLUMN_NAME = @Column
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Schema", schema);
-        cmd.Parameters.AddWithValue("@Table", tableName);
-        cmd.Parameters.AddWithValue("@Column", columnName);
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
-    }
-
-    private static async Task<string?> GetColumnSqlTypeAsync(
-        SqlConnection connection,
-        string schema,
-        string tableName,
-        string columnName,
-        CancellationToken cancellationToken)
-    {
-        const string sql = """
-            SELECT DATA_TYPE
-            FROM INFORMATION_SCHEMA.COLUMNS
-            WHERE TABLE_SCHEMA = @Schema AND TABLE_NAME = @Table AND COLUMN_NAME = @Column
-            """;
-        await using var cmd = new SqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Schema", schema);
-        cmd.Parameters.AddWithValue("@Table", tableName);
-        cmd.Parameters.AddWithValue("@Column", columnName);
-        return (await cmd.ExecuteScalarAsync(cancellationToken))?.ToString()?.ToLowerInvariant();
-    }
-
-    private static object CoerceWFormIdValue(string? formId, string? sqlType)
+    private static string? NormalizeFormIdForStorage(string? formId)
     {
         if (string.IsNullOrWhiteSpace(formId))
-            return DBNull.Value;
+            return null;
 
-        // processForm.WFormId should be NVARCHAR (dbo.wForm.id). Legacy INT coercion is wrong for GUID form ids.
-        if (sqlType is "int" or "bigint" or "smallint" or "tinyint")
-            throw new InvalidOperationException(
-                "workflow.processForm WFormId is still numeric; run schema migration (restart workflow start) before inserting.");
-
-        return NormalizeFormIdForStorage(formId);
-    }
-
-    private static string NormalizeFormIdForStorage(string formId)
-    {
         var trimmed = formId.Trim();
         return Guid.TryParse(trimmed, out var guid) ? guid.ToString("D") : trimmed;
     }
-
-    private static bool IsNumericSqlType(string? dataType) =>
-        dataType is "int" or "bigint" or "smallint" or "tinyint";
 
     private static async Task InsertWorkflowFormRowAsync(
         string connectionString,
@@ -639,16 +424,17 @@ END";
         Guid userId,
         CancellationToken cancellationToken)
     {
-        var table = $"workflow.WorkflowForms_{workflowSuffix}";
-        var sql = $@"
-INSERT INTO {table}
-    (Id, TenantId, WorkflowInstanceId, StepInstanceId, WFormId, FormEntryId, FormData, HasFormPdf, CreatedAtUtc, CreatedBy, IsDeleted)
-VALUES
-    (NEWID(), @TenantId, @WorkflowInstanceId, @StepInstanceId, @WFormId, @FormEntryId, @FormData, 0, SYSUTCDATETIME(), @CreatedBy, 0);";
+        var table = $"workflow.workflow_forms_{workflowSuffix}";
+        var sql = $"""
+            INSERT INTO {table}
+                (id, tenant_id, workflow_instance_id, step_instance_id, w_form_id, form_entry_id, form_data, has_form_pdf, created_at_utc, created_by, is_deleted)
+            VALUES
+                (gen_random_uuid(), @TenantId, @WorkflowInstanceId, @StepInstanceId, @WFormId, @FormEntryId, @FormData, false, now(), @CreatedBy, false);
+            """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         cmd.Parameters.AddWithValue("@StepInstanceId", (object?)stepInstanceId ?? DBNull.Value);
@@ -695,7 +481,7 @@ VALUES
         if (string.IsNullOrWhiteSpace(formId))
             return 0;
 
-        // Workflow.WorkflowForms_{suffix}.WFormId is INT.
+        // workflow.workflow_forms_{suffix}.w_form_id is integer (see WorkflowTableCreator.cs).
         // v5 legacy tenants often store wForm.id as NVARCHAR(8) hex (or even other short ids),
         // while wFormControl.wFormId is INT, mapped from the trailing hex digits.
         // So we convert `formId` -> INT using the same hex extraction rule (last 8 hex digits).
@@ -736,18 +522,19 @@ VALUES
         if (!int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var legacyInt))
             return null;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string byTableSql = """
-            SELECT TOP 1 Id
-            FROM repository.Repositories
-            WHERE TenantId = @TenantId AND IsDeleted = 0
-              AND (ItemsTableName LIKE @LegacyPattern OR StageTableName LIKE @LegacyPattern);
+            SELECT "Id"
+            FROM repository."Repositories"
+            WHERE "TenantId" = @TenantId AND "IsDeleted" = false
+              AND ("ItemsTableName" LIKE @LegacyPattern OR "StageTableName" LIKE @LegacyPattern)
+            LIMIT 1;
             """;
 
         var legacyPattern = $"%_{legacyInt}_%";
-        await using (var cmd = new SqlCommand(byTableSql, connection))
+        await using (var cmd = new NpgsqlCommand(byTableSql, connection))
         {
             cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
             cmd.Parameters.AddWithValue("@LegacyPattern", legacyPattern);
@@ -768,16 +555,16 @@ VALUES
         if (transactionId is not > 0)
             return null;
 
-        var table = $"workflow.[transaction_{workflowSuffix}]";
+        var table = $"workflow.transaction_{workflowSuffix}";
         var sql = $"""
-            SELECT TransactionGuid
+            SELECT transaction_guid
             FROM {table}
-            WHERE Id = @Id AND IsDeleted = 0;
+            WHERE id = @Id AND is_deleted = false;
             """;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", transactionId.Value);
         var o = await cmd.ExecuteScalarAsync(cancellationToken);
         if (o is Guid g)

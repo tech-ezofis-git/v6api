@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -35,22 +35,20 @@ public sealed class RepositoryStorageSeedService : IRepositoryStorageSeedService
     {
         await _schemaService.ApplyBaseSchemaAsync(connectionString, cancellationToken);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         foreach (var (code, name) in Defaults)
         {
             const string sql = """
-                IF NOT EXISTS (
-                    SELECT 1 FROM repository.StorageProviders
-                    WHERE TenantId = @TenantId AND Code = @Code AND IsDeleted = 0)
-                BEGIN
-                    INSERT INTO repository.StorageProviders (TenantId, Code, Name, CreatedBy)
-                    VALUES (@TenantId, @Code, @Name, @CreatedBy);
-                END
+                INSERT INTO repository."StorageProviders" ("TenantId", "Code", "Name", "CreatedBy")
+                SELECT @TenantId, @Code, @Name, @CreatedBy
+                WHERE NOT EXISTS (
+                    SELECT 1 FROM repository."StorageProviders"
+                    WHERE "TenantId" = @TenantId AND "Code" = @Code AND "IsDeleted" = false);
                 """;
 
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@TenantId", tenantId);
             cmd.Parameters.AddWithValue("@Code", code);
             cmd.Parameters.AddWithValue("@Name", name);
@@ -64,18 +62,18 @@ public sealed class RepositoryStorageSeedService : IRepositoryStorageSeedService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT Id, Code, Name, IsActive
-            FROM repository.StorageProviders
-            WHERE TenantId = @TenantId AND IsDeleted = 0
-            ORDER BY Code;
+            SELECT "Id", "Code", "Name", "IsActive"
+            FROM repository."StorageProviders"
+            WHERE "TenantId" = @TenantId AND "IsDeleted" = false
+            ORDER BY "Code";
             """;
 
         var list = new List<StorageProviderDto>();
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -105,7 +103,7 @@ public sealed class RepositoryStorageSeedService : IRepositoryStorageSeedService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var code = storageProviderCode.Trim();
@@ -124,17 +122,17 @@ public sealed class RepositoryStorageSeedService : IRepositoryStorageSeedService
     }
 
     private static async Task<Guid?> TryResolveProviderIdAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantId,
         string code,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT Id FROM repository.StorageProviders
-            WHERE TenantId = @TenantId AND IsDeleted = 0 AND UPPER(Code) = UPPER(@Code);
+            SELECT "Id" FROM repository."StorageProviders"
+            WHERE "TenantId" = @TenantId AND "IsDeleted" = false AND UPPER("Code") = UPPER(@Code);
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@Code", code);
         var result = await cmd.ExecuteScalarAsync(cancellationToken);

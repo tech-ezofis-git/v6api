@@ -1,4 +1,4 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.ActivityLog.Application.Contracts;
 using SaaSApp.MultiTenancy;
 
@@ -25,71 +25,71 @@ public sealed class ActivityLogQueryService : IActivityLogQueryService
         var pageSize = Math.Clamp(query.PageSize, 1, 200);
         var offset = (page - 1) * pageSize;
 
-        var where = new List<string> { "TenantId = @TenantId" };
-        var parameters = new List<SqlParameter> { new("@TenantId", tenantId) };
+        var where = new List<string> { "\"TenantId\" = @TenantId" };
+        var parameters = new List<NpgsqlParameter> { new("@TenantId", tenantId) };
 
         if (query.UserId.HasValue)
         {
-            where.Add("UserId = @UserId");
-            parameters.Add(new SqlParameter("@UserId", query.UserId.Value));
+            where.Add("\"UserId\" = @UserId");
+            parameters.Add(new NpgsqlParameter("@UserId", query.UserId.Value));
         }
 
         if (!string.IsNullOrWhiteSpace(query.Method))
         {
-            where.Add("HttpMethod = @HttpMethod");
-            parameters.Add(new SqlParameter("@HttpMethod", query.Method.Trim().ToUpperInvariant()));
+            where.Add("\"HttpMethod\" = @HttpMethod");
+            parameters.Add(new NpgsqlParameter("@HttpMethod", query.Method.Trim().ToUpperInvariant()));
         }
 
         if (!string.IsNullOrWhiteSpace(query.Path))
         {
-            where.Add("Path LIKE @Path");
-            parameters.Add(new SqlParameter("@Path", $"%{query.Path.Trim()}%"));
+            where.Add("\"Path\" LIKE @Path");
+            parameters.Add(new NpgsqlParameter("@Path", $"%{query.Path.Trim()}%"));
         }
 
         if (query.StatusCode.HasValue)
         {
-            where.Add("StatusCode = @StatusCode");
-            parameters.Add(new SqlParameter("@StatusCode", query.StatusCode.Value));
+            where.Add("\"StatusCode\" = @StatusCode");
+            parameters.Add(new NpgsqlParameter("@StatusCode", query.StatusCode.Value));
         }
 
         if (query.DateFrom.HasValue)
         {
-            where.Add("CreatedAtUtc >= @DateFrom");
-            parameters.Add(new SqlParameter("@DateFrom", query.DateFrom.Value));
+            where.Add("\"CreatedAtUtc\" >= @DateFrom");
+            parameters.Add(new NpgsqlParameter("@DateFrom", query.DateFrom.Value));
         }
 
         if (query.DateTo.HasValue)
         {
-            where.Add("CreatedAtUtc <= @DateTo");
-            parameters.Add(new SqlParameter("@DateTo", query.DateTo.Value));
+            where.Add("\"CreatedAtUtc\" <= @DateTo");
+            parameters.Add(new NpgsqlParameter("@DateTo", query.DateTo.Value));
         }
 
         if (!string.IsNullOrWhiteSpace(query.CorrelationId))
         {
-            where.Add("CorrelationId = @CorrelationId");
-            parameters.Add(new SqlParameter("@CorrelationId", query.CorrelationId.Trim()));
+            where.Add("\"CorrelationId\" = @CorrelationId");
+            parameters.Add(new NpgsqlParameter("@CorrelationId", query.CorrelationId.Trim()));
         }
 
         var whereClause = string.Join(" AND ", where);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var countSql = $"SELECT COUNT(1) FROM activitylog.ApiAccessLogs WHERE {whereClause}";
-        await using var countCmd = new SqlCommand(countSql, connection);
+        var countSql = $"""SELECT COUNT(1) FROM activitylog."ApiAccessLogs" WHERE {whereClause}""";
+        await using var countCmd = new NpgsqlCommand(countSql, connection);
         AddParameters(countCmd, parameters);
-        var total = (int)(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
+        var total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken) ?? 0);
 
         var dataSql = $"""
-            SELECT Id, TenantId, UserId, UserEmail, HttpMethod, Path, QueryString,
-                   StatusCode, DurationMs, CorrelationId, ClientIp, UserAgent, CreatedAtUtc
-            FROM activitylog.ApiAccessLogs
+            SELECT "Id", "TenantId", "UserId", "UserEmail", "HttpMethod", "Path", "QueryString",
+                   "StatusCode", "DurationMs", "CorrelationId", "ClientIp", "UserAgent", "CreatedAtUtc"
+            FROM activitylog."ApiAccessLogs"
             WHERE {whereClause}
-            ORDER BY CreatedAtUtc DESC
+            ORDER BY "CreatedAtUtc" DESC
             OFFSET @Offset ROWS FETCH NEXT @PageSize ROWS ONLY
             """;
 
-        await using var dataCmd = new SqlCommand(dataSql, connection);
+        await using var dataCmd = new NpgsqlCommand(dataSql, connection);
         AddParameters(dataCmd, parameters);
         dataCmd.Parameters.AddWithValue("@Offset", offset);
         dataCmd.Parameters.AddWithValue("@PageSize", pageSize);
@@ -117,9 +117,9 @@ public sealed class ActivityLogQueryService : IActivityLogQueryService
         return new PagedResult<ActivityLogEntryDto>(list, page, pageSize, total);
     }
 
-    private static void AddParameters(SqlCommand command, IReadOnlyList<SqlParameter> parameters)
+    private static void AddParameters(NpgsqlCommand command, IReadOnlyList<NpgsqlParameter> parameters)
     {
         foreach (var p in parameters)
-            command.Parameters.Add(new SqlParameter(p.ParameterName, p.Value));
+            command.Parameters.Add(new NpgsqlParameter(p.ParameterName, p.Value));
     }
 }

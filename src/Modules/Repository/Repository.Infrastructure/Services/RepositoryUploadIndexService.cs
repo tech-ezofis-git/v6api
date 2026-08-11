@@ -1,6 +1,6 @@
 using System.Text.Json;
 using Hangfire;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.Extensions.Logging;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application;
@@ -75,7 +75,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var stageId = await RepositoryStageStore.InsertAsync(
@@ -142,7 +142,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var repo = await ResolveRepositoryForStageAsync(connection, tenantId, stageId, cancellationToken);
@@ -166,7 +166,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var repo = await _provisioner.GetRepositoryAsync(request.RepositoryId, tenantId, cancellationToken)
@@ -223,7 +223,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var (rows, total) = await RepositoryStageStore.ListAsync(
@@ -344,7 +344,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
     }
 
     private async Task<RepositoryDetailDto?> ResolveRepositoryForStageAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid tenantId,
         Guid stageId,
         CancellationToken cancellationToken)

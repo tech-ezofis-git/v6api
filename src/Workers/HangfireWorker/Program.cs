@@ -1,5 +1,5 @@
 using Hangfire;
-using Hangfire.SqlServer;
+using Hangfire.PostgreSql;
 using Serilog;
 
 var builder = Host.CreateApplicationBuilder(args);
@@ -13,7 +13,7 @@ builder.Services.AddHangfire(config => config
     .SetDataCompatibilityLevel(Hangfire.CompatibilityLevel.Version_180)
     .UseSimpleAssemblyNameTypeSerializer()
     .UseRecommendedSerializerSettings()
-    .UseSqlServerStorage(connectionString));
+    .UsePostgreSqlStorage(connectionString));
 
 builder.Services.AddHangfireServer(options =>
     options.WorkerCount = builder.Configuration.GetValue<int?>("Hangfire:WorkerCount") ?? 5);

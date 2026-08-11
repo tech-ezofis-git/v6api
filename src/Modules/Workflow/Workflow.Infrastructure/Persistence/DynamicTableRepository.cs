@@ -1,12 +1,11 @@
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
-using System.Data;
 
 namespace SaaSApp.Workflow.Infrastructure.Persistence;
 
 /// <summary>
 /// Repository for managing workflow-specific dynamic tables.
-/// Handles transactions and CRUD operations for Comments_X, Attachments_X, etc.
+/// Handles transactions and CRUD operations for workflow_comments_x, workflow_attachments_x, etc.
 /// </summary>
 public sealed class DynamicTableRepository : IDynamicTableRepository
 {
@@ -25,21 +24,21 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
 
     public async Task<Guid> AddCommentAsync(Guid workflowId, Guid workflowInstanceId, string comments, Guid createdBy, Guid? stepInstanceId = null, string? externalCommentsBy = null, int showTo = 0, CancellationToken cancellationToken = default)
     {
-        var tableName = GetTableName(workflowId, "WorkflowComments");
+        var tableName = GetTableName(workflowId, "workflow_comments");
         var tenantId = _tenantContext.TenantId ?? throw new InvalidOperationException("Tenant context is required.");
         var connectionString = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string is required.");
         var commentId = Guid.NewGuid();
 
         var sql = $@"
-            INSERT INTO {tableName} 
-            (Id, TenantId, WorkflowInstanceId, StepInstanceId, Comments, ExternalCommentsBy, ShowTo, CreatedBy, CreatedAtUtc, IsDeleted, EmbedStatus)
-            VALUES 
-            (@Id, @TenantId, @WorkflowInstanceId, @StepInstanceId, @Comments, @ExternalCommentsBy, @ShowTo, @CreatedBy, SYSUTCDATETIME(), 0, 0)";
+            INSERT INTO {tableName}
+            (id, tenant_id, workflow_instance_id, step_instance_id, comments, external_comments_by, show_to, created_by, created_at_utc, is_deleted, embed_status)
+            VALUES
+            (@Id, @TenantId, @WorkflowInstanceId, @StepInstanceId, @Comments, @ExternalCommentsBy, @ShowTo, @CreatedBy, now(), false, false)";
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@Id", commentId);
         command.Parameters.AddWithValue("@TenantId", tenantId);
         command.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
@@ -67,7 +66,7 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
         string? formJsonId = null,
         CancellationToken cancellationToken = default)
     {
-        var tableName = GetTableName(workflowId, "WorkflowAttachments");
+        var tableName = GetTableName(workflowId, "workflow_attachments");
         var tenantId = _tenantContext.TenantId ?? throw new InvalidOperationException("Tenant context is required.");
         var connectionString = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string is required.");
 
@@ -75,16 +74,16 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
         var itemGuid = itemId ?? TryParseGuid(formJsonId);
         var sql = $@"
             INSERT INTO {tableName}
-            (Id, TenantId, WorkflowInstanceId, StepInstanceId, RepositoryId, ItemId, FormJsonId,
-             FileName, FilePath, FileSize, ContentType, CreatedBy, ModifiedBy, CreatedAtUtc, ModifiedAtUtc, IsDeleted)
+            (id, tenant_id, workflow_instance_id, step_instance_id, repository_id, item_id, form_json_id,
+             file_name, file_path, file_size, content_type, created_by, modified_by, created_at_utc, modified_at_utc, is_deleted)
             VALUES
             (@Id, @TenantId, @WorkflowInstanceId, @StepInstanceId, @RepositoryId, @ItemId, @FormJsonId,
-             @FileName, @FilePath, @FileSize, @ContentType, @CreatedBy, @ModifiedBy, SYSUTCDATETIME(), SYSUTCDATETIME(), 0)";
+             @FileName, @FilePath, @FileSize, @ContentType, @CreatedBy, @ModifiedBy, now(), now(), false)";
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@Id", attachmentId);
         command.Parameters.AddWithValue("@TenantId", tenantId);
         command.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
@@ -105,23 +104,23 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
 
     public async Task<IReadOnlyList<WorkflowCommentRowDto>> GetCommentsAsync(Guid workflowId, Guid workflowInstanceId, CancellationToken cancellationToken = default)
     {
-        var tableName = GetTableName(workflowId, "WorkflowComments");
+        var tableName = GetTableName(workflowId, "workflow_comments");
         var connectionString = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string is required.");
 
         var sql = $@"
-            SELECT 
-                Id, WorkflowInstanceId, StepInstanceId, Comments, ExternalCommentsBy, 
-                ShowTo, EmbedJson, EmbedStatus, CreatedAtUtc, CreatedBy
+            SELECT
+                id, workflow_instance_id, step_instance_id, comments, external_comments_by,
+                show_to, embed_json, embed_status, created_at_utc, created_by
             FROM {tableName}
-            WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC";
+            WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+            ORDER BY created_at_utc DESC";
 
         var results = new List<WorkflowCommentRowDto>();
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -148,24 +147,24 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
         Guid workflowInstanceId,
         CancellationToken cancellationToken = default)
     {
-        var tableName = GetTableName(workflowId, "WorkflowAttachments");
+        var tableName = GetTableName(workflowId, "workflow_attachments");
         var connectionString = _tenantContext.ConnectionString ?? throw new InvalidOperationException("Connection string is required.");
 
         var sql = $@"
             SELECT
-                Id, WorkflowInstanceId, FileName, FilePath, FileSize, ContentType,
-                CreatedAtUtc, CreatedBy, ModifiedAtUtc, ModifiedBy,
-                RepositoryId, ItemId, FormJsonId
+                id, workflow_instance_id, file_name, file_path, file_size, content_type,
+                created_at_utc, created_by, modified_at_utc, modified_by,
+                repository_id, item_id, form_json_id
             FROM {tableName}
-            WHERE WorkflowInstanceId = @WorkflowInstanceId AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC";
+            WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+            ORDER BY created_at_utc DESC";
 
         var results = new List<WorkflowAttachmentRowDto>();
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        await using var command = new SqlCommand(sql, connection);
+        await using var command = new NpgsqlCommand(sql, connection);
         command.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
 
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
@@ -175,29 +174,29 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
         return results;
     }
 
-    private static WorkflowAttachmentRowDto MapAttachmentRow(SqlDataReader reader)
+    private static WorkflowAttachmentRowDto MapAttachmentRow(NpgsqlDataReader reader)
     {
-        var formJsonId = GetNullableString(reader, "FormJsonId");
-        var repositoryId = ReadRepositoryOrItemGuid(reader, "RepositoryId");
-        var itemId = ReadRepositoryOrItemGuid(reader, "ItemId") ?? TryParseGuid(formJsonId);
+        var formJsonId = GetNullableString(reader, "form_json_id");
+        var repositoryId = ReadRepositoryOrItemGuid(reader, "repository_id");
+        var itemId = ReadRepositoryOrItemGuid(reader, "item_id") ?? TryParseGuid(formJsonId);
 
         return new WorkflowAttachmentRowDto(
-            Id: reader.GetGuid(reader.GetOrdinal("Id")),
-            WorkflowInstanceId: reader.GetGuid(reader.GetOrdinal("WorkflowInstanceId")),
-            FileName: GetNullableString(reader, "FileName"),
-            FilePath: GetNullableString(reader, "FilePath"),
-            FileSize: GetNullableInt64(reader, "FileSize"),
-            ContentType: GetNullableString(reader, "ContentType"),
-            CreatedAtUtc: reader.GetDateTime(reader.GetOrdinal("CreatedAtUtc")),
-            CreatedBy: reader.GetGuid(reader.GetOrdinal("CreatedBy")),
-            ModifiedAtUtc: GetNullableDateTime(reader, "ModifiedAtUtc"),
-            ModifiedBy: GetNullableGuid(reader, "ModifiedBy"),
+            Id: reader.GetGuid(reader.GetOrdinal("id")),
+            WorkflowInstanceId: reader.GetGuid(reader.GetOrdinal("workflow_instance_id")),
+            FileName: GetNullableString(reader, "file_name"),
+            FilePath: GetNullableString(reader, "file_path"),
+            FileSize: GetNullableInt64(reader, "file_size"),
+            ContentType: GetNullableString(reader, "content_type"),
+            CreatedAtUtc: reader.GetDateTime(reader.GetOrdinal("created_at_utc")),
+            CreatedBy: reader.GetGuid(reader.GetOrdinal("created_by")),
+            ModifiedAtUtc: GetNullableDateTime(reader, "modified_at_utc"),
+            ModifiedBy: GetNullableGuid(reader, "modified_by"),
             RepositoryId: repositoryId,
             ItemId: itemId,
             FormJsonId: formJsonId);
     }
 
-    private static Guid? ReadRepositoryOrItemGuid(SqlDataReader reader, string column)
+    private static Guid? ReadRepositoryOrItemGuid(NpgsqlDataReader reader, string column)
     {
         var i = reader.GetOrdinal(column);
         if (reader.IsDBNull(i))
@@ -220,31 +219,31 @@ public sealed class DynamicTableRepository : IDynamicTableRepository
         return trimmed.Length == 32 && Guid.TryParseExact(trimmed, "N", out guid) ? guid : null;
     }
 
-    private static string? GetNullableString(SqlDataReader reader, string column)
+    private static string? GetNullableString(NpgsqlDataReader reader, string column)
     {
         var i = reader.GetOrdinal(column);
         return reader.IsDBNull(i) ? null : reader.GetString(i);
     }
 
-    private static long? GetNullableInt64(SqlDataReader reader, string column)
+    private static long? GetNullableInt64(NpgsqlDataReader reader, string column)
     {
         var i = reader.GetOrdinal(column);
         return reader.IsDBNull(i) ? null : reader.GetInt64(i);
     }
 
-    private static int? GetNullableInt32(SqlDataReader reader, string column)
+    private static int? GetNullableInt32(NpgsqlDataReader reader, string column)
     {
         var i = reader.GetOrdinal(column);
         return reader.IsDBNull(i) ? null : reader.GetInt32(i);
     }
 
-    private static DateTime? GetNullableDateTime(SqlDataReader reader, string column)
+    private static DateTime? GetNullableDateTime(NpgsqlDataReader reader, string column)
     {
         var i = reader.GetOrdinal(column);
         return reader.IsDBNull(i) ? null : reader.GetDateTime(i);
     }
 
-    private static Guid? GetNullableGuid(SqlDataReader reader, string column)
+    private static Guid? GetNullableGuid(NpgsqlDataReader reader, string column)
     {
         var i = reader.GetOrdinal(column);
         return reader.IsDBNull(i) ? null : reader.GetGuid(i);

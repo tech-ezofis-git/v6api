@@ -1,0 +1,13 @@
+-- Add IsDefaultRepository column to repository.Repositories for ALL registered tenants -- Postgres
+-- Ported from scripts/AddRepositoryIsDefaultRepositoryAllTenants.sql -- Phase 3.
+--
+-- NOT PORTED AS A FUNCTIONAL SCRIPT, for two independent reasons:
+-- (1) This column is already part of scripts/postgres/CreateRepositorySchema.sql
+--     (both the CREATE TABLE and a defensive `ADD COLUMN IF NOT EXISTS
+--     "IsDefaultRepository" boolean NOT NULL DEFAULT true`) -- re-running that script
+--     per tenant already covers this.
+-- (2) This is an ...AllTenants.sql cross-database loop script -- see
+--     AddRepositoryFolderDocumentSecurityAllTenants.sql's header comment for why those
+--     don't port as a single Postgres .sql file (no cross-database USE; that
+--     orchestration is Phase 6's job, which should just re-run CreateRepositorySchema.sql
+--     per tenant rather than needing a separate script for this one column).

@@ -1,5 +1,5 @@
 using System.Collections.Concurrent;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using SaaSApp.Catalog.Persistence;
 
@@ -21,60 +21,54 @@ internal static class RepositoryItemShareCatalogStore
         if (TableEnsured.ContainsKey(connectionString))
             return;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        const string ensureSchemaSql = """
-            IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = N'catalog')
-                EXEC(N'CREATE SCHEMA catalog');
-            """;
+        // EXACT-MATCH REQUIREMENT: table/column names must stay catalog."RepositoryItemShares"
+        // (PascalCase quoted) to match CatalogDbContext.cs's ToTable("RepositoryItemShares", t
+        // => t.ExcludeFromMigrations()) (Phase 2) -- that table is script-owned, not EF-owned,
+        // so this is the only thing (along with scripts/postgres/Create_RepositoryItemShares.sql,
+        // kept in sync with the same 3 extra columns below) that creates/evolves it on Postgres.
+        const string ensureSchemaSql = "CREATE SCHEMA IF NOT EXISTS catalog;";
 
         const string createTableSql = """
-            IF NOT EXISTS (
-                SELECT 1 FROM sys.tables t
-                INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-                WHERE s.name = N'catalog' AND t.name = N'RepositoryItemShares')
-            BEGIN
-                CREATE TABLE catalog.RepositoryItemShares (
-                    Id                  UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_RepositoryItemShares PRIMARY KEY DEFAULT NEWID(),
-                    ShareToken          NVARCHAR(128)    NOT NULL,
-                    SourceTenantId      UNIQUEIDENTIFIER NOT NULL,
-                    SourceRepositoryId  UNIQUEIDENTIFIER NOT NULL,
-                    SourceItemId        UNIQUEIDENTIFIER NOT NULL,
-                    SharedByUserId      UNIQUEIDENTIFIER NOT NULL,
-                    RecipientEmail      NVARCHAR(256)    NOT NULL,
-                    Message             NVARCHAR(2000)   NULL,
-                    Status              NVARCHAR(32)     NOT NULL CONSTRAINT DF_RepositoryItemShares_Status DEFAULT N'Active',
-                    ExpiresAtUtc        DATETIME2        NOT NULL,
-                    CreatedAtUtc        DATETIME2        NOT NULL CONSTRAINT DF_RepositoryItemShares_CreatedAt DEFAULT SYSUTCDATETIME(),
-                    LastAccessedAtUtc   DATETIME2        NULL
-                );
+            CREATE TABLE IF NOT EXISTS catalog."RepositoryItemShares" (
+                "Id"                 uuid NOT NULL DEFAULT gen_random_uuid() CONSTRAINT "PK_RepositoryItemShares" PRIMARY KEY,
+                "ShareToken"         varchar(128)  NOT NULL,
+                "SourceTenantId"     uuid          NOT NULL,
+                "SourceRepositoryId" uuid          NOT NULL,
+                "SourceItemId"       uuid          NOT NULL,
+                "SharedByUserId"     uuid          NOT NULL,
+                "RecipientEmail"     varchar(256)  NOT NULL,
+                "Message"            varchar(2000) NULL,
+                "Status"             varchar(32)   NOT NULL CONSTRAINT "DF_RepositoryItemShares_Status" DEFAULT 'Active',
+                "ExpiresAtUtc"       timestamptz   NOT NULL,
+                "CreatedAtUtc"       timestamptz   NOT NULL CONSTRAINT "DF_RepositoryItemShares_CreatedAt" DEFAULT now(),
+                "LastAccessedAtUtc"  timestamptz   NULL
+            );
 
-                CREATE UNIQUE INDEX IX_RepositoryItemShares_ShareToken
-                    ON catalog.RepositoryItemShares (ShareToken);
+            CREATE UNIQUE INDEX IF NOT EXISTS "IX_RepositoryItemShares_ShareToken"
+                ON catalog."RepositoryItemShares" ("ShareToken");
 
-                CREATE INDEX IX_RepositoryItemShares_Recipient_Status
-                    ON catalog.RepositoryItemShares (RecipientEmail, Status);
+            CREATE INDEX IF NOT EXISTS "IX_RepositoryItemShares_Recipient_Status"
+                ON catalog."RepositoryItemShares" ("RecipientEmail", "Status");
 
-                CREATE INDEX IX_RepositoryItemShares_Source
-                    ON catalog.RepositoryItemShares (SourceTenantId, SourceRepositoryId, SourceItemId);
-            END
+            CREATE INDEX IF NOT EXISTS "IX_RepositoryItemShares_Source"
+                ON catalog."RepositoryItemShares" ("SourceTenantId", "SourceRepositoryId", "SourceItemId");
 
-            IF COL_LENGTH('catalog.RepositoryItemShares', 'AutoProvisionGuest') IS NULL
-                ALTER TABLE catalog.RepositoryItemShares ADD AutoProvisionGuest BIT NOT NULL
-                    CONSTRAINT DF_RepositoryItemShares_AutoProvisionGuest DEFAULT 0;
+            ALTER TABLE catalog."RepositoryItemShares"
+                ADD COLUMN IF NOT EXISTS "AutoProvisionGuest" boolean NOT NULL DEFAULT false;
 
-            IF COL_LENGTH('catalog.RepositoryItemShares', 'WorkflowInstanceId') IS NULL
-                ALTER TABLE catalog.RepositoryItemShares ADD WorkflowInstanceId UNIQUEIDENTIFIER NULL;
+            ALTER TABLE catalog."RepositoryItemShares"
+                ADD COLUMN IF NOT EXISTS "WorkflowInstanceId" uuid NULL;
 
-            IF COL_LENGTH('catalog.RepositoryItemShares', 'Action') IS NULL
-                ALTER TABLE catalog.RepositoryItemShares ADD [Action] INT NOT NULL
-                    CONSTRAINT DF_RepositoryItemShares_Action DEFAULT (0);
+            ALTER TABLE catalog."RepositoryItemShares"
+                ADD COLUMN IF NOT EXISTS "Action" integer NOT NULL DEFAULT 0;
             """;
 
         foreach (var sql in new[] { ensureSchemaSql, createTableSql })
         {
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
