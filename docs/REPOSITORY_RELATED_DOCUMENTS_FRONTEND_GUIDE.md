@@ -3,19 +3,23 @@
 **Audience:** Frontend  
 **Last updated:** August 2026
 
-Related documents for an open file. FE sends only **`repositoryId` + `itemId`**.  
+Related documents for an open file. FE sends **`repositoryId` + `itemId`**.  
 Backend reads metadata and searches **all repositories** in the tenant.
+
+**Saved related docs** are stored per **Item ID + Repository ID**. A new save **replaces** the previous set.
 
 ---
 
 ## 1. Which API to use
 
-| Use case | Endpoint | Match rule |
-|----------|----------|------------|
+| Use case | Endpoint | Match / persist rule |
+|----------|----------|----------------------|
 | Related Docs tab (same folder path) | `GET …/related` | Folder-structure fields only; **any 2 of 3** is enough |
-| Match score / similarity | `GET …/related-exact` | **All** repository fields (with values); proportional score |
+| “Check for matches” (score %) | `GET …/related-exact` | No field → **all** fields with values; with field(s) → only those |
+| Open item → show linked related docs | `GET …/related-saved` | Latest saved set for this item |
+| User clicks `+` / Save selection | `PUT …/related-saved` | **Replace** previous links with new selection |
 
-Both require:
+All require:
 
 ```http
 Authorization: Bearer {jwt}
@@ -99,16 +103,36 @@ If the repo has **no** folder-structure fields, fallback is Supplier + PONumber 
 
 ---
 
-## 3. Related exact (scoring) — all repository fields
+## 3. Related exact (scoring) — “Check for matches”
 
 ```http
 GET /api/repositories/{repositoryId}/items/{itemId}/related-exact?page=1&pageSize=50
 Authorization: Bearer {jwt}
 ```
 
+### Optional field filter
+
+| Param | Notes |
+|-------|--------|
+| `field` / `fields` | Comma-separated field name or SQL column (e.g. `Supplier`). Omit → match **all** fields with values on the source item. |
+| `value` | Optional override when a **single** field is specified (e.g. banner text “Nexus Industrial Solutions Ltd.”). If omitted, value comes from the open item. |
+
+Examples:
+
+```http
+# All fields with values on the source item (default)
+GET …/related-exact
+
+# Particular field — use item’s current value
+GET …/related-exact?field=Supplier
+
+# Particular field + explicit value (UI banner)
+GET …/related-exact?field=Supplier&value=Nexus%20Industrial%20Solutions%20Ltd.
+```
+
 ### How match / score works
 
-1. Load **all** repository field definitions on the source repo (not only folder fields).
+1. Load repository field definitions (or only the requested field).
 2. Skip empty values and `DYNAMIC_TABLE` (line items).
 3. Search all repos; score each candidate file.
 4. Sort by `matchScore` desc, then `matchCount`, then date.
@@ -119,37 +143,136 @@ Authorization: Bearer {jwt}
 matchScore = round(matchCount / totalFields × 100)
 ```
 
-| Example | Score |
-|---------|-------|
-| 14 of 14 matched | **100** |
-| 10 of 14 matched | **71** |
-| 7 of 14 matched | **50** |
+Only rows with **`matchScore >= 50`** are returned (weaker partials are dropped).
+
+| Example | Score | Returned? |
+|---------|-------|-----------|
+| 14 of 14 matched | **100** | Yes |
+| 10 of 14 matched | **71** | Yes |
+| 7 of 14 matched | **50** | Yes |
+| 5 of 15 matched | **33** | No |
+| Single-field match | **100** if equal | Yes |
 
 - `matchCount` — how many fields matched  
 - `matchedFields` — which keys matched  
-- `match` / `matchFields` — criteria taken from the source file  
+- `match` / `matchFields` — criteria used for this search  
 
-FE can show a score badge, or filter `matchScore === 100` for full matches only.
+FE shows the results list with % and a `+` to select docs to save.
 
 ### Sample item in `data`
 
 ```json
 {
   "repositoryId": "…",
-  "repositoryName": "Accounts",
+  "repositoryName": "Procurement Ledger",
   "id": "…",
-  "fileName": "invoice.pdf",
-  "matchScore": 71,
-  "matchCount": 10,
-  "matchedFields": ["Supplier", "PONumber", "InvoiceNo", "Currency", "…"]
+  "fileName": "PO-2026-991.pdf",
+  "matchScore": 92,
+  "matchCount": 13,
+  "matchedFields": ["Supplier", "PONumber", "…"]
 }
 ```
 
 ---
 
-## 4. Response fields (both APIs)
+## 4. Saved related documents (persist / reopen / replace)
 
-### Root
+For each **Item ID + Repository ID**, only the **latest** saved set is kept.
+
+### Get saved (on item open)
+
+```http
+GET /api/repositories/{repositoryId}/items/{itemId}/related-saved
+Authorization: Bearer {jwt}
+```
+
+### Save / replace selection
+
+```http
+PUT /api/repositories/{repositoryId}/items/{itemId}/related-saved
+Authorization: Bearer {jwt}
+Content-Type: application/json
+```
+
+Path uses the **source** (open) file. Body `items[]` uses each **related** file’s `repositoryId` + `id` from the search response (`itemId` in the body = search row `id`).
+
+#### A) Overall match (all fields) — default `related-exact`
+
+Do **not** set `matchField` / `matchValue` (or send `null`). This is the common case after `GET …/related-exact` with no `field` param.
+
+```json
+{
+  "items": [
+    {
+      "repositoryId": "f1138fe5-ddfa-4daf-8562-11fa4e989f23",
+      "itemId": "2d692628-b881-45f5-9002-3f3ce158f4cd",
+      "matchScore": 93
+    }
+  ]
+}
+```
+
+#### B) Particular field match — after `?field=Supplier&value=…`
+
+```json
+{
+  "matchField": "Supplier",
+  "matchValue": "Nexus Industrial Solutions Ltd.",
+  "items": [
+    {
+      "repositoryId": "11111111-2222-3333-4444-555555555555",
+      "itemId": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff",
+      "matchScore": 100
+    }
+  ]
+}
+```
+
+| Behavior | Detail |
+|----------|--------|
+| Replace | Previous links for this source item are soft-deleted, then `items` are inserted |
+| Empty `items` | Clears all saved related docs for this item |
+| Reopen | `GET …/related-saved` returns only the latest set |
+| Overall vs field | Overall → omit `matchField`/`matchValue`; field banner → set both |
+
+### Flow (matches product requirement)
+
+1. Overall: `GET …/related-exact` **or** field: `GET …/related-exact?field=…&value=…`
+2. Results show % (only ≥ 50).
+3. User selects docs (`+`) → `PUT …/related-saved` (body as A or B above).
+4. Reopen same item → `GET …/related-saved` shows Document A.
+5. New match → select Document B → `PUT` again → Document A is replaced; only B remains.
+
+### Sample saved response
+
+```json
+{
+  "sourceRepositoryId": "f1138fe5-ddfa-4daf-8562-11fa4e989f23",
+  "sourceItemId": "f26ac1d1-8a13-4fe1-b353-b6b8d14f5e86",
+  "matchField": null,
+  "matchValue": null,
+  "totalCount": 1,
+  "data": [
+    {
+      "id": "link-guid",
+      "relatedRepositoryId": "f1138fe5-ddfa-4daf-8562-11fa4e989f23",
+      "relatedRepositoryName": "Accounts Payable",
+      "relatedItemId": "2d692628-b881-45f5-9002-3f3ce158f4cd",
+      "fileName": "INV-2026-3101_v8",
+      "matchScore": 93,
+      "matchField": null,
+      "matchValue": null,
+      "createdAtUtc": "2026-08-11T10:00:00Z"
+    }
+  ]
+}
+```
+
+---
+
+## 5. Response fields
+
+### Exact / loose search (`related`, `related-exact`)
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -158,9 +281,9 @@ FE can show a score badge, or filter `matchScore === 100` for full matches only.
 | `match` | object | Values used for matching |
 | `matchFields` | string[] | Keys used for matching |
 | `page` / `pageSize` / `totalCount` | number | Paging |
-| `data` | array | Related files |
+| `data` | array | Candidate related files |
 
-### Each `data[]` row
+### Each search `data[]` row
 
 | Field | Type | Meaning |
 |-------|------|---------|
@@ -170,28 +293,46 @@ FE can show a score badge, or filter `matchScore === 100` for full matches only.
 | `fileName` / `fileType` / `fileSize` | | File info |
 | `documentType` / `supplier` / `poNumber` / `invoiceNumber` | string? | Common columns when present |
 | `createdAtUtc` | datetime? | |
-| `matchScore` | int | 0–100 |
+| `matchScore` | int | 0–100 (≥ 50 for exact results) |
 | `matchCount` | int | Fields matched |
 | `matchedFields` | string[] | Which keys matched |
 
+### Saved (`related-saved`)
+
+| Field | Type | Meaning |
+|-------|------|---------|
+| `matchField` / `matchValue` | string? | Set only for single-field saves; `null` for overall |
+| `data[].relatedRepositoryId` | guid | Related file’s repo |
+| `data[].relatedItemId` | guid | Related file’s item id |
+| `data[].matchScore` | int? | Score at save time |
+
 ---
 
-## 5. FE wiring (file detail tabs)
+## 6. FE wiring (file detail)
 
 ```text
-Timeline  → GET …/timeline
-Comments  → GET …/comments
-Related   → GET …/related          (folder / any-2-of-3)
-Score     → GET …/related-exact    (optional; all-fields score)
+On open item:
+  Related tab (saved)  → GET …/related-saved
+  Optional folder hint → GET …/related
+
+Overall “Check for matches”:
+  → GET …/related-exact
+  → user selects rows with +
+  → PUT …/related-saved   { "items": [ { repositoryId, itemId, matchScore } ] }
+
+Field banner “Check for matches”:
+  → GET …/related-exact?field=Supplier&value=…
+  → PUT …/related-saved   { "matchField", "matchValue", "items": […] }
 ```
 
 ### Open a related file
 
 ```text
-/repositories/{repositoryId}/items/{id}
+/repositories/{relatedRepositoryId}/items/{relatedItemId}
 ```
 
-Use row `repositoryId` + `id` (not the source repo if different).
+For search results use row `repositoryId` + `id`.  
+For saved results use `relatedRepositoryId` + `relatedItemId`.
 
 ### File download / preview
 
@@ -201,14 +342,14 @@ GET /api/repositories/{repositoryId}/items/{id}/file?disposition=inline
 
 ---
 
-## 6. Errors
+## 7. Errors
 
 | Status | When |
 |--------|------|
 | `401` | Missing / invalid token |
 | `403` | No view access to source repo/item |
 | `404` | Source item or repository not found |
-| `200` + empty `data` | No usable match values, or no related files |
+| `200` + empty `data` | No usable match values, or no related / saved files |
 
 Empty match example (no metadata to search on):
 
@@ -223,7 +364,7 @@ Empty match example (no metadata to search on):
 
 ---
 
-## 7. Performance notes
+## 8. Performance notes
 
 - One HTTP call searches all repos (server-side parallel). **Do not** loop `items/query` per repo from FE.
 - New repos get indexes on folder-structure columns (`IncludeInFolderStructure`) for faster related lookups.
@@ -231,10 +372,9 @@ Empty match example (no metadata to search on):
 
 ---
 
-## 8. Related docs
+## 9. Related docs
 
 | Doc | Topic |
 |-----|--------|
 | `REPOSITORY_TIMELINE_AND_COMMENTS_FRONTEND_GUIDE.md` | Timeline + comments tabs |
 | `REPOSITORY_FILE_SHARE_FRONTEND_GUIDE.md` | Cross-tenant file share |
-| `REPOSITORY_FOLDER_DOCUMENT_SECURITY.md` | Folder / document security |

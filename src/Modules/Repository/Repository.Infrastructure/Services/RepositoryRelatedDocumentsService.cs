@@ -14,6 +14,7 @@ namespace SaaSApp.Repository.Infrastructure.Services;
 /// </summary>
 public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocumentsService
 {
+    private static readonly ConcurrentDictionary<string, byte> SchemaEnsured = new(StringComparer.OrdinalIgnoreCase);
     private static readonly string[] SupplierAliases = ["Supplier", "VendorName", "Vendor", "Vendor Name"];
     private static readonly string[] PoAliases = ["PONumber", "PoNumber", "PO Number"];
     private static readonly string[] InvoiceAliases = ["InvoiceNo", "InvoiceNumber", "Invoice No", "Invoice Number"];
@@ -54,6 +55,8 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
             useAllRepositoryFields: false,
             page,
             pageSize,
+            fields: null,
+            value: null,
             cancellationToken);
 
     public Task<RepositoryRelatedDocumentsResultDto?> GetRelatedExactAsync(
@@ -62,6 +65,8 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         Guid itemId,
         int page = 1,
         int pageSize = 50,
+        IReadOnlyList<string>? fields = null,
+        string? value = null,
         CancellationToken cancellationToken = default) =>
         GetRelatedCoreAsync(
             repositoryId,
@@ -71,7 +76,189 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
             useAllRepositoryFields: true,
             page,
             pageSize,
+            fields,
+            value,
             cancellationToken);
+
+    public async Task<RepositorySavedRelatedDocumentsResultDto?> GetSavedRelatedAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken = default)
+    {
+        var sourceRepo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+        if (sourceRepo == null)
+            return null;
+
+        var source = await _items.GetItemAsync(repositoryId, tenantId, itemId, cancellationToken);
+        if (source == null)
+            return null;
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await EnsureRelatedSchemaAsync(connectionString, cancellationToken);
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        const string sql = """
+            SELECT Id, RelatedRepositoryId, RelatedItemId, MatchField, MatchValue, MatchScore, CreatedAtUtc
+            FROM repository.ItemRelatedDocuments
+            WHERE TenantId = @TenantId
+              AND RepositoryId = @RepositoryId
+              AND ItemId = @ItemId
+              AND IsDeleted = 0
+            ORDER BY CreatedAtUtc DESC, Id DESC;
+            """;
+
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TenantId", tenantId);
+        cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
+        cmd.Parameters.AddWithValue("@ItemId", itemId);
+
+        var links = new List<(Guid LinkId, Guid RelRepoId, Guid RelItemId, string? MatchField, string? MatchValue, int? MatchScore, DateTime CreatedAtUtc)>();
+        string? matchField = null;
+        string? matchValue = null;
+
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var mf = reader.IsDBNull(3) ? null : reader.GetString(3);
+                var mv = reader.IsDBNull(4) ? null : reader.GetString(4);
+                matchField ??= mf;
+                matchValue ??= mv;
+                links.Add((
+                    reader.GetGuid(0),
+                    reader.GetGuid(1),
+                    reader.GetGuid(2),
+                    mf,
+                    mv,
+                    reader.IsDBNull(5) ? null : Convert.ToInt32(reader.GetValue(5)),
+                    reader.GetDateTime(6)));
+            }
+        }
+
+        var data = new List<RepositorySavedRelatedDocumentDto>();
+        foreach (var link in links)
+        {
+            var detail = await TryLoadRelatedItemAsync(
+                connectionString,
+                tenantId,
+                link.RelRepoId,
+                link.RelItemId,
+                cancellationToken);
+
+            data.Add(new RepositorySavedRelatedDocumentDto(
+                link.LinkId,
+                link.RelRepoId,
+                detail?.RepositoryName,
+                link.RelItemId,
+                detail?.FileName,
+                detail?.FileType,
+                detail?.FileSize,
+                detail?.DocumentType,
+                detail?.Supplier,
+                detail?.PoNumber,
+                detail?.InvoiceNumber,
+                link.MatchScore,
+                link.MatchField,
+                link.MatchValue,
+                link.CreatedAtUtc));
+        }
+
+        return new RepositorySavedRelatedDocumentsResultDto(
+            repositoryId,
+            itemId,
+            matchField,
+            matchValue,
+            data.Count,
+            data);
+    }
+
+    public async Task<RepositorySavedRelatedDocumentsResultDto?> SaveRelatedAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        SaveRepositoryRelatedDocumentsRequest request,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(request);
+
+        var sourceRepo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+        if (sourceRepo == null)
+            return null;
+
+        var source = await _items.GetItemAsync(repositoryId, tenantId, itemId, cancellationToken);
+        if (source == null)
+            return null;
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await EnsureRelatedSchemaAsync(connectionString, cancellationToken);
+
+        var items = (request.Items ?? Array.Empty<SaveRepositoryRelatedDocumentRef>())
+            .Where(i => i.RepositoryId != Guid.Empty && i.ItemId != Guid.Empty)
+            .Where(i => !(i.RepositoryId == repositoryId && i.ItemId == itemId))
+            .GroupBy(i => (i.RepositoryId, i.ItemId))
+            .Select(g => g.First())
+            .ToList();
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+
+        // Replace semantics: soft-delete previous set for this source item.
+        await using (var clear = new SqlCommand(
+                         """
+                         UPDATE repository.ItemRelatedDocuments
+                         SET IsDeleted = 1
+                         WHERE TenantId = @TenantId
+                           AND RepositoryId = @RepositoryId
+                           AND ItemId = @ItemId
+                           AND IsDeleted = 0;
+                         """,
+                         connection,
+                         tx))
+        {
+            clear.Parameters.AddWithValue("@TenantId", tenantId);
+            clear.Parameters.AddWithValue("@RepositoryId", repositoryId);
+            clear.Parameters.AddWithValue("@ItemId", itemId);
+            await clear.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        foreach (var item in items)
+        {
+            await using var insert = new SqlCommand(
+                """
+                INSERT INTO repository.ItemRelatedDocuments
+                    (Id, TenantId, RepositoryId, ItemId, RelatedRepositoryId, RelatedItemId,
+                     MatchField, MatchValue, MatchScore, CreatedBy, CreatedAtUtc, IsDeleted)
+                VALUES
+                    (@Id, @TenantId, @RepositoryId, @ItemId, @RelatedRepositoryId, @RelatedItemId,
+                     @MatchField, @MatchValue, @MatchScore, @CreatedBy, SYSUTCDATETIME(), 0);
+                """,
+                connection,
+                tx);
+            insert.Parameters.AddWithValue("@Id", Guid.NewGuid());
+            insert.Parameters.AddWithValue("@TenantId", tenantId);
+            insert.Parameters.AddWithValue("@RepositoryId", repositoryId);
+            insert.Parameters.AddWithValue("@ItemId", itemId);
+            insert.Parameters.AddWithValue("@RelatedRepositoryId", item.RepositoryId);
+            insert.Parameters.AddWithValue("@RelatedItemId", item.ItemId);
+            insert.Parameters.AddWithValue("@MatchField", (object?)TrimOrNull(request.MatchField) ?? DBNull.Value);
+            insert.Parameters.AddWithValue("@MatchValue", (object?)TrimOrNull(request.MatchValue) ?? DBNull.Value);
+            insert.Parameters.AddWithValue("@MatchScore", (object?)item.MatchScore ?? DBNull.Value);
+            insert.Parameters.AddWithValue("@CreatedBy", (object?)userId ?? DBNull.Value);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await tx.CommitAsync(cancellationToken);
+        return await GetSavedRelatedAsync(repositoryId, tenantId, itemId, cancellationToken);
+    }
 
     private async Task<RepositoryRelatedDocumentsResultDto?> GetRelatedCoreAsync(
         Guid repositoryId,
@@ -81,7 +268,9 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         bool useAllRepositoryFields,
         int page,
         int pageSize,
-        CancellationToken cancellationToken)
+        IReadOnlyList<string>? fields = null,
+        string? value = null,
+        CancellationToken cancellationToken = default)
     {
         page = Math.Max(1, page);
         pageSize = Math.Clamp(pageSize, 1, 200);
@@ -94,7 +283,12 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         if (source == null)
             return null;
 
-        var matchCriteria = BuildMatchCriteria(sourceRepo, source.Fields, useAllRepositoryFields);
+        var matchCriteria = BuildMatchCriteria(
+            sourceRepo,
+            source.Fields,
+            useAllRepositoryFields,
+            fields,
+            value);
         if (matchCriteria.Count == 0)
         {
             return new RepositoryRelatedDocumentsResultDto(
@@ -111,10 +305,11 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         var match = matchCriteria.ToDictionary(c => c.Key, c => c.Value, StringComparer.OrdinalIgnoreCase);
         var matchFields = matchCriteria.Select(c => c.Key).ToList();
         // Loose: any 2 of N folder fields.
-        // Exact/score: all repo fields used for scoring; include partials (e.g. 10/14 → ~71, 14/14 → 100).
+        // Exact/score: only return rows with matchScore >= 50 (e.g. 8/15 → 53, 7/14 → 50).
         var minRequired = requireAllFields
-            ? 1
+            ? Math.Max(1, (int)Math.Ceiling(matchCriteria.Count * 0.5))
             : Math.Min(2, matchCriteria.Count);
+        const int exactMinScore = 50;
 
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
@@ -155,7 +350,11 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
 
         await Task.WhenAll(tasks);
 
-        var ordered = bag
+        IEnumerable<RepositoryRelatedDocumentDto> candidates = bag;
+        if (requireAllFields)
+            candidates = candidates.Where(x => x.MatchScore >= exactMinScore);
+
+        var ordered = candidates
             .OrderByDescending(x => x.MatchScore)
             .ThenByDescending(x => x.MatchCount)
             .ThenByDescending(x => x.CreatedAtUtc)
@@ -182,13 +381,17 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
     /// <summary>
     /// Loose: folder-structure fields (fallback Supplier/PO/Invoice).
     /// Exact: all repository-defined fields that have a value on the source item
-    /// (skips DYNAMIC_TABLE / line-item payloads).
+    /// (skips DYNAMIC_TABLE / line-item payloads), or only the requested field(s).
     /// </summary>
     private static List<MatchCriterion> BuildMatchCriteria(
         RepositoryDetailDto sourceRepo,
         IReadOnlyDictionary<string, object?> fields,
-        bool useAllRepositoryFields)
+        bool useAllRepositoryFields,
+        IReadOnlyList<string>? requestedFields = null,
+        string? overrideValue = null)
     {
+        var requested = NormalizeRequestedFields(requestedFields);
+
         IEnumerable<RepositoryFieldDto> sourceFields = useAllRepositoryFields
             ? sourceRepo.Fields
                 .Where(f => !IsExcludedFromExactMatch(f.DataType))
@@ -198,15 +401,45 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
             : RepositoryFolderStructureHelper.OrderFolderFields(
                 sourceRepo.Fields.Where(f => f.IncludeInFolderStructure));
 
+        if (requested.Count > 0)
+        {
+            sourceFields = sourceFields.Where(f =>
+                requested.Any(r =>
+                    string.Equals(r, f.SqlColumnName, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(r, f.Name, StringComparison.OrdinalIgnoreCase)
+                    || AliasesFor(f.SqlColumnName, f.Name).Any(a => string.Equals(a, r, StringComparison.OrdinalIgnoreCase))));
+        }
+
         var criteria = new List<MatchCriterion>();
         foreach (var field in sourceFields)
         {
             var aliases = AliasesFor(field.SqlColumnName, field.Name);
-            var value = ResolveFieldValue(fields, aliases);
+            string? value;
+            if (!string.IsNullOrWhiteSpace(overrideValue) && requested.Count == 1)
+            {
+                value = overrideValue.Trim();
+            }
+            else
+            {
+                value = ResolveFieldValue(fields, aliases);
+            }
+
             if (string.IsNullOrWhiteSpace(value))
                 continue;
 
             criteria.Add(new MatchCriterion(field.SqlColumnName, NormalizeMatchValue(value, field.DataType), aliases));
+        }
+
+        // Particular field + override value, but field not in repo definitions — still search aliases.
+        if (criteria.Count == 0
+            && useAllRepositoryFields
+            && requested.Count == 1
+            && !string.IsNullOrWhiteSpace(overrideValue))
+        {
+            var key = requested[0];
+            var aliases = AliasesFor(key, key);
+            criteria.Add(new MatchCriterion(key, NormalizeMatchValue(overrideValue.Trim(), null), aliases));
+            return criteria;
         }
 
         if (criteria.Count > 0 || useAllRepositoryFields)
@@ -239,6 +472,18 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
             return [new MatchCriterion("Supplier", supplier!.Trim(), SupplierAliases)];
 
         return criteria;
+    }
+
+    private static List<string> NormalizeRequestedFields(IReadOnlyList<string>? requestedFields)
+    {
+        if (requestedFields == null || requestedFields.Count == 0)
+            return [];
+
+        return requestedFields
+            .SelectMany(f => (f ?? string.Empty).Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            .Where(f => !string.IsNullOrWhiteSpace(f))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     private static bool IsExcludedFromExactMatch(string? dataType)
@@ -478,6 +723,82 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
 
         return null;
     }
+
+    private static async Task EnsureRelatedSchemaAsync(string connectionString, CancellationToken cancellationToken)
+    {
+        if (SchemaEnsured.ContainsKey(connectionString))
+            return;
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var cmd = new SqlCommand(EnsureRelatedSchemaSql, connection) { CommandTimeout = 120 };
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        SchemaEnsured.TryAdd(connectionString, 0);
+    }
+
+    private async Task<(string? RepositoryName, string? FileName, string? FileType, int? FileSize, string? DocumentType, string? Supplier, string? PoNumber, string? InvoiceNumber)?> TryLoadRelatedItemAsync(
+        string connectionString,
+        Guid tenantId,
+        Guid relatedRepositoryId,
+        Guid relatedItemId,
+        CancellationToken cancellationToken)
+    {
+        _ = connectionString;
+        try
+        {
+            var repo = await _provisioner.GetRepositoryAsync(relatedRepositoryId, tenantId, cancellationToken);
+            var item = await _items.GetItemAsync(relatedRepositoryId, tenantId, relatedItemId, cancellationToken);
+            if (item == null)
+                return null;
+
+            return (
+                repo?.Name,
+                item.FileName,
+                item.FileType,
+                item.FileSize,
+                ResolveFieldValue(item.Fields, DocumentTypeAliases),
+                ResolveFieldValue(item.Fields, SupplierAliases),
+                ResolveFieldValue(item.Fields, PoAliases),
+                ResolveFieldValue(item.Fields, InvoiceAliases));
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to load related item {RelatedItemId} in repository {RelatedRepositoryId}.",
+                relatedItemId,
+                relatedRepositoryId);
+            return null;
+        }
+    }
+
+    private static string? TrimOrNull(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : value.Trim();
+
+    private const string EnsureRelatedSchemaSql = """
+        IF NOT EXISTS (
+            SELECT 1 FROM sys.tables t
+            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
+            WHERE s.name = N'repository' AND t.name = N'ItemRelatedDocuments')
+        BEGIN
+            CREATE TABLE repository.ItemRelatedDocuments (
+                Id                      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_ItemRelatedDocuments PRIMARY KEY DEFAULT NEWID(),
+                TenantId                UNIQUEIDENTIFIER NOT NULL,
+                RepositoryId            UNIQUEIDENTIFIER NOT NULL,
+                ItemId                  UNIQUEIDENTIFIER NOT NULL,
+                RelatedRepositoryId     UNIQUEIDENTIFIER NOT NULL,
+                RelatedItemId           UNIQUEIDENTIFIER NOT NULL,
+                MatchField              NVARCHAR(128) NULL,
+                MatchValue              NVARCHAR(450) NULL,
+                MatchScore              INT NULL,
+                CreatedBy               UNIQUEIDENTIFIER NULL,
+                CreatedAtUtc            DATETIME2(3) NOT NULL CONSTRAINT DF_ItemRelatedDocuments_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
+                IsDeleted               BIT NOT NULL CONSTRAINT DF_ItemRelatedDocuments_IsDeleted DEFAULT (0)
+            );
+            CREATE INDEX IX_ItemRelatedDocuments_Source
+                ON repository.ItemRelatedDocuments (TenantId, RepositoryId, ItemId, IsDeleted, CreatedAtUtc);
+        END
+        """;
 
     private sealed record MatchCriterion(string Key, string Value, string[] Aliases);
 }

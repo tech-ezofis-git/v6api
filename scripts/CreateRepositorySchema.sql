@@ -171,6 +171,29 @@ BEGIN
 END
 GO
 
+-- Saved related documents for an open item (replace-on-save semantics).
+IF NOT EXISTS (SELECT * FROM sys.tables t INNER JOIN sys.schemas s ON t.schema_id = s.schema_id WHERE t.name = 'ItemRelatedDocuments' AND s.name = 'repository')
+BEGIN
+    CREATE TABLE repository.ItemRelatedDocuments (
+        Id                      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_ItemRelatedDocuments PRIMARY KEY DEFAULT NEWID(),
+        TenantId                UNIQUEIDENTIFIER NOT NULL,
+        RepositoryId            UNIQUEIDENTIFIER NOT NULL,
+        ItemId                  UNIQUEIDENTIFIER NOT NULL,
+        RelatedRepositoryId     UNIQUEIDENTIFIER NOT NULL,
+        RelatedItemId           UNIQUEIDENTIFIER NOT NULL,
+        MatchField              NVARCHAR(128) NULL,
+        MatchValue              NVARCHAR(450) NULL,
+        MatchScore              INT NULL,
+        CreatedBy               UNIQUEIDENTIFIER NULL,
+        CreatedAtUtc            DATETIME2(3) NOT NULL CONSTRAINT DF_ItemRelatedDocuments_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
+        IsDeleted               BIT NOT NULL CONSTRAINT DF_ItemRelatedDocuments_IsDeleted DEFAULT (0)
+    );
+    CREATE INDEX IX_ItemRelatedDocuments_Source
+        ON repository.ItemRelatedDocuments (TenantId, RepositoryId, ItemId, IsDeleted, CreatedAtUtc);
+    PRINT 'repository.ItemRelatedDocuments created';
+END
+GO
+
 PRINT 'Repository base schema complete.';
 GO
 
