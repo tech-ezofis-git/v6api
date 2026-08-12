@@ -129,13 +129,12 @@ public sealed class WorkflowJsonStorageService : IWorkflowJsonStorageService
 
     private BlobClient? GetBlobClient(Guid workflowId)
     {
-        var connectionString = _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
-            ?? _configuration["WorkflowJsonStorage:ConnectionString"];
+        var connectionString = ResolveBlobConnectionString();
         if (string.IsNullOrWhiteSpace(connectionString))
             return null;
 
         var tenantId = _tenantContext.TenantId?.ToString("N").ToLowerInvariant() ?? "default";
-        var containerPrefix = (_configuration["WorkflowJsonStorage:Blob:ContainerPrefix"] ?? "ezts").ToLowerInvariant();
+        var containerPrefix = ResolveBlobContainerPrefix();
         var containerName = $"{containerPrefix}{tenantId}";
         var blobPath = $"Flow Json/{workflowId:N}.json";
 
@@ -144,4 +143,14 @@ public sealed class WorkflowJsonStorageService : IWorkflowJsonStorageService
         container.CreateIfNotExists();
         return container.GetBlobClient(blobPath);
     }
+
+    private string? ResolveBlobConnectionString() =>
+        _configuration["EzofisBlobStorage:ConnectionString"]
+        ?? _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
+        ?? _configuration["WorkflowJsonStorage:ConnectionString"];
+
+    private string ResolveBlobContainerPrefix() =>
+        (_configuration["EzofisBlobStorage:ContainerPrefix"]
+         ?? _configuration["WorkflowJsonStorage:Blob:ContainerPrefix"]
+         ?? "ezts").ToLowerInvariant();
 }

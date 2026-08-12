@@ -70,13 +70,16 @@ public sealed class FormJsonStorageService : IFormJsonStorageService
 
     private BlobClient? GetBlobClient(string formId)
     {
-        var connectionString = _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
+        var connectionString = _configuration["EzofisBlobStorage:ConnectionString"]
+            ?? _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
             ?? _configuration["WorkflowJsonStorage:ConnectionString"];
         if (string.IsNullOrWhiteSpace(connectionString))
             return null;
 
         var tenantId = _tenantContext.TenantId?.ToString("N").ToLowerInvariant() ?? "default";
-        var containerPrefix = (_configuration["WorkflowJsonStorage:Blob:ContainerPrefix"] ?? "ezts").ToLowerInvariant();
+        var containerPrefix = (_configuration["EzofisBlobStorage:ContainerPrefix"]
+            ?? _configuration["WorkflowJsonStorage:Blob:ContainerPrefix"]
+            ?? "ezts").ToLowerInvariant();
         var containerName = $"{containerPrefix}{tenantId}";
         var blobPath = $"Form Json/{SanitizeFileName(formId)}.json";
 

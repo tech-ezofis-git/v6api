@@ -450,16 +450,19 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         string json,
         CancellationToken cancellationToken)
     {
-        var connectionString = _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
+        var connectionString = _configuration["EzofisBlobStorage:ConnectionString"]
+            ?? _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
             ?? _configuration["WorkflowJsonStorage:ConnectionString"];
         if (string.IsNullOrWhiteSpace(connectionString))
         {
             _logger.LogWarning(
-                "WorkflowJsonStorage blob connection string is not configured; start payload JSON was not saved to blob (Ap Agent Trial/*.json).");
+                "Blob connection string is not configured (EzofisBlobStorage or WorkflowJsonStorage); start payload JSON was not saved to blob (Ap Agent Trial/*.json).");
             return null;
         }
 
-        var containerPrefix = (_configuration["WorkflowJsonStorage:Blob:ContainerPrefix"] ?? "ezts").ToLowerInvariant();
+        var containerPrefix = (_configuration["EzofisBlobStorage:ContainerPrefix"]
+            ?? _configuration["WorkflowJsonStorage:Blob:ContainerPrefix"]
+            ?? "ezts").ToLowerInvariant();
         var containerName = $"{containerPrefix}{tenantId:N}";
         var timestamp = DateTime.UtcNow.ToString("yyyyMMddHHmmssfff", CultureInfo.InvariantCulture);
         var blobPath = $"Ap Agent Trial/{timestamp}.json";
