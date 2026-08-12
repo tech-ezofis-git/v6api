@@ -1,5 +1,7 @@
 # SaaSApp – Modular Monolith SaaS (V6 API)
 
+<!-- test: git push practice on branch dev-aravinth (safe to remove) -->
+
 Production-ready ASP.NET Core Web API with Clean Architecture, CQRS (MediatR), domain events, multi-tenancy, and Azure-ready configuration.
 
 For a detailed endpoint inventory and implementation status, see [docs/V6_API_STATUS.md](docs/V6_API_STATUS.md).
