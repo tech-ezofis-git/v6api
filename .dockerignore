@@ -1,0 +1,13 @@
+bin/
+obj/
+.vs/
+.idea/
+**/appsettings.json
+**/appsettings.Development.json
+**/appsettings.*.local.json
+_buildcheck/
+_run/
+.git/
+.gitignore
+Dockerfile
+.dockerignore

@@ -1,0 +1,50 @@
+name: Sync to ezofis-app-v6 monorepo (api/)
+
+# Every push to main mirrors this repository's contents into the api/ folder
+# of tech-ezofis-git/ezofis-app-v6. That repo's CI then rebuilds the API
+# Docker image and restarts the Azure Web App, so changes land on
+# https://ezofis-app-v6.azurewebsites.net automatically.
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout v6api (source)
+        uses: actions/checkout@v4
+        with:
+          path: source
+
+      - name: Checkout ezofis-app-v6 (monorepo)
+        uses: actions/checkout@v4
+        with:
+          repository: tech-ezofis-git/ezofis-app-v6
+          token: ${{ secrets.MONOREPO_SYNC_TOKEN }}
+          path: monorepo
+
+      - name: Mirror into api/
+        run: |
+          # --delete keeps api/ an exact mirror; .git and .github are excluded
+          # (workflows must not be nested into the monorepo's api/ folder).
+          rsync -a --delete --exclude '.git' --exclude '.github' source/ monorepo/api/
+
+      - name: Commit and push
+        working-directory: monorepo
+        env:
+          SOURCE_MSG: ${{ github.event.head_commit.message }}
+        run: |
+          git config user.name "v6api-sync"
+          git config user.email "v6api-sync@users.noreply.github.com"
+          git add -A api
+          if git diff --cached --quiet; then
+            echo "No changes to sync."
+            exit 0
+          fi
+          SUMMARY=$(printf '%s' "$SOURCE_MSG" | head -n 1)
+          git commit -m "Sync api/ from v6api@${GITHUB_SHA:0:7}: ${SUMMARY:-manual sync}"
+          git push
