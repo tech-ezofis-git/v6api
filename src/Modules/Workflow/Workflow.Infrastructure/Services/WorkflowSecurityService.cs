@@ -97,7 +97,7 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         if (userId == null)
             return;
 
-        var currentTime = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        var currentTime = DateTime.UtcNow;
 
         // Collect unique users and groups from blocks
         var userList = new HashSet<string>();
@@ -229,7 +229,7 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         if (userId == null)
             return;
 
-        var currentTime = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        var currentTime = DateTime.UtcNow;
         var tenantId = _tenantContext.TenantId;
         if (tenantId == null)
             return;
