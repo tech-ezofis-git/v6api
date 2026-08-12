@@ -238,7 +238,10 @@ public sealed class UsersController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>Soft-delete a custom role. Fails if the role is assigned to any user. Admin only.</summary>
+    /// <summary>
+    /// Soft-delete a custom role. Unassigns users (removes UserRoles, updates Users.Role).
+    /// Built-in Admin/TenantUser roles cannot be deleted. Admin only.
+    /// </summary>
     [HttpDelete("roles/{roleId:guid}")]
     [Authorize(Policy = AuthorizationPolicies.Admin)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
