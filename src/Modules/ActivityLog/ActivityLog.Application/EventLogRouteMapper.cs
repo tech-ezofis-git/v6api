@@ -28,22 +28,22 @@ public static partial class EventLogRouteMapper
         var isAuthFail = statusCode is 401 or 403;
 
         if (TryMapAuth(method, normalizedPath, success, isAuthFail, out var auth))
-            return AdjustForFailure(auth, normalizedPath, statusCode, success);
+            return auth;
 
         if (TryMapUsersRoles(method, normalizedPath, success, subject, out var users))
-            return AdjustForFailure(users, normalizedPath, statusCode, success);
+            return users;
 
-        if (TryMapWorkflow(method, normalizedPath, success, subject, out var workflow))
-            return AdjustForFailure(workflow, normalizedPath, statusCode, success);
+        if (TryMapWorkflow(method, normalizedPath, success, subject, out var workflow, out var listedWorkflow))
+            return listedWorkflow ? workflow : AdjustForFailure(workflow, normalizedPath, statusCode, success);
 
-        if (TryMapForm(method, normalizedPath, success, subject, out var form))
-            return AdjustForFailure(form, normalizedPath, statusCode, success);
+        if (TryMapForm(method, normalizedPath, success, subject, out var form, out var listedForm))
+            return listedForm ? form : AdjustForFailure(form, normalizedPath, statusCode, success);
 
-        if (TryMapRepository(method, normalizedPath, success, subject, out var repo))
-            return AdjustForFailure(repo, normalizedPath, statusCode, success);
+        if (TryMapRepository(method, normalizedPath, success, subject, out var repo, out var listedRepo))
+            return listedRepo ? repo : AdjustForFailure(repo, normalizedPath, statusCode, success);
 
         if (TryMapDms(method, normalizedPath, success, out var dms))
-            return AdjustForFailure(dms, normalizedPath, statusCode, success);
+            return dms;
 
         return MapGeneric(normalizedPath, statusCode);
     }
@@ -73,9 +73,6 @@ public static partial class EventLogRouteMapper
         "POST api/email-ingest/mailboxes/{}/poll",
 
         "POST api/form/all",
-        "POST api/form",
-        "PUT api/form/{}",
-        "DELETE api/form/{}",
         "POST api/form/{}/entry/{}",
         "POST api/form/{}/entry/all",
 
@@ -190,6 +187,52 @@ public static partial class EventLogRouteMapper
         return match.Success && Guid.TryParse(match.Groups[1].Value, out roleId);
     }
 
+    public static bool TryGetGroupIdFromPath(string path, out Guid groupId)
+    {
+        groupId = Guid.Empty;
+        var match = GroupById().Match(NormalizePath(path));
+        return match.Success && Guid.TryParse(match.Groups[1].Value, out groupId);
+    }
+
+    public static bool TryGetWorkflowIdFromPath(string path, out Guid workflowId)
+    {
+        workflowId = Guid.Empty;
+        var canonical = ToCanonicalWorkflowPath(NormalizePath(path));
+        var match = WorkflowById().Match(canonical);
+        return match.Success && Guid.TryParse(match.Groups[1].Value, out workflowId);
+    }
+
+    public static bool TryGetWorkflowInstanceIdFromPath(string path, out Guid instanceId)
+    {
+        instanceId = Guid.Empty;
+        var canonical = ToCanonicalWorkflowPath(NormalizePath(path));
+        var match = WorkflowApprove().Match(canonical);
+        return match.Success && Guid.TryParse(match.Groups[1].Value, out instanceId);
+    }
+
+    public static bool TryGetRepositoryIdFromPath(string path, out Guid repositoryId)
+    {
+        repositoryId = Guid.Empty;
+        var match = RepoById().Match(NormalizePath(path));
+        return match.Success && Guid.TryParse(match.Groups[1].Value, out repositoryId);
+    }
+
+    public static bool TryGetFormIdFromPath(string path, out string formId)
+    {
+        formId = string.Empty;
+        var match = FormById().Match(NormalizePath(path));
+        if (!match.Success)
+            return false;
+
+        var id = match.Groups[1].Value;
+        if (id.Equals("all", StringComparison.OrdinalIgnoreCase)
+            || id.Equals("uploadMasterFile", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        formId = id;
+        return true;
+    }
+
     private static EventLogMappedEvent AdjustForFailure(
         EventLogMappedEvent mapped,
         string path,
@@ -259,62 +302,87 @@ public static partial class EventLogRouteMapper
     {
         mapped = default!;
         var person = PersonLabel(subject);
-        var sevInfo = success ? "Info" : "Warning";
 
         if (HttpMethodsEqual(method, "POST") && path.Equals("/api/users", StringComparison.OrdinalIgnoreCase))
         {
-            var label = person is { } s
-                ? $"New user account created: {s}"
-                : "New user account created";
-            mapped = new EventLogMappedEvent(label, "User Created", "User Management", sevInfo);
+            var title = success
+                ? WithName("New user account created", person)
+                : WithName("Failed to create new user account", person);
+            mapped = new EventLogMappedEvent(title, "User Created", "User Management", success ? "Info" : "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "PUT") && UserById().IsMatch(path))
         {
-            if (!string.IsNullOrWhiteSpace(subject.Role))
+            if (!success)
             {
-                var label = person is { } s
-                    ? $"User role changed: {s} to {subject.Role.Trim()}"
-                    : $"User role changed to {subject.Role.Trim()}";
-                mapped = new EventLogMappedEvent(label, "Role Changed", "User Management", sevInfo);
+                mapped = new EventLogMappedEvent(
+                    $"Failed to Update user account - {UserLabelOrUnknown(person)}",
+                    "User Updated",
+                    "User Management",
+                    "Warning");
                 return true;
             }
 
-            var updateLabel = person is { } p
-                ? $"User account updated: {p}"
-                : "User account updated";
-            mapped = new EventLogMappedEvent(updateLabel, "User Updated", "User Management", sevInfo);
+            if (!string.IsNullOrWhiteSpace(subject.Role))
+            {
+                var roleName = subject.Role.Trim();
+                var label = person is { } s
+                    ? $"User account {s} updated for role- {roleName}"
+                    : $"User account updated for role- {roleName}";
+                mapped = new EventLogMappedEvent(label, "User Updated", "User Management", "Info");
+                return true;
+            }
+
+            mapped = new EventLogMappedEvent(
+                WithName("User account updated", person),
+                "User Updated",
+                "User Management",
+                "Info");
             return true;
         }
 
         if (HttpMethodsEqual(method, "DELETE") && UserById().IsMatch(path))
         {
-            var label = person is { } s
-                ? $"User account deleted: {s}"
-                : "User account deleted";
-            mapped = new EventLogMappedEvent(label, "User Deleted", "User Management", "Warning");
+            var title = success
+                ? WithName("User account deleted", person)
+                : $"Failed to Delete the user account - {UserLabelOrUnknown(person)}";
+            mapped = new EventLogMappedEvent(title, "User Deleted", "User Management", "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "POST") && path.Equals("/api/users/roles", StringComparison.OrdinalIgnoreCase))
         {
             var roleLabel = FirstNonEmpty(subject.RoleName, subject.Name);
-            var label = roleLabel is { } s
-                ? $"New role created: {s}"
-                : "New role created";
-            mapped = new EventLogMappedEvent(label, "Role Created", "User Management", sevInfo);
+            var title = success
+                ? WithName("New role created", roleLabel)
+                : "Failed role creation";
+            mapped = new EventLogMappedEvent(title, "Role Created", "User Management", success ? "Info" : "Warning");
             return true;
         }
 
-        if (HttpMethodsEqual(method, "PUT") && (RoleMenus().IsMatch(path) || RoleById().IsMatch(path)))
+        if (HttpMethodsEqual(method, "PUT") && RoleMenus().IsMatch(path))
         {
             var roleLabel = FirstNonEmpty(subject.RoleName, subject.Name);
-            var label = roleLabel is { } s
-                ? $"Role permissions updated for {s}"
-                : "Role permissions updated";
+            var title = success
+                ? "Role permissions updated"
+                : WithName("Failed to update role permissions", roleLabel);
             mapped = new EventLogMappedEvent(
-                label,
+                title,
+                "Permission Changed",
+                "Security",
+                success ? "Warning" : "Critical");
+            return true;
+        }
+
+        if (HttpMethodsEqual(method, "PUT") && RoleById().IsMatch(path))
+        {
+            var roleLabel = FirstNonEmpty(subject.RoleName, subject.Name);
+            var title = success
+                ? WithName("Role updated", roleLabel)
+                : WithName("Failed to Update user role", roleLabel);
+            mapped = new EventLogMappedEvent(
+                title,
                 "Permission Changed",
                 "Security",
                 success ? "Warning" : "Critical");
@@ -324,30 +392,30 @@ public static partial class EventLogRouteMapper
         if (HttpMethodsEqual(method, "POST") && path.Equals("/api/users/groups", StringComparison.OrdinalIgnoreCase))
         {
             var group = FirstNonEmpty(subject.GroupName, subject.Name);
-            var label = group is { } s ? $"New group created: {s}" : "New group created";
-            mapped = new EventLogMappedEvent(label, "Group Created", "User Management", sevInfo);
+            var title = success
+                ? WithName("New group created", group)
+                : WithName("Failed to create new group", group);
+            mapped = new EventLogMappedEvent(title, "Group Created", "User Management", success ? "Info" : "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "PUT") && GroupById().IsMatch(path))
         {
             var group = FirstNonEmpty(subject.GroupName, subject.Name);
-            mapped = new EventLogMappedEvent(
-                group is { } s ? $"Group updated: {s}" : "Group updated",
-                "Group Updated",
-                "User Management",
-                sevInfo);
+            var title = success
+                ? WithName("Group updated", group)
+                : WithName("Failed to update group", group);
+            mapped = new EventLogMappedEvent(title, "Group Updated", "User Management", success ? "Info" : "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "DELETE") && GroupById().IsMatch(path))
         {
             var group = FirstNonEmpty(subject.GroupName, subject.Name);
-            mapped = new EventLogMappedEvent(
-                group is { } s ? $"Group deleted: {s}" : "Group deleted",
-                "Group Deleted",
-                "User Management",
-                "Warning");
+            var title = success
+                ? WithName("Group deleted", group)
+                : WithName("Failed to delete the group", group);
+            mapped = new EventLogMappedEvent(title, "Group Deleted", "User Management", "Warning");
             return true;
         }
 
@@ -359,9 +427,11 @@ public static partial class EventLogRouteMapper
         string path,
         bool success,
         EventLogSubject subject,
-        out EventLogMappedEvent mapped)
+        out EventLogMappedEvent mapped,
+        out bool fullySpecified)
     {
         mapped = default!;
+        fullySpecified = false;
         if (!IsWorkflowPath(path))
             return false;
 
@@ -371,6 +441,7 @@ public static partial class EventLogRouteMapper
         if (HttpMethodsEqual(method, "POST")
             && canonical.Equals("/api/workflows/setup-schema", StringComparison.OrdinalIgnoreCase))
         {
+            fullySpecified = true;
             mapped = new EventLogMappedEvent(
                 success ? "Workflow setup schema completed" : "Workflow setup schema failed",
                 "Schema Setup",
@@ -383,10 +454,12 @@ public static partial class EventLogRouteMapper
             && (canonical.Equals("/api/workflows", StringComparison.OrdinalIgnoreCase)
                 || canonical.Equals("/api/workflow", StringComparison.OrdinalIgnoreCase)))
         {
-            var label = FirstNonEmpty(subject.Name) is { } s
-                ? $"New workflow created: {s}"
-                : "New workflow created";
-            mapped = new EventLogMappedEvent(label, "Workflow Created", "Workflow", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("New workflow created", name)
+                : WithName("Failed to create new workflow", name);
+            mapped = new EventLogMappedEvent(title, "Workflow Created", "Workflow", success ? "Info" : "Warning");
             return true;
         }
 
@@ -432,7 +505,12 @@ public static partial class EventLogRouteMapper
 
         if (HttpMethodsEqual(method, "POST") && WorkflowApprove().IsMatch(canonical))
         {
-            mapped = new EventLogMappedEvent("Workflow step approved", "Step Approved", "Workflow", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? "Workflow step approved"
+                : WithName("Failed to approve workflow steps", name);
+            mapped = new EventLogMappedEvent(title, "Step Approved", "Workflow", success ? "Info" : "Warning");
             return true;
         }
 
@@ -462,16 +540,23 @@ public static partial class EventLogRouteMapper
 
         if (HttpMethodsEqual(method, "PUT") && WorkflowById().IsMatch(canonical))
         {
-            var label = FirstNonEmpty(subject.Name) is { } s
-                ? $"Workflow updated: {s}"
-                : "Workflow updated";
-            mapped = new EventLogMappedEvent(label, "Workflow Updated", "Workflow", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("Workflow updated", name)
+                : WithName("Failed to update workflow", name);
+            mapped = new EventLogMappedEvent(title, "Workflow Updated", "Workflow", success ? "Info" : "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "DELETE") && WorkflowById().IsMatch(canonical))
         {
-            mapped = new EventLogMappedEvent("Workflow deleted", "Workflow Deleted", "Workflow", "Warning");
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("Workflow deleted", name)
+                : WithName("Failed to delete workflow", name);
+            mapped = new EventLogMappedEvent(title, "Workflow Deleted", "Workflow", "Warning");
             return true;
         }
 
@@ -489,13 +574,13 @@ public static partial class EventLogRouteMapper
         string path,
         bool success,
         EventLogSubject subject,
-        out EventLogMappedEvent mapped)
+        out EventLogMappedEvent mapped,
+        out bool fullySpecified)
     {
         mapped = default!;
+        fullySpecified = false;
         if (!path.StartsWith("/api/form", StringComparison.OrdinalIgnoreCase))
             return false;
-
-        var sevInfo = success ? "Info" : "Warning";
 
         if ((HttpMethodsEqual(method, "GET") || HttpMethodsEqual(method, "POST"))
             && path.Equals("/api/form/all", StringComparison.OrdinalIgnoreCase))
@@ -506,25 +591,34 @@ public static partial class EventLogRouteMapper
 
         if (HttpMethodsEqual(method, "POST") && path.Equals("/api/form", StringComparison.OrdinalIgnoreCase))
         {
-            var label = FirstNonEmpty(subject.Name) is { } s
-                ? $"New form created: {s}"
-                : "New form created";
-            mapped = new EventLogMappedEvent(label, "Form Created", "Forms", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("New Form Created", name)
+                : WithName("Failed to create new form", name);
+            mapped = new EventLogMappedEvent(title, "Form Created", "Form", success ? "Info" : "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "PUT") && FormById().IsMatch(path) && !path.EndsWith("/all", StringComparison.OrdinalIgnoreCase))
         {
-            var label = FirstNonEmpty(subject.Name) is { } s
-                ? $"Form updated: {s}"
-                : "Form updated";
-            mapped = new EventLogMappedEvent(label, "Form Updated", "Forms", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("Form updated", name)
+                : WithName("Failed to update form", name);
+            mapped = new EventLogMappedEvent(title, "Form Updated", "Form", success ? "Info" : "Warning");
             return true;
         }
 
         if (HttpMethodsEqual(method, "DELETE") && FormById().IsMatch(path))
         {
-            mapped = new EventLogMappedEvent("Form deleted", "Form Deleted", "Forms", "Warning");
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("Form deleted", name)
+                : WithName("Failed to delete form", name);
+            mapped = new EventLogMappedEvent(title, "Form Deleted", "Form", "Warning");
             return true;
         }
 
@@ -542,9 +636,11 @@ public static partial class EventLogRouteMapper
         string path,
         bool success,
         EventLogSubject subject,
-        out EventLogMappedEvent mapped)
+        out EventLogMappedEvent mapped,
+        out bool fullySpecified)
     {
         mapped = default!;
+        fullySpecified = false;
         if (!path.StartsWith("/api/repositories", StringComparison.OrdinalIgnoreCase))
             return false;
 
@@ -593,10 +689,12 @@ public static partial class EventLogRouteMapper
 
         if (HttpMethodsEqual(method, "POST") && path.Equals("/api/repositories", StringComparison.OrdinalIgnoreCase))
         {
-            var label = FirstNonEmpty(subject.Name) is { } s
-                ? $"New repository created: {s}"
-                : "New repository created";
-            mapped = new EventLogMappedEvent(label, "Repository Created", "Repository", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("New repository created", name)
+                : WithName("Failed to create new repository", name);
+            mapped = new EventLogMappedEvent(title, "Repository Created", "Repository", success ? "Info" : "Warning");
             return true;
         }
 
@@ -608,10 +706,12 @@ public static partial class EventLogRouteMapper
 
         if (HttpMethodsEqual(method, "PUT") && RepoById().IsMatch(path))
         {
-            var label = FirstNonEmpty(subject.Name) is { } s
-                ? $"Repository updated: {s}"
-                : "Repository updated";
-            mapped = new EventLogMappedEvent(label, "Repository Updated", "Repository", sevInfo);
+            fullySpecified = true;
+            var name = FirstNonEmpty(subject.Name);
+            var title = success
+                ? WithName("Repository updated", name)
+                : WithName("Failed to update repository", name);
+            mapped = new EventLogMappedEvent(title, "Repository Updated", "Repository", success ? "Info" : "Warning");
             return true;
         }
 
@@ -679,6 +779,12 @@ public static partial class EventLogRouteMapper
 
     private static string? PersonLabel(EventLogSubject subject) =>
         FirstNonEmpty(subject.Name, subject.Email);
+
+    private static string WithName(string title, string? name) =>
+        name is { } s ? $"{title} - {s}" : title;
+
+    private static string UserLabelOrUnknown(string? person) =>
+        person ?? "username unknown";
 
     private static string NormalizePath(string path)
     {
