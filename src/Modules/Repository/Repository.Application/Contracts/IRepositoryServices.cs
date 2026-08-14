@@ -93,8 +93,10 @@ public interface IRepositoryRelatedDocumentsService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Related documents (exact): all repository field values on the source file must match
-    /// (skips DYNAMIC_TABLE). Each file includes matchScore / matchCount / matchedFields.
+    /// Related documents (exact / score).
+    /// If <paramref name="fields"/> is empty → match all repository fields (with values).
+    /// If fields are provided → match only those fields.
+    /// Optional <paramref name="value"/> overrides the source value when a single field is specified.
     /// </summary>
     Task<RepositoryRelatedDocumentsResultDto?> GetRelatedExactAsync(
         Guid repositoryId,
@@ -102,6 +104,26 @@ public interface IRepositoryRelatedDocumentsService
         Guid itemId,
         int page = 1,
         int pageSize = 50,
+        IReadOnlyList<string>? fields = null,
+        string? value = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Saved related docs for this source item (latest replace-on-save set).</summary>
+    Task<RepositorySavedRelatedDocumentsResultDto?> GetSavedRelatedAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Replace all saved related docs for this source item with the provided selection.
+    /// </summary>
+    Task<RepositorySavedRelatedDocumentsResultDto?> SaveRelatedAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        SaveRepositoryRelatedDocumentsRequest request,
+        Guid? userId,
         CancellationToken cancellationToken = default);
 }
 
