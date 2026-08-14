@@ -340,7 +340,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             nextDefinitionStep,
             submittedModifiedByUserId: userId,
             receivedCreatedByUserId: legacySync.NextCreatedByUserId ?? userId,
-            cancellationToken);
+            cancellationToken,
+            currentTransactionId: legacySync.CurrentTransactionId,
+            nextTransactionId: isCompleted ? null : legacySync.NextTransactionId);
 
         return new MoveToNextStepCommandResult(
             true,
@@ -363,7 +365,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         WorkflowStep? nextStep,
         Guid submittedModifiedByUserId,
         Guid? receivedCreatedByUserId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? currentTransactionId = null,
+        int? nextTransactionId = null)
         => _moveNotifications.TryInsertMoveNotificationsAsync(
             new WorkflowMoveNotificationContext(
                 instance.WorkflowId,
@@ -375,7 +379,10 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 nextStep?.Name,
                 nextStep?.StageType,
                 submittedModifiedByUserId,
-                receivedCreatedByUserId),
+                receivedCreatedByUserId,
+                instance.ReferenceNumber,
+                currentTransactionId,
+                nextTransactionId),
             cancellationToken);
 
     internal static WorkflowStep? ResolveStepByActivityId(IReadOnlyList<WorkflowStep> orderedSteps, string activityId)

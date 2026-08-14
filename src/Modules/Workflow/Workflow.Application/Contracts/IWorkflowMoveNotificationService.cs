@@ -20,4 +20,7 @@ public sealed record WorkflowMoveNotificationContext(
     /// <summary>Transaction ModifiedBy for Ticket Submitted (who submitted the review).</summary>
     Guid SubmittedModifiedByUserId,
     /// <summary>Next transaction CreatedBy for Ticket Received; falls back to ModifiedBy when null.</summary>
-    Guid? ReceivedCreatedByUserId);
+    Guid? ReceivedCreatedByUserId,
+    string? RequestNo = null,
+    int? CurrentTransactionId = null,
+    int? NextTransactionId = null);

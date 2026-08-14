@@ -58,7 +58,14 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         await _tableCreator.EnsureWorkflowTablesForStartAsync(workflow.Id, connectionString, cancellationToken);
         await _apAgentJobProgress.EnsureProgressTableAsync(cancellationToken);
 
-        var instance = WorkflowInstance.Create(tenantId, workflow.Id, workflow.Name, workflow.Version, userId, request.Context);
+        var instance = WorkflowInstance.Create(
+            tenantId,
+            workflow.Id,
+            workflow.Name,
+            workflow.Version,
+            userId,
+            request.Context,
+            referenceNumber: $"REQ-{DateTime.UtcNow:yyyyMMddHHmmssfff}");
         instance.Start();
 
         foreach (var step in workflow.Steps.OrderBy(s => s.Order))

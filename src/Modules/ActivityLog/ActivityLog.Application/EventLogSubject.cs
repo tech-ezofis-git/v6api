@@ -75,6 +75,7 @@ public sealed class EventLogSubject
         string? roleName = null;
         string? role = null;
         string? groupName = null;
+        string? userName = null;
         string? firstName = null;
         string? lastName = null;
 
@@ -104,6 +105,8 @@ public sealed class EventLogSubject
                 name ??= trimmed;
             else if (prop.Name.Equals("name", StringComparison.OrdinalIgnoreCase))
                 name ??= trimmed;
+            else if (prop.Name.Equals("userName", StringComparison.OrdinalIgnoreCase))
+                userName ??= trimmed;
             else if (prop.Name.Equals("firstName", StringComparison.OrdinalIgnoreCase))
                 firstName ??= trimmed;
             else if (prop.Name.Equals("lastName", StringComparison.OrdinalIgnoreCase))
@@ -117,6 +120,9 @@ public sealed class EventLogSubject
             else if (prop.Name.Equals("groupName", StringComparison.OrdinalIgnoreCase))
                 groupName ??= trimmed;
         }
+
+        if (name == null && !string.IsNullOrWhiteSpace(userName))
+            name = userName;
 
         if (name == null && (!string.IsNullOrWhiteSpace(firstName) || !string.IsNullOrWhiteSpace(lastName)))
             name = string.Join(' ', new[] { firstName, lastName }.Where(s => !string.IsNullOrWhiteSpace(s)));
