@@ -12,32 +12,64 @@ internal static class FormMasterFileNotificationStore
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
     };
 
+    private static readonly (string Name, string Definition)[] ExtraColumns =
+    [
+        ("Message", "NVARCHAR(1000) NULL"),
+        ("Data", "NVARCHAR(MAX) NULL"),
+        ("Severity", "NVARCHAR(32) NULL"),
+        ("CreatedAtUtc", "datetime2 NULL"),
+        ("ModifiedAtUtc", "datetime2 NULL"),
+        ("CreatedByGuid", "uniqueidentifier NULL")
+    ];
+
     public static async Task EnsureTableAsync(SqlConnection connection, CancellationToken cancellationToken)
     {
-        if (await TableExistsAsync(connection, "notification", "dbo", cancellationToken))
+        if (!await TableExistsAsync(connection, "notification", "dbo", cancellationToken))
+        {
+            const string sql = """
+                CREATE TABLE dbo.notification (
+                    id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+                    title NVARCHAR(500) NULL,
+                    status NVARCHAR(100) NULL,
+                    remarks NVARCHAR(MAX) NULL,
+                    inputJson NVARCHAR(MAX) NULL,
+                    category NVARCHAR(100) NULL,
+                    createdAt NVARCHAR(50) NULL,
+                    modifiedAt NVARCHAR(50) NULL,
+                    createdBy INT NOT NULL DEFAULT(0),
+                    modifiedBy INT NOT NULL DEFAULT(0),
+                    isDeleted BIT NOT NULL DEFAULT(0),
+                    lastActionBy INT NULL,
+                    readStatus INT NOT NULL DEFAULT(0),
+                    Message NVARCHAR(1000) NULL,
+                    Data NVARCHAR(MAX) NULL,
+                    Severity NVARCHAR(32) NULL,
+                    CreatedAtUtc datetime2 NULL,
+                    ModifiedAtUtc datetime2 NULL,
+                    CreatedByGuid uniqueidentifier NULL
+                );
+                CREATE INDEX IX_notification_category_createdAt ON dbo.notification(category, createdAt DESC);
+                """;
+
+            await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
             return;
+        }
 
-        const string sql = """
-            CREATE TABLE dbo.notification (
-                id INT IDENTITY(1,1) NOT NULL PRIMARY KEY,
-                title NVARCHAR(500) NULL,
-                status NVARCHAR(100) NULL,
-                remarks NVARCHAR(MAX) NULL,
-                inputJson NVARCHAR(MAX) NULL,
-                category NVARCHAR(100) NULL,
-                createdAt NVARCHAR(50) NULL,
-                modifiedAt NVARCHAR(50) NULL,
-                createdBy INT NOT NULL DEFAULT(0),
-                modifiedBy INT NOT NULL DEFAULT(0),
-                isDeleted BIT NOT NULL DEFAULT(0),
-                lastActionBy INT NULL,
-                readStatus INT NOT NULL DEFAULT(0)
-            );
-            CREATE INDEX IX_notification_category_createdAt ON dbo.notification(category, createdAt DESC);
-            """;
+        await EnsureExtraColumnsAsync(connection, cancellationToken);
+    }
 
-        await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    private static async Task EnsureExtraColumnsAsync(SqlConnection connection, CancellationToken cancellationToken)
+    {
+        foreach (var (name, definition) in ExtraColumns)
+        {
+            if (await ColumnExistsAsync(connection, "notification", name, "dbo", cancellationToken))
+                continue;
+
+            var sql = $"ALTER TABLE dbo.notification ADD [{name}] {definition};";
+            await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 60 };
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     public static Task<int> InsertAsync(
@@ -81,6 +113,55 @@ internal static class FormMasterFileNotificationStore
         cmd.Parameters.AddWithValue("@Category", category);
         cmd.Parameters.AddWithValue("@CreatedAt", now);
         cmd.Parameters.AddWithValue("@CreatedBy", createdByLegacyId);
+
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+    }
+
+    public static async Task<int> InsertMoveNotificationAsync(
+        SqlConnection connection,
+        string title,
+        string? status,
+        string? message,
+        object data,
+        string severity,
+        DateTime? createdAtUtc,
+        Guid? createdByGuid,
+        int createdByLegacyId,
+        string category,
+        CancellationToken cancellationToken)
+    {
+        var atUtc = createdAtUtc ?? DateTime.UtcNow;
+        if (atUtc.Kind == DateTimeKind.Unspecified)
+            atUtc = DateTime.SpecifyKind(atUtc, DateTimeKind.Utc);
+
+        var nowStamp = atUtc.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+        var dataJson = JsonSerializer.Serialize(data, JsonOptions);
+
+        const string sql = """
+            INSERT INTO dbo.notification (
+                title, status, remarks, inputJson, category,
+                createdAt, modifiedAt, createdBy, modifiedBy, isDeleted, lastActionBy, readStatus,
+                Message, Data, Severity, CreatedAtUtc, ModifiedAtUtc, CreatedByGuid)
+            OUTPUT INSERTED.id
+            VALUES (
+                @Title, @Status, @Message, @Data, @Category,
+                @CreatedAt, NULL, @CreatedBy, 0, 0, NULL, 0,
+                @Message, @Data, @Severity, @CreatedAtUtc, NULL, @CreatedByGuid);
+            """;
+
+        await using var cmd = new SqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Title", (object?)title ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@Status", (object?)status ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@Message", (object?)message ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@Data", dataJson);
+        cmd.Parameters.AddWithValue("@Category", category);
+        cmd.Parameters.AddWithValue("@CreatedAt", nowStamp);
+        cmd.Parameters.AddWithValue("@CreatedBy", createdByLegacyId);
+        cmd.Parameters.AddWithValue("@Severity", severity);
+        cmd.Parameters.AddWithValue("@CreatedAtUtc", atUtc);
+        cmd.Parameters.AddWithValue("@CreatedByGuid", createdByGuid.HasValue && createdByGuid.Value != Guid.Empty
+            ? createdByGuid.Value
+            : DBNull.Value);
 
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
     }
