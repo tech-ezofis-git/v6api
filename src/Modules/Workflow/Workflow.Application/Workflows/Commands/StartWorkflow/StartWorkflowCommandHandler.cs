@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Domain.Entities;
 using SaaSApp.Workflow.Domain.Enums;
 
@@ -105,6 +106,9 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
 
         try
         {
+            var orderedSteps = workflow.Steps.OrderBy(s => s.Order).ToList();
+            var dedicatedApAgent = WorkflowStepTransitionHelper.TryResolveDedicatedApAgentStep(orderedSteps);
+
             var bootstrap = await _startBootstrap.RunAsync(
                 new WorkflowStartBootstrapRequest(
                     workflow,
@@ -114,7 +118,10 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                     request.EnvType,
                     attachmentStream,
                     request.Attachment?.FileName,
-                    request.Attachment?.ContentType),
+                    request.Attachment?.ContentType,
+                    request.FormDataFields,
+                    request.FormLineItemsJson,
+                    request.StagedFiles),
                 cancellationToken);
 
             _logger.LogInformation(
@@ -126,6 +133,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
 
             string? apAgentJobId = null;
             if (request.TriggerApAgentPythonJob
+                && dedicatedApAgent != null
                 && !string.IsNullOrWhiteSpace(bootstrap.FormDataJson))
             {
                 apAgentJobId = await _apAgentPythonJobClient.EnqueueAsync(

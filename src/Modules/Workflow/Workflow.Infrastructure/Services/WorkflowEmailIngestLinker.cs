@@ -42,32 +42,42 @@ public sealed class WorkflowEmailIngestLinker : IWorkflowEmailIngestLinker
             json = JsonSerializer.Deserialize<WorkflowJsonDto>(workflowJsonRaw, Deserialize);
         }
 
-        var existing = await _emailIngest.GetMailboxByWorkflowIdAsync(workflowId, cancellationToken);
+        var isEmail = IsEmailInitiate(json, options);
 
         // Partial update with no email fields and no designer JSON: leave mailbox unchanged
         if (json == null && options == null)
         {
+            var unchanged = await _emailIngest.GetMailboxByWorkflowIdAsync(workflowId, cancellationToken);
             return new WorkflowEmailIngestLinkResult(
-                existing?.Id,
-                existing?.ConnectorId,
-                existing?.IsEnabled ?? false);
+                unchanged?.Id,
+                unchanged?.ConnectorId,
+                unchanged?.IsEnabled ?? false);
         }
 
-        var isEmail = IsEmailInitiate(json, options);
-
+        // Non-email workflows (DOCUMENT_FORM / FORM): never require dbo.connector.
+        // Only look up an existing mailbox to disable it if initiate type changed away from EMAIL.
         if (!isEmail)
         {
-            if (existing is { IsEnabled: true })
+            var existingNonEmail = await _emailIngest.GetMailboxByWorkflowIdAsync(workflowId, cancellationToken);
+            if (existingNonEmail is { IsEnabled: true })
             {
-                await _emailIngest.UpdateMailboxAsync(existing.Id, ToUpsert(existing, isEnabled: false), cancellationToken);
-                _logger.LogInformation("Disabled email ingest mailbox {MailboxId} for workflow {WorkflowId}", existing.Id, workflowId);
+                await _emailIngest.UpdateMailboxAsync(
+                    existingNonEmail.Id,
+                    ToUpsert(existingNonEmail, isEnabled: false),
+                    cancellationToken);
+                _logger.LogInformation(
+                    "Disabled email ingest mailbox {MailboxId} for workflow {WorkflowId}",
+                    existingNonEmail.Id,
+                    workflowId);
             }
 
             return new WorkflowEmailIngestLinkResult(
-                existing?.Id,
-                existing?.ConnectorId,
+                existingNonEmail?.Id,
+                existingNonEmail?.ConnectorId,
                 false);
         }
+
+        var existing = await _emailIngest.GetMailboxByWorkflowIdAsync(workflowId, cancellationToken);
 
         var connectorId = ResolveConnectorId(options, json);
         if (connectorId == null || connectorId == Guid.Empty)

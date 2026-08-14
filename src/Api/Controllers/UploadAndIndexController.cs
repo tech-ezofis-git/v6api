@@ -123,6 +123,61 @@ public sealed class UploadAndIndexController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Stage file to monitor storage, run OCR, persist extracted fields; return fileId for later workflow start.
+    /// </summary>
+    [HttpPost("/api/uploadAndIndex/uploadWithOcr")]
+    [DisableRequestSizeLimit]
+    [RequestFormLimits(MultipartBodyLengthLimit = 104_857_600)]
+    [ProducesResponseType(typeof(UploadWithOcrResult), StatusCodes.Status200OK)]
+    public async Task<IActionResult> UploadWithOcr(
+        IFormFile? file,
+        [FromForm] string? repositoryId,
+        [FromForm] string? filename,
+        [FromForm] List<string>? fields,
+        [FromForm] string? pageNo,
+        [FromForm] string? ocrType,
+        [FromForm] string? validateType,
+        CancellationToken cancellationToken)
+    {
+        if (file == null || file.Length == 0)
+            return BadRequest(new { error = "No file received." });
+
+        if (!TryParseRepositoryId(repositoryId, out var repoId))
+            return BadRequest(new { error = "repositoryId is required (GUID)." });
+
+        var tenantId = RequireTenantId();
+        var uploadName = string.IsNullOrWhiteSpace(filename) ? file.FileName : filename;
+
+        try
+        {
+            await using var stream = file.OpenReadStream();
+            var result = await _uploadIndex.UploadWithOcrAsync(
+                repoId,
+                tenantId,
+                stream,
+                uploadName!,
+                file.ContentType,
+                file.Length,
+                ResolveFieldsFormInput(fields),
+                pageNo,
+                ocrType,
+                validateType,
+                GetUserId(),
+                cancellationToken);
+
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     /// <summary>v5: POST api/uploadAndIndex/load/{id} — load staged file for indexing UI.</summary>
     [HttpPost("/api/uploadAndIndex/load/{id}")]
     [ProducesResponseType(typeof(UploadIndexLoadResult), StatusCodes.Status200OK)]
