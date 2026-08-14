@@ -12,6 +12,8 @@ public interface IWorkflowStartBootstrapService
         CancellationToken cancellationToken = default);
 }
 
+public sealed record StartWorkflowStagedFileRef(Guid RepositoryId, Guid FileId);
+
 public sealed record WorkflowStartBootstrapRequest(
     Domain.Entities.Workflow Workflow,
     WorkflowInstance Instance,
@@ -20,7 +22,10 @@ public sealed record WorkflowStartBootstrapRequest(
     string? EnvType,
     Stream? AttachmentStream,
     string? AttachmentFileName,
-    string? AttachmentContentType);
+    string? AttachmentContentType,
+    IReadOnlyDictionary<string, string>? FormDataFields = null,
+    string? FormLineItemsJson = null,
+    IReadOnlyList<StartWorkflowStagedFileRef>? StagedFiles = null);
 
 public sealed record WorkflowStartBootstrapResult(
     int? FirstTransactionId,

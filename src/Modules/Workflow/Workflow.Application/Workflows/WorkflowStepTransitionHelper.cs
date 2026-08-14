@@ -8,16 +8,17 @@ public static class WorkflowStepTransitionHelper
 {
     public const string StartProceedReview = "Submit";
 
+    /// <summary>AP Agent step only when explicitly defined (not Order=2 fallback).</summary>
+    public static WorkflowStep? TryResolveDedicatedApAgentStep(IReadOnlyList<WorkflowStep> orderedSteps) =>
+        orderedSteps.FirstOrDefault(IsApAgentStep)
+        ?? orderedSteps.FirstOrDefault(s =>
+            string.Equals(s.Name, "Ap Agent", StringComparison.OrdinalIgnoreCase));
+
     public static WorkflowStep? ResolveApAgentStep(IReadOnlyList<WorkflowStep> orderedSteps)
     {
-        var byType = orderedSteps.FirstOrDefault(IsApAgentStep);
-        if (byType != null)
-            return byType;
-
-        var byName = orderedSteps.FirstOrDefault(s =>
-            string.Equals(s.Name, "Ap Agent", StringComparison.OrdinalIgnoreCase));
-        if (byName != null)
-            return byName;
+        var dedicated = TryResolveDedicatedApAgentStep(orderedSteps);
+        if (dedicated != null)
+            return dedicated;
 
         return orderedSteps.FirstOrDefault(s => s.Order == 2);
     }

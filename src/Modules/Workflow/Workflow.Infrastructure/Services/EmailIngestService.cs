@@ -110,8 +110,34 @@ public sealed class EmailIngestService : IEmailIngestService
                     ALTER TABLE dbo.EmailIngestProcessed ALTER COLUMN ProviderMessageId NVARCHAR(450) NOT NULL;
                 END
             END
+
+            -- Mailbox list/get JOINs dbo.connector; create modern schema if missing so non-email
+            -- workflow create/update does not fail with "Invalid object name 'dbo.connector'".
+            IF OBJECT_ID(N'dbo.connector', N'U') IS NULL
+            BEGIN
+                CREATE TABLE dbo.connector (
+                    Id UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_connector PRIMARY KEY,
+                    Name NVARCHAR(256) NOT NULL,
+                    ProviderCode NVARCHAR(64) NOT NULL,
+                    ConfigJson NVARCHAR(MAX) NULL,
+                    AccessToken NVARCHAR(MAX) NULL,
+                    RefreshToken NVARCHAR(MAX) NULL,
+                    TokenExpiresAtUtc DATETIME2(3) NULL,
+                    ExternalAccountEmail NVARCHAR(320) NULL,
+                    ExternalAccountId NVARCHAR(256) NULL,
+                    OAuthStatus NVARCHAR(32) NOT NULL CONSTRAINT DF_connector_OAuthStatus DEFAULT (N'Pending'),
+                    IsDefault BIT NOT NULL CONSTRAINT DF_connector_IsDefault DEFAULT (0),
+                    CreatedAtUtc DATETIME2(3) NOT NULL CONSTRAINT DF_connector_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
+                    ModifiedAtUtc DATETIME2(3) NULL,
+                    CreatedBy UNIQUEIDENTIFIER NOT NULL,
+                    ModifiedBy UNIQUEIDENTIFIER NULL,
+                    IsDeleted BIT NOT NULL CONSTRAINT DF_connector_IsDeleted DEFAULT (0)
+                );
+                CREATE INDEX IX_connector_IsDeleted ON dbo.connector (IsDeleted);
+                CREATE INDEX IX_connector_ProviderCode ON dbo.connector (ProviderCode) WHERE IsDeleted = 0;
+            END
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new SqlCommand(sql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 

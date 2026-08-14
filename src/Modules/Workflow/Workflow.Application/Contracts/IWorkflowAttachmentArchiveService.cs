@@ -18,6 +18,17 @@ public interface IWorkflowAttachmentArchiveService
         int? transactionId,
         Guid userId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Promote a pre-ticket staged fileId into archive + WorkflowAttachments + processAddon.</summary>
+    Task<WorkflowAttachmentArchiveResult?> PromoteFromStageAsync(
+        Guid tenantId,
+        Guid workflowId,
+        Guid instanceId,
+        Guid repositoryId,
+        Guid stageId,
+        int? transactionId,
+        Guid userId,
+        CancellationToken cancellationToken = default);
 }
 
 public sealed record WorkflowAttachmentArchiveResult(
