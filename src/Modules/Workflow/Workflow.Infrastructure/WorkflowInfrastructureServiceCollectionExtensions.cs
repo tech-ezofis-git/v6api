@@ -110,6 +110,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.Configure<FormMasterFileImportOptions>(configuration.GetSection(FormMasterFileImportOptions.SectionName));
         services.Configure<WorkflowMoveNotificationOptions>(configuration.GetSection(WorkflowMoveNotificationOptions.SectionName));
         services.AddScoped<IWorkflowMoveNotificationService, WorkflowMoveNotificationService>();
+        services.AddScoped<IWorkflowNotificationQueryService, WorkflowNotificationQueryService>();
         services.AddHttpClient(nameof(MasterFileImportPythonPipelineService), client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;
