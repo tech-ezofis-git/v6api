@@ -26,6 +26,29 @@ public interface IRepositoryUploadIndexService
         string? filename = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Stage to monitor blob, run OCR, persist OcrJson + extracted fields; return fileId.</summary>
+    Task<UploadWithOcrResult> UploadWithOcrAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Stream fileStream,
+        string fileName,
+        string? contentType,
+        long fileSize,
+        string? fieldsJson,
+        string? pageNo,
+        string? ocrType,
+        string? validateType,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Promote staged file to archive layout (synchronous; for workflow start).</summary>
+    Task<UploadIndexPromoteResult?> PromoteStageAsync(
+        Guid stageId,
+        Guid repositoryId,
+        Guid tenantId,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
     Task<UploadIndexLoadResult?> LoadAsync(
         Guid stageId,
         Guid tenantId,

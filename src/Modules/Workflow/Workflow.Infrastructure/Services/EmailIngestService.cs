@@ -101,8 +101,33 @@ public sealed class EmailIngestService : IEmailIngestService
                 CONSTRAINT "UQ_EmailIngestProcessed" UNIQUE ("MailboxId", "ProviderMessageId", "AttachmentId")
             );
             CREATE INDEX IF NOT EXISTS "IX_EmailIngestProcessed_Mailbox" ON dbo."EmailIngestProcessed" ("MailboxId", "ProcessedAtUtc" DESC);
+
+            -- Mailbox list/get JOINs dbo.connector; create modern schema if missing so non-email
+            -- workflow create/update does not fail on a fresh tenant with no connector rows yet.
+            -- Mirrors ConnectorService.EnsureConnectorSchemaAsync's own IF NOT EXISTS create --
+            -- both are idempotent so running either first (or both) is safe.
+            CREATE TABLE IF NOT EXISTS dbo."connector" (
+                "Id" uuid NOT NULL PRIMARY KEY,
+                "Name" varchar(256) NOT NULL,
+                "ProviderCode" varchar(64) NOT NULL,
+                "ConfigJson" text NULL,
+                "AccessToken" text NULL,
+                "RefreshToken" text NULL,
+                "TokenExpiresAtUtc" timestamptz NULL,
+                "ExternalAccountEmail" varchar(320) NULL,
+                "ExternalAccountId" varchar(256) NULL,
+                "OAuthStatus" varchar(32) NOT NULL DEFAULT 'Pending',
+                "IsDefault" boolean NOT NULL DEFAULT false,
+                "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+                "ModifiedAtUtc" timestamptz NULL,
+                "CreatedBy" uuid NOT NULL,
+                "ModifiedBy" uuid NULL,
+                "IsDeleted" boolean NOT NULL DEFAULT false
+            );
+            CREATE INDEX IF NOT EXISTS "IX_connector_IsDeleted" ON dbo."connector" ("IsDeleted");
+            CREATE INDEX IF NOT EXISTS "IX_connector_ProviderCode" ON dbo."connector" ("ProviderCode") WHERE "IsDeleted" = false;
             """;
-        await using var cmd = new NpgsqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 

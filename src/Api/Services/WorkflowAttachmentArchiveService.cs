@@ -9,17 +9,20 @@ namespace SaaSApp.Api.Services;
 public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiveService
 {
     private readonly IRepositoryArchiveFileUploadService _archiveUpload;
+    private readonly IRepositoryUploadIndexService _uploadIndex;
     private readonly IWorkflowProcessAddonService _processAddon;
     private readonly RepositoryWorkflowAttachService _workflowAttach;
     private readonly ITenantConnectionProvider _connectionProvider;
 
     public WorkflowAttachmentArchiveService(
         IRepositoryArchiveFileUploadService archiveUpload,
+        IRepositoryUploadIndexService uploadIndex,
         IWorkflowProcessAddonService processAddon,
         RepositoryWorkflowAttachService workflowAttach,
         ITenantConnectionProvider connectionProvider)
     {
         _archiveUpload = archiveUpload;
+        _uploadIndex = uploadIndex;
         _processAddon = processAddon;
         _workflowAttach = workflowAttach;
         _connectionProvider = connectionProvider;
@@ -96,6 +99,58 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             upload.FileVersion,
             upload.FolderId,
             upload.FolderPathSegments);
+    }
+
+    public async Task<WorkflowAttachmentArchiveResult?> PromoteFromStageAsync(
+        Guid tenantId,
+        Guid workflowId,
+        Guid instanceId,
+        Guid repositoryId,
+        Guid stageId,
+        int? transactionId,
+        Guid userId,
+        CancellationToken cancellationToken = default)
+    {
+        var promoted = await _uploadIndex.PromoteStageAsync(stageId, repositoryId, tenantId, userId, cancellationToken);
+        if (promoted == null)
+            return null;
+
+        var attachmentId = await _workflowAttach.AttachAsync(
+            workflowId,
+            instanceId,
+            transactionId,
+            promoted.RepositoryId,
+            promoted.ItemId,
+            promoted.FileName,
+            promoted.FilePath,
+            promoted.FileSize,
+            promoted.ContentType,
+            userId,
+            cancellationToken: cancellationToken);
+
+        var processAddonId = await _processAddon.InsertAsync(
+            workflowId,
+            instanceId,
+            promoted.RepositoryId,
+            promoted.ItemId,
+            promoted.FileName,
+            transactionId,
+            userId,
+            cancellationToken);
+
+        return new WorkflowAttachmentArchiveResult(
+            attachmentId,
+            promoted.ItemId,
+            promoted.RepositoryId,
+            workflowId,
+            instanceId,
+            processAddonId,
+            promoted.FileName,
+            promoted.FilePath,
+            string.Empty,
+            1,
+            null,
+            Array.Empty<string>());
     }
 
     private async Task<Guid> FindAttachmentIdAsync(

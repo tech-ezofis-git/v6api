@@ -19,6 +19,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
     private readonly IRepositoryStorageSeedService _storageSeed;
     private readonly IRepositoryFileStorage _fileStorage;
     private readonly IOcrExtractionService _ocrExtraction;
+    private readonly IRepositoryArchiveFileUploadService _archiveUpload;
     private readonly ITenantDisplayResolver _tenantDisplay;
 
     public RepositoryUploadIndexService(
@@ -27,6 +28,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         IRepositoryStorageSeedService storageSeed,
         IRepositoryFileStorage fileStorage,
         IOcrExtractionService ocrExtraction,
+        IRepositoryArchiveFileUploadService archiveUpload,
         ITenantDisplayResolver tenantDisplay)
     {
         _connectionProvider = connectionProvider;
@@ -34,6 +36,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         _storageSeed = storageSeed;
         _fileStorage = fileStorage;
         _ocrExtraction = ocrExtraction;
+        _archiveUpload = archiveUpload;
         _tenantDisplay = tenantDisplay;
     }
 
@@ -132,6 +135,169 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             cancellationToken);
 
         return new UploadForOcrResult(ocr.RawJson, ocr.OcrFieldList);
+    }
+
+    public async Task<UploadWithOcrResult> UploadWithOcrAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Stream fileStream,
+        string fileName,
+        string? contentType,
+        long fileSize,
+        string? fieldsJson,
+        string? pageNo,
+        string? ocrType,
+        string? validateType,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        await using var buffer = new MemoryStream();
+        await fileStream.CopyToAsync(buffer, cancellationToken);
+        buffer.Position = 0;
+
+        // fieldsJson here is an OCR hint list (name,TYPE), not pre-filled values.
+        // Stage first without values; OCR results are written to the stage row below.
+        var upload = await UploadAsync(
+            repositoryId,
+            tenantId,
+            buffer,
+            fileName,
+            contentType,
+            fileSize,
+            fieldsJson: null,
+            userId,
+            cancellationToken);
+
+        if (!Guid.TryParse(upload.FileId, out var stageId))
+            throw new InvalidOperationException("Stage id was not returned from upload.");
+
+        buffer.Position = 0;
+        var ocr = await UploadForOcrAsync(
+            repositoryId,
+            tenantId,
+            buffer,
+            fieldsJson,
+            pageNo,
+            ocrType,
+            validateType,
+            fileName,
+            cancellationToken);
+
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException("Repository not found.");
+
+        var ocrFieldValues = ParseFieldsToDictionary(ocr.OcrFieldList);
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await RepositoryStageStore.UpdateFieldsAsync(
+            connection,
+            repo,
+            tenantId,
+            stageId,
+            ocrFieldValues,
+            status: "OCR",
+            stageStatus: "OCR",
+            ocrResult: ocr.OcrJson,
+            userId,
+            cancellationToken);
+
+        var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken)
+            ?? throw new InvalidOperationException("Stage row not found after OCR update.");
+
+        return new UploadWithOcrResult(
+            stageId.ToString("D"),
+            repositoryId,
+            row.FileName ?? fileName,
+            row.FilePath ?? string.Empty,
+            ocr.OcrJson,
+            ocr.OcrFieldList);
+    }
+
+    public async Task<UploadIndexPromoteResult?> PromoteStageAsync(
+        Guid stageId,
+        Guid repositoryId,
+        Guid tenantId,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException("Repository not found.");
+
+        await _provisioner.EnsureRepositoryTablesAsync(repositoryId, tenantId, cancellationToken);
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new SqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+        if (row == null)
+            return null;
+
+        if (row.PromotedItemId is Guid alreadyPromoted && alreadyPromoted != Guid.Empty)
+        {
+            return new UploadIndexPromoteResult(
+                alreadyPromoted,
+                repositoryId,
+                row.FileName ?? string.Empty,
+                row.FilePath ?? string.Empty,
+                System.Text.Json.JsonSerializer.Serialize(row.FieldValues),
+                row.FileSize,
+                row.FileType);
+        }
+
+        if (string.IsNullOrWhiteSpace(row.FilePath) || string.IsNullOrWhiteSpace(row.FileName))
+            throw new InvalidOperationException("Stage row is missing file path or name.");
+
+        var providers = await _storageSeed.ListProvidersAsync(tenantId, cancellationToken);
+        var providerCode = providers.First(p => p.Id == row.StorageProviderId).Code;
+
+        await using var source = await _fileStorage.OpenReadAsync(
+            tenantId,
+            row.FilePath,
+            providerCode,
+            cancellationToken);
+
+        await using var promoteBuffer = new MemoryStream();
+        await source.CopyToAsync(promoteBuffer, cancellationToken);
+        promoteBuffer.Position = 0;
+
+        var metadataJson = System.Text.Json.JsonSerializer.Serialize(row.FieldValues);
+        var uploadRequest = new RepositoryUploadItemRequest(
+            promoteBuffer,
+            row.FileName,
+            row.FileType,
+            FileSize: row.FileSize,
+            Metadata: metadataJson);
+
+        var result = await _archiveUpload.UploadItemAsync(
+            repositoryId,
+            tenantId,
+            uploadRequest,
+            userId,
+            cancellationToken);
+
+        await RepositoryStageStore.MarkArchivedAsync(
+            connection,
+            repo.StageTableName,
+            tenantId,
+            stageId,
+            result.ItemId,
+            cancellationToken);
+
+        return new UploadIndexPromoteResult(
+            result.ItemId,
+            repositoryId,
+            result.FileName,
+            result.FilePath,
+            metadataJson,
+            row.FileSize,
+            row.FileType);
     }
 
     public async Task<UploadIndexLoadResult?> LoadAsync(
@@ -341,7 +507,48 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             return dict.Select(kv => new UploadIndexFieldDto(kv.Key, kv.Value)).ToList();
         }
 
-        return JsonSerializer.Deserialize<List<UploadIndexFieldDto>>(trimmed, JsonOptions);
+        if (!trimmed.StartsWith('['))
+            return ParseFieldNamesFromPlainText(trimmed);
+
+        try
+        {
+            return JsonSerializer.Deserialize<List<UploadIndexFieldDto>>(trimmed, JsonOptions);
+        }
+        catch (JsonException)
+        {
+            // "fields" may carry OCR parameter lines (["Supplier,SHORT_TEXT"]) instead of name/value objects.
+            try
+            {
+                var lines = JsonSerializer.Deserialize<List<string>>(trimmed, JsonOptions);
+                return lines == null
+                    ? null
+                    : lines
+                        .SelectMany(line => ParseFieldNamesFromPlainText(line) ?? new List<UploadIndexFieldDto>())
+                        .ToList();
+            }
+            catch (JsonException)
+            {
+                return ParseFieldNamesFromPlainText(trimmed);
+            }
+        }
+    }
+
+    /// <summary>Accepts OCR parameter text ("Supplier,SHORT_TEXT") and returns field names with empty values.</summary>
+    private static List<UploadIndexFieldDto>? ParseFieldNamesFromPlainText(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var list = new List<UploadIndexFieldDto>();
+        foreach (var part in value.Split(new[] { '\n', '\r', ';', '|' }, StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var comma = part.IndexOf(',');
+            var name = (comma > 0 ? part[..comma] : part).Trim();
+            if (name.Length > 0)
+                list.Add(new UploadIndexFieldDto(name, string.Empty));
+        }
+
+        return list.Count == 0 ? null : list;
     }
 
     private async Task<RepositoryDetailDto?> ResolveRepositoryForStageAsync(

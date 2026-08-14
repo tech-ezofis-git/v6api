@@ -26,6 +26,9 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
     private readonly IWorkflowRepository _repository;
     private readonly IUnitOfWork _unitOfWork;
     private readonly IWorkflowStartAttachmentUploader? _attachmentUploader;
+    private readonly IWorkflowApAgentMoveNextService _apAgentMoveNext;
+    private readonly IWorkflowEzfbFormDataLoader _ezfbFormDataLoader;
+    private readonly IWorkflowAttachmentArchiveService? _attachmentArchive;
     private readonly IConfiguration _configuration;
     private readonly ILogger<WorkflowStartBootstrapService> _logger;
 
@@ -35,34 +38,53 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         IWorkflowLegacyMailboxSyncService legacyMailboxSync,
         IWorkflowRepository repository,
         IUnitOfWork unitOfWork,
+        IWorkflowApAgentMoveNextService apAgentMoveNext,
+        IWorkflowEzfbFormDataLoader ezfbFormDataLoader,
         IConfiguration configuration,
         ILogger<WorkflowStartBootstrapService> logger,
-        IWorkflowStartAttachmentUploader? attachmentUploader = null)
+        IWorkflowStartAttachmentUploader? attachmentUploader = null,
+        IWorkflowAttachmentArchiveService? attachmentArchive = null)
     {
         _tenantContext = tenantContext;
         _legacyTransactionSync = legacyTransactionSync;
         _legacyMailboxSync = legacyMailboxSync;
         _repository = repository;
         _unitOfWork = unitOfWork;
+        _apAgentMoveNext = apAgentMoveNext;
+        _ezfbFormDataLoader = ezfbFormDataLoader;
         _configuration = configuration;
         _logger = logger;
         _attachmentUploader = attachmentUploader;
+        _attachmentArchive = attachmentArchive;
     }
 
     public async Task<WorkflowStartBootstrapResult> RunAsync(
         WorkflowStartBootstrapRequest request,
         CancellationToken cancellationToken = default)
     {
-        var workflow = request.Workflow;
-        var instance = request.Instance;
-        var userId = request.UserId;
-        var orderedSteps = workflow.Steps.OrderBy(s => s.Order).ToList();
+        var orderedSteps = request.Workflow.Steps.OrderBy(s => s.Order).ToList();
         var startStep = orderedSteps.FirstOrDefault()
             ?? throw new InvalidOperationException("Workflow has no steps.");
 
-        var apAgentStep = WorkflowStepTransitionHelper.ResolveApAgentStep(orderedSteps)
-            ?? throw new InvalidOperationException(
-                "No AP agent step found (StepName 'Ap Agent' or Order = 2).");
+        var dedicatedApAgent = WorkflowStepTransitionHelper.TryResolveDedicatedApAgentStep(orderedSteps);
+        if (dedicatedApAgent == null)
+        {
+            return await RunNormalBootstrapAsync(request, orderedSteps, startStep, cancellationToken);
+        }
+
+        return await RunApAgentBootstrapAsync(request, orderedSteps, startStep, dedicatedApAgent, cancellationToken);
+    }
+
+    private async Task<WorkflowStartBootstrapResult> RunApAgentBootstrapAsync(
+        WorkflowStartBootstrapRequest request,
+        IReadOnlyList<WorkflowStep> orderedSteps,
+        WorkflowStep startStep,
+        WorkflowStep apAgentStep,
+        CancellationToken cancellationToken)
+    {
+        var workflow = request.Workflow;
+        var instance = request.Instance;
+        var userId = request.UserId;
 
         var startActivityId = !string.IsNullOrWhiteSpace(startStep.ActivityId)
             ? startStep.ActivityId
@@ -237,6 +259,238 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             formDataJson,
             blobRelativePath,
             payloadDict);
+    }
+
+    private async Task<WorkflowStartBootstrapResult> RunNormalBootstrapAsync(
+        WorkflowStartBootstrapRequest request,
+        IReadOnlyList<WorkflowStep> orderedSteps,
+        WorkflowStep startStep,
+        CancellationToken cancellationToken)
+    {
+        var workflow = request.Workflow;
+        var instance = request.Instance;
+        var userId = request.UserId;
+
+        var connectionString = _tenantContext.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        var workflowSuffix = workflow.Id.ToString("N")[..8];
+        var repositoryGuid = await ResolveRepositoryGuidAsync(
+            connectionString,
+            instance.TenantId,
+            workflow.RepositoryId,
+            cancellationToken);
+
+        var formEntryItemId = await InsertFormEntryAsync(
+            connectionString,
+            workflow.FormId,
+            userId,
+            cancellationToken);
+
+        if (request.FormDataFields is { Count: > 0 } || !string.IsNullOrWhiteSpace(request.FormLineItemsJson))
+        {
+            await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
+                workflow.FormId!,
+                formEntryItemId,
+                request.FormDataFields ?? new Dictionary<string, string>(),
+                request.FormLineItemsJson,
+                cancellationToken);
+        }
+
+        var mailboxForm = await BuildMailboxFormSnapshotAsync(workflow.FormId, formEntryItemId, cancellationToken);
+
+        var startActivityId = !string.IsNullOrWhiteSpace(startStep.ActivityId)
+            ? startStep.ActivityId
+            : startStep.Id.ToString("D");
+
+        var reviewSync = await _legacyTransactionSync.SyncTransactionByActivityIdAsync(
+            workflow.Id,
+            instance.Id,
+            instance.ReferenceNumber,
+            startStep,
+            orderedSteps,
+            startActivityId,
+            userId,
+            startStep.AssignedToUserId ?? userId,
+            WorkflowStepTransitionHelper.StartProceedReview,
+            mailboxForm,
+            cancellationToken);
+
+        if (reviewSync.WorkflowInstanceId != instance.Id)
+        {
+            throw new InvalidOperationException(
+                $"Transaction row was not linked to workflow instance {instance.Id:D}.");
+        }
+
+        var nextDefinitionStep = WorkflowStepActionsHelper.ResolveNextStepByReview(
+                startStep,
+                WorkflowStepTransitionHelper.StartProceedReview,
+                orderedSteps)
+            ?? orderedSteps.FirstOrDefault(s => s.Order > startStep.Order);
+
+        if (reviewSync.Status is LegacyTransactionSyncStatus.ReviewUpdated
+            or LegacyTransactionSyncStatus.ReviewAlreadyUpdated
+            or LegacyTransactionSyncStatus.StepInserted
+            or LegacyTransactionSyncStatus.StepAlreadyThere)
+        {
+            WorkflowStepTransitionHelper.CompleteStepInstance(instance, startStep.Id, userId);
+            if (nextDefinitionStep != null && !reviewSync.WorkflowCompleted)
+                WorkflowStepTransitionHelper.StartStepInstance(instance, nextDefinitionStep.Id);
+            await _repository.UpdateInstanceAsync(instance, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+
+        var currentTransactionId = reviewSync.NextTransactionId
+            ?? reviewSync.CurrentTransactionId
+            ?? request.StartTransactionId;
+
+        Guid? repositoryItemId = null;
+        string? blobPath = null;
+
+        if (_attachmentArchive != null && request.StagedFiles is { Count: > 0 })
+        {
+            foreach (var staged in request.StagedFiles.Where(s => s.RepositoryId != Guid.Empty && s.FileId != Guid.Empty))
+            {
+                var archived = await _attachmentArchive.PromoteFromStageAsync(
+                    instance.TenantId,
+                    workflow.Id,
+                    instance.Id,
+                    staged.RepositoryId,
+                    staged.FileId,
+                    currentTransactionId,
+                    userId,
+                    cancellationToken);
+                if (archived != null)
+                {
+                    repositoryItemId ??= archived.ItemId;
+                    blobPath ??= archived.FilePath;
+                }
+            }
+        }
+
+        if (request.AttachmentStream != null
+            && !string.IsNullOrWhiteSpace(request.AttachmentFileName)
+            && _attachmentArchive != null
+            && repositoryGuid is Guid repoId)
+        {
+            var archived = await _attachmentArchive.UploadAsync(
+                instance.TenantId,
+                workflow.Id,
+                instance.Id,
+                repoId,
+                request.AttachmentStream,
+                request.AttachmentFileName,
+                request.AttachmentContentType,
+                request.AttachmentStream.CanSeek ? request.AttachmentStream.Length : null,
+                metadataJson: null,
+                currentTransactionId,
+                userId,
+                cancellationToken);
+            repositoryItemId ??= archived.ItemId;
+            blobPath ??= archived.FilePath;
+        }
+
+        await InsertProcessFormRowAsync(
+            connectionString,
+            workflowSuffix,
+            instance.Id,
+            workflow.FormId,
+            formEntryItemId,
+            userId,
+            cancellationToken);
+
+        var transactionGuid = reviewSync.NextTransactionGuid
+            ?? await ResolveTransactionGuidAsync(
+                connectionString,
+                workflowSuffix,
+                currentTransactionId,
+                cancellationToken);
+
+        var nextStepInstance = nextDefinitionStep != null
+            ? WorkflowStepTransitionHelper.FindStepInstance(instance, nextDefinitionStep.Id)
+            : null;
+
+        var payload = BuildStartPayload(
+            blobPath,
+            request.EnvType ?? _configuration["WorkflowStart:EnvType"] ?? "trial",
+            instance.TenantId,
+            workflow.Id,
+            repositoryGuid,
+            repositoryItemId,
+            instance.Id,
+            transactionGuid,
+            formEntryItemId,
+            workflow.FormId);
+
+        var formDataJson = JsonSerializer.Serialize(payload, PayloadJsonOptions);
+        var wFormId = ResolveWFormIdInt(connectionString, workflow.FormId);
+
+        await InsertWorkflowFormRowAsync(
+            connectionString,
+            workflowSuffix,
+            instance.TenantId,
+            instance.Id,
+            nextStepInstance?.Id,
+            wFormId,
+            formEntryItemId,
+            formDataJson,
+            userId,
+            cancellationToken);
+
+        var blobRelativePath = await SavePayloadToBlobAsync(
+            instance.TenantId,
+            formDataJson,
+            cancellationToken);
+
+        if (reviewSync.CurrentTransactionId is > 0)
+        {
+            await _legacyMailboxSync.SyncTransactionRowAsync(
+                workflow.Id,
+                reviewSync.CurrentTransactionId.Value,
+                cancellationToken);
+        }
+
+        if (reviewSync.NextTransactionId is > 0)
+        {
+            await _legacyMailboxSync.SyncTransactionRowAsync(
+                workflow.Id,
+                reviewSync.NextTransactionId.Value,
+                cancellationToken);
+        }
+
+        _logger.LogInformation(
+            "Normal start bootstrap completed for instance {InstanceId}: transaction {TransactionId}, form entry {FormEntryId}, next step {NextStep}",
+            instance.Id,
+            currentTransactionId,
+            formEntryItemId,
+            nextDefinitionStep?.Name);
+
+        return new WorkflowStartBootstrapResult(
+            reviewSync.CurrentTransactionId,
+            currentTransactionId,
+            formEntryItemId,
+            nextStepInstance?.Id,
+            formDataJson,
+            blobRelativePath,
+            payload.ToDictionary(kv => kv.Key, kv => (object?)kv.Value));
+    }
+
+    private async Task<MailboxFormSnapshot?> BuildMailboxFormSnapshotAsync(
+        string? formId,
+        int formEntryItemId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(formId) || formEntryItemId <= 0)
+            return null;
+
+        var formDataJson = await _ezfbFormDataLoader.LoadFormDataJsonAsync(
+            formId,
+            formEntryItemId,
+            cancellationToken);
+
+        return string.IsNullOrWhiteSpace(formDataJson)
+            ? null
+            : new MailboxFormSnapshot(formId, formEntryItemId, formDataJson);
     }
 
     /// <summary>Blob / WorkflowForms FormData JSON (GUID strings for ids).</summary>

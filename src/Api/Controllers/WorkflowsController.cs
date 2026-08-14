@@ -7,6 +7,8 @@ using SaaSApp.MultiTenancy;
 using SaaSApp.Security;
 using System.Text.Json;
 using System.Security.Claims;
+using SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
+using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Application.Workflows.Commands.AddWorkflowStep;
 using SaaSApp.Workflow.Application.Workflows.Commands.CreateWorkflow;
@@ -25,7 +27,6 @@ using SaaSApp.Workflow.Application.Workflows.Queries.GetSlaStatus;
 using SaaSApp.Workflow.Application.Workflows.Queries.ListSlaBreaches;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetWorkflowCounts;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetWorkflowWiseInboxCounts;
-using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Forms;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetLegacyMailboxInstanceCount;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetLegacyMailboxList;
@@ -33,7 +34,6 @@ using SaaSApp.Workflow.Application.Workflows.Commands.AddComment;
 using SaaSApp.Workflow.Application.Workflows.Commands.AddAttachment;
 using SaaSApp.Workflow.Application.Workflows.Commands.ApproveStep;
 using SaaSApp.Workflow.Application.Workflows.Commands.RejectStep;
-using SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
 using SaaSApp.Workflow.Application.Workflows.Commands.PerformAction;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetInstanceComments;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetInstanceAttachments;
@@ -1044,6 +1044,8 @@ public sealed class WorkflowsController : ControllerBase
         IFormFile? file,
         [FromForm] string? context,
         [FromForm] string? envType,
+        [FromForm] string? formData,
+        [FromForm] string? fileIds,
         CancellationToken cancellationToken)
     {
         StartWorkflowAttachmentPayload? attachment = null;
@@ -1057,6 +1059,11 @@ public sealed class WorkflowsController : ControllerBase
                 file.ContentType);
         }
 
+        var parsedForm = ParseStartFormData(formData);
+        var stagedFiles = ParseStartStagedFiles(fileIds);
+        var workflowSteps = await LoadWorkflowStepsForStartAsync(id, cancellationToken);
+        var hasApAgent = HasDedicatedApAgentStep(workflowSteps);
+
         return await ExecuteStartAsync(
             id,
             new StartWorkflowCommand(
@@ -1064,12 +1071,16 @@ public sealed class WorkflowsController : ControllerBase
                 context,
                 envType,
                 attachment,
-                TriggerApAgentPythonJob: attachment is { Content.Length: > 0 }),
+                TriggerApAgentPythonJob: hasApAgent && attachment is { Content.Length: > 0 },
+                parsedForm.Fields,
+                parsedForm.LineItemsJson,
+                stagedFiles),
             cancellationToken);
     }
 
     /// <summary>
-    /// Start a workflow instance (JSON). Optional base64 attachment in body. Does not enqueue AP Agent Python job.
+    /// Start a workflow instance (JSON). Optional formData, staged fileIds, and base64 attachment.
+    /// Does not enqueue AP Agent Python job unless workflow has a dedicated AP Agent step and a file is attached.
     /// </summary>
     [HttpPost("{id:guid}/start/json")]
     [Consumes("application/json")]
@@ -1078,11 +1089,119 @@ public sealed class WorkflowsController : ControllerBase
     public async Task<IActionResult> StartWithJson(
         Guid id,
         [FromBody] StartWorkflowRequest? request,
-        CancellationToken cancellationToken) =>
-        await ExecuteStartAsync(
+        CancellationToken cancellationToken)
+    {
+        var parsedForm = ParseStartFormData(request?.FormData);
+        var stagedFiles = request?.StagedFiles;
+        var workflowSteps = await LoadWorkflowStepsForStartAsync(id, cancellationToken);
+        var hasApAgent = HasDedicatedApAgentStep(workflowSteps);
+
+        return await ExecuteStartAsync(
             id,
-            new StartWorkflowCommand(id, request?.Context, request?.EnvType, request?.Attachment),
+            new StartWorkflowCommand(
+                id,
+                request?.Context,
+                request?.EnvType,
+                request?.Attachment,
+                TriggerApAgentPythonJob: hasApAgent && request?.Attachment is { Content.Length: > 0 },
+                parsedForm.Fields,
+                parsedForm.LineItemsJson,
+                stagedFiles),
             cancellationToken);
+    }
+
+    private async Task<IReadOnlyList<WorkflowStepItem>?> LoadWorkflowStepsForStartAsync(
+        Guid workflowId,
+        CancellationToken cancellationToken)
+    {
+        var workflow = await _mediator.Send(new GetWorkflowByIdQuery(workflowId), cancellationToken);
+        return workflow?.Steps;
+    }
+
+    private static bool HasDedicatedApAgentStep(IReadOnlyList<WorkflowStepItem>? steps) =>
+        steps?.Any(s =>
+            string.Equals(s.StageType, "AP_AGENT", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s.Name, "Ap Agent", StringComparison.OrdinalIgnoreCase)) == true;
+
+    private static (IReadOnlyDictionary<string, string>? Fields, string? LineItemsJson) ParseStartFormData(string? formDataJson)
+    {
+        if (string.IsNullOrWhiteSpace(formDataJson))
+            return (null, null);
+
+        try
+        {
+            using var doc = JsonDocument.Parse(formDataJson);
+            var parsed = MoveToNextStepFormDataParser.Parse(doc.RootElement);
+            return (parsed.Fields, parsed.LineItemsJson);
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException($"Invalid formData JSON: {ex.Message}", ex);
+        }
+    }
+
+    private static (IReadOnlyDictionary<string, string>? Fields, string? LineItemsJson) ParseStartFormData(JsonElement? formData)
+    {
+        if (!formData.HasValue || formData.Value.ValueKind == JsonValueKind.Null)
+            return (null, null);
+
+        var parsed = MoveToNextStepFormDataParser.Parse(formData.Value);
+        return (parsed.Fields, parsed.LineItemsJson);
+    }
+
+    private static IReadOnlyList<StartWorkflowStagedFileRef>? ParseStartStagedFiles(string? fileIdsJson)
+    {
+        if (string.IsNullOrWhiteSpace(fileIdsJson))
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(fileIdsJson);
+            return ParseStartStagedFiles(doc.RootElement);
+        }
+        catch (JsonException ex)
+        {
+            throw new ArgumentException($"Invalid fileIds JSON: {ex.Message}", ex);
+        }
+    }
+
+    private static IReadOnlyList<StartWorkflowStagedFileRef>? ParseStartStagedFiles(JsonElement? fileIds)
+    {
+        if (!fileIds.HasValue)
+            return null;
+
+        var element = fileIds.Value;
+        if (element.ValueKind == JsonValueKind.Null)
+            return null;
+
+        var list = new List<StartWorkflowStagedFileRef>();
+        if (element.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var item in element.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+                if (!TryReadGuid(item, "repositoryId", out var repoId) && !TryReadGuid(item, "RepositoryId", out repoId))
+                    continue;
+                if (!TryReadGuid(item, "fileId", out var fileId) && !TryReadGuid(item, "FileId", out fileId))
+                    continue;
+                if (repoId != Guid.Empty && fileId != Guid.Empty)
+                    list.Add(new StartWorkflowStagedFileRef(repoId, fileId));
+            }
+        }
+
+        return list.Count == 0 ? null : list;
+    }
+
+    private static bool TryReadGuid(JsonElement obj, string propertyName, out Guid value)
+    {
+        value = Guid.Empty;
+        if (!obj.TryGetProperty(propertyName, out var prop))
+            return false;
+        if (prop.ValueKind == JsonValueKind.String && Guid.TryParse(prop.GetString(), out value))
+            return true;
+        return false;
+    }
 
     private async Task<IActionResult> ExecuteStartAsync(
         Guid workflowId,
@@ -2226,7 +2345,9 @@ public record UpdateWorkflowRequest(
 public record StartWorkflowRequest(
     string? Context = null,
     string? EnvType = null,
-    StartWorkflowAttachmentPayload? Attachment = null);
+    StartWorkflowAttachmentPayload? Attachment = null,
+    JsonElement? FormData = null,
+    IReadOnlyList<StartWorkflowStagedFileRef>? StagedFiles = null);
 
 /// <summary>Request to set SLA policy for a workflow.</summary>
 public record SetWorkflowSlaRequest(SlaPriority Priority, int ResponseTimeMinutes, int ResolutionTimeMinutes, int? EscalationTimeMinutes = null, Guid? EscalateToUserId = null, string? EscalateToRole = null, bool SendNotificationOnBreach = true, string? NotificationEmails = null);
