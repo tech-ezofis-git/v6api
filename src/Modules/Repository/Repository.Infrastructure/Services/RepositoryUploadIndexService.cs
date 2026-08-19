@@ -190,7 +190,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         await RepositoryStageStore.UpdateFieldsAsync(
@@ -232,7 +232,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
