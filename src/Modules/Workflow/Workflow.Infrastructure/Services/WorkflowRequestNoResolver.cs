@@ -1,7 +1,7 @@
 using System.Globalization;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
@@ -44,7 +44,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     public static async Task<string?> ResolveAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowId,
         Guid instanceId,
         CancellationToken cancellationToken)
@@ -64,7 +64,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     public static async Task<Dictionary<Guid, string>> ResolveManyAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         Guid workflowId,
         IReadOnlyList<Guid> instanceIds,
         CancellationToken cancellationToken)
@@ -88,7 +88,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task<string?> LoadFromInstanceAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         Guid instanceId,
         CancellationToken cancellationToken)
@@ -99,34 +99,34 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task FillFromInstanceAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         IReadOnlyList<Guid> instanceIds,
         Dictionary<Guid, string> result,
         CancellationToken cancellationToken)
     {
-        var tableName = $"WorkflowInstances_{suffix}";
+        var tableName = $"workflow_instances_{suffix}";
         if (!await TableExistsAsync(connection, "workflow", tableName, cancellationToken))
             return;
 
-        var hasRequestNo = await ColumnExistsAsync(connection, "workflow", tableName, "RequestNo", cancellationToken);
-        var hasReference = await ColumnExistsAsync(connection, "workflow", tableName, "ReferenceNumber", cancellationToken);
+        var hasRequestNo = await ColumnExistsAsync(connection, "workflow", tableName, "request_no", cancellationToken);
+        var hasReference = await ColumnExistsAsync(connection, "workflow", tableName, "reference_number", cancellationToken);
         if (!hasRequestNo && !hasReference)
             return;
 
         var selectCols = hasRequestNo && hasReference
-            ? "Id, ReferenceNumber, RequestNo"
+            ? "id, reference_number, request_no"
             : hasReference
-                ? "Id, ReferenceNumber"
-                : "Id, RequestNo";
+                ? "id, reference_number"
+                : "id, request_no";
 
         var sql = $"""
             SELECT {selectCols}
-            FROM workflow.[{tableName}]
-            WHERE Id IN ({BuildGuidInClause(instanceIds.Count, "n")});
+            FROM workflow.{tableName}
+            WHERE id IN ({BuildGuidInClause(instanceIds.Count, "n")});
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         BindGuids(cmd, "n", instanceIds);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -141,7 +141,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task<string?> LoadFromMailboxAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         Guid instanceId,
         CancellationToken cancellationToken)
@@ -152,7 +152,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task FillFromMailboxAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         IReadOnlyList<Guid> instanceIds,
         Dictionary<Guid, string> result,
@@ -161,14 +161,14 @@ internal static class WorkflowRequestNoResolver
         var idD = instanceIds.Select(id => id.ToString("D")).ToList();
         var idN = instanceIds.Select(id => id.ToString("N")).ToList();
 
-        foreach (var prefix in new[] { "Inbox", "Sent", "Completed" })
+        foreach (var prefix in new[] { "inbox", "sent", "completed" })
         {
             var tableName = $"{prefix}_{suffix}";
             if (!await TableExistsAsync(connection, "workflow", tableName, cancellationToken))
                 continue;
-            if (!await ColumnExistsAsync(connection, "workflow", tableName, "referenceNumber", cancellationToken))
+            if (!await ColumnExistsAsync(connection, "workflow", tableName, "reference_number", cancellationToken))
                 continue;
-            if (!await ColumnExistsAsync(connection, "workflow", tableName, "workflowInstanceId", cancellationToken))
+            if (!await ColumnExistsAsync(connection, "workflow", tableName, "workflow_instance_id", cancellationToken))
                 continue;
 
             var remaining = instanceIds.Where(id => !result.ContainsKey(id)).ToList();
@@ -176,17 +176,17 @@ internal static class WorkflowRequestNoResolver
                 return;
 
             var sql = $"""
-                SELECT workflowInstanceId, referenceNumber
-                FROM workflow.[{tableName}]
-                WHERE referenceNumber IS NOT NULL
-                  AND LTRIM(RTRIM(referenceNumber)) <> ''
+                SELECT workflow_instance_id, reference_number
+                FROM workflow.{tableName}
+                WHERE reference_number IS NOT NULL
+                  AND LTRIM(RTRIM(reference_number)) <> ''
                   AND (
-                    workflowInstanceId IN ({BuildStringInClause(idD.Count, "d")})
-                    OR workflowInstanceId IN ({BuildStringInClause(idN.Count, "n")})
+                    workflow_instance_id IN ({BuildStringInClause(idD.Count, "d")})
+                    OR workflow_instance_id IN ({BuildStringInClause(idN.Count, "n")})
                   );
                 """;
 
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             BindStrings(cmd, "d", idD);
             BindStrings(cmd, "n", idN);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -202,7 +202,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task<string?> LoadFromProcessFormAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         Guid instanceId,
         CancellationToken cancellationToken)
@@ -213,26 +213,26 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task FillFromProcessFormAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string suffix,
         IReadOnlyList<Guid> instanceIds,
         Dictionary<Guid, string> result,
         CancellationToken cancellationToken)
     {
-        var tableName = $"processForm_{suffix}";
+        var tableName = $"process_form_{suffix}";
         if (!await TableExistsAsync(connection, "workflow", tableName, cancellationToken))
             return;
-        if (!await ColumnExistsAsync(connection, "workflow", tableName, "WorkflowInstanceId", cancellationToken))
+        if (!await ColumnExistsAsync(connection, "workflow", tableName, "workflow_instance_id", cancellationToken))
             return;
 
         var sql = $"""
-            SELECT WorkflowInstanceId, MIN(Id)
-            FROM workflow.[{tableName}]
-            WHERE WorkflowInstanceId IN ({BuildGuidInClause(instanceIds.Count, "p")})
-            GROUP BY WorkflowInstanceId;
+            SELECT workflow_instance_id, MIN(id)
+            FROM workflow.{tableName}
+            WHERE workflow_instance_id IN ({BuildGuidInClause(instanceIds.Count, "p")})
+            GROUP BY workflow_instance_id;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         BindGuids(cmd, "p", instanceIds);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -244,17 +244,17 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string schema,
         string table,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT 1
-            FROM sys.tables
-            WHERE name = @Name AND schema_id = SCHEMA_ID(@Schema);
+            FROM information_schema.tables
+            WHERE table_name = @Name AND table_schema = @Schema;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Name", table);
         cmd.Parameters.AddWithValue("@Schema", schema);
         var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -262,7 +262,7 @@ internal static class WorkflowRequestNoResolver
     }
 
     private static async Task<bool> ColumnExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string schema,
         string table,
         string column,
@@ -270,12 +270,10 @@ internal static class WorkflowRequestNoResolver
     {
         const string sql = """
             SELECT 1
-            FROM sys.columns c
-            INNER JOIN sys.tables t ON c.object_id = t.object_id
-            INNER JOIN sys.schemas s ON t.schema_id = s.schema_id
-            WHERE t.name = @Table AND s.name = @Schema AND c.name = @Column;
+            FROM information_schema.columns
+            WHERE table_name = @Table AND table_schema = @Schema AND column_name = @Column;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Table", table);
         cmd.Parameters.AddWithValue("@Schema", schema);
         cmd.Parameters.AddWithValue("@Column", column);
@@ -289,13 +287,13 @@ internal static class WorkflowRequestNoResolver
     private static string BuildStringInClause(int count, string prefix) =>
         string.Join(", ", Enumerable.Range(0, count).Select(i => $"@{prefix}{i}"));
 
-    private static void BindGuids(SqlCommand cmd, string prefix, IReadOnlyList<Guid> ids)
+    private static void BindGuids(NpgsqlCommand cmd, string prefix, IReadOnlyList<Guid> ids)
     {
         for (var i = 0; i < ids.Count; i++)
             cmd.Parameters.AddWithValue($"@{prefix}{i}", ids[i]);
     }
 
-    private static void BindStrings(SqlCommand cmd, string prefix, IReadOnlyList<string> values)
+    private static void BindStrings(NpgsqlCommand cmd, string prefix, IReadOnlyList<string> values)
     {
         for (var i = 0; i < values.Count; i++)
             cmd.Parameters.AddWithValue($"@{prefix}{i}", values[i]);

@@ -1,6 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
-using Microsoft.Data.SqlClient;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
@@ -38,30 +38,30 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
         var actor = ResolveActor(userId, profiles);
         var categoryFilter = string.IsNullOrWhiteSpace(category) ? null : category.Trim();
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);
 
         var sql = """
             SELECT
-                id, title, category, status, Message, Data, Severity,
-                CreatedAtUtc, createdAt, readStatus, CreatedByGuid
+                id, title, category, status, "Message", "Data", "Severity",
+                "CreatedAtUtc", "createdAt", "readStatus", "CreatedByGuid"
             FROM dbo.notification
-            WHERE isDeleted = 0
-              AND CreatedByGuid = @UserId
+            WHERE "isDeleted" = false
+              AND "CreatedByGuid" = @UserId
             """;
         if (categoryFilter != null)
             sql += """
-              
-              AND LOWER(LTRIM(RTRIM(ISNULL(category, '')))) = LOWER(@Category)
+
+              AND LOWER(LTRIM(RTRIM(COALESCE(category, '')))) = LOWER(@Category)
             """;
         sql += """
-            
-            ORDER BY ISNULL(CreatedAtUtc, '19000101') DESC, id DESC;
+
+            ORDER BY COALESCE("CreatedAtUtc", '1900-01-01'::timestamptz) DESC, id DESC;
             """;
 
         var items = new List<WorkflowNotificationItemDto>();
-        await using (var cmd = new SqlCommand(sql, connection))
+        await using (var cmd = new NpgsqlCommand(sql, connection))
         {
             cmd.Parameters.AddWithValue("@UserId", userId);
             if (categoryFilter != null)
@@ -122,21 +122,21 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);
 
         const string sql = """
             UPDATE dbo.notification
-            SET readStatus = 1,
-                ModifiedAtUtc = SYSUTCDATETIME()
-            OUTPUT INSERTED.id, INSERTED.readStatus
+            SET "readStatus" = 1,
+                "ModifiedAtUtc" = now()
             WHERE id = @Id
-              AND isDeleted = 0
-              AND CreatedByGuid = @UserId;
+              AND "isDeleted" = false
+              AND "CreatedByGuid" = @UserId
+            RETURNING id, "readStatus";
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", id);
         cmd.Parameters.AddWithValue("@UserId", userId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -158,20 +158,20 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);
 
         const string sql = """
             UPDATE dbo.notification
-            SET isDeleted = 1,
-                ModifiedAtUtc = SYSUTCDATETIME()
+            SET "isDeleted" = true,
+                "ModifiedAtUtc" = now()
             WHERE id = @Id
-              AND isDeleted = 0
-              AND CreatedByGuid = @UserId;
+              AND "isDeleted" = false
+              AND "CreatedByGuid" = @UserId;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Id", id);
         cmd.Parameters.AddWithValue("@UserId", userId);
         var rows = await cmd.ExecuteNonQueryAsync(cancellationToken);
@@ -286,7 +286,7 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
     }
 
     private static async Task EnrichMissingDataAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         List<WorkflowNotificationItemDto> items,
         CancellationToken cancellationToken)
     {
@@ -369,7 +369,7 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
     }
 
     private static async Task<Dictionary<Guid, InstanceEnrichment>> LoadInstanceEnrichmentAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IReadOnlyList<Guid> instanceIds,
         CancellationToken cancellationToken)
     {
@@ -378,12 +378,12 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
             return result;
 
         var lookupSql = $"""
-            SELECT InstanceId, WorkflowId, WorkflowName
-            FROM workflow.WorkflowInstanceLookup
-            WHERE InstanceId IN ({BuildGuidInClause(instanceIds.Count, "i")});
+            SELECT "InstanceId", "WorkflowId", "WorkflowName"
+            FROM workflow."WorkflowInstanceLookup"
+            WHERE "InstanceId" IN ({BuildGuidInClause(instanceIds.Count, "i")});
             """;
 
-        await using (var cmd = new SqlCommand(lookupSql, connection))
+        await using (var cmd = new NpgsqlCommand(lookupSql, connection))
         {
             BindGuids(cmd, "i", instanceIds);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
@@ -404,18 +404,18 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
         foreach (var group in groups)
         {
             var suffix = group.WorkflowId.ToString("N")[..8];
-            var tableName = $"WorkflowInstances_{suffix}";
+            var tableName = $"workflow_instances_{suffix}";
             if (!await TableExistsAsync(connection, "workflow", tableName, cancellationToken))
                 continue;
 
             var ids = group.InstanceIds;
             var sql = $"""
-                SELECT Id, WorkflowName
-                FROM workflow.[{tableName}]
-                WHERE Id IN ({BuildGuidInClause(ids.Count, "r")});
+                SELECT id, workflow_name
+                FROM workflow.{tableName}
+                WHERE id IN ({BuildGuidInClause(ids.Count, "r")});
                 """;
 
-            await using var cmd = new SqlCommand(sql, connection);
+            await using var cmd = new NpgsqlCommand(sql, connection);
             BindGuids(cmd, "r", ids);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             while (await reader.ReadAsync(cancellationToken))
@@ -436,7 +436,7 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
     }
 
     private static async Task<Dictionary<Guid, string>> LoadWorkflowNamesAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         IReadOnlyList<Guid> workflowIds,
         CancellationToken cancellationToken)
     {
@@ -445,13 +445,13 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
             return result;
 
         var sql = $"""
-            SELECT Id, Name
-            FROM workflow.Workflows
-            WHERE Id IN ({BuildGuidInClause(workflowIds.Count, "w")})
-              AND IsDeleted = 0;
+            SELECT "Id", "Name"
+            FROM workflow."Workflows"
+            WHERE "Id" IN ({BuildGuidInClause(workflowIds.Count, "w")})
+              AND "IsDeleted" = false;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         BindGuids(cmd, "w", workflowIds);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
@@ -465,17 +465,17 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
     }
 
     private static async Task<bool> TableExistsAsync(
-        SqlConnection connection,
+        NpgsqlConnection connection,
         string schema,
         string table,
         CancellationToken cancellationToken)
     {
         const string sql = """
             SELECT 1
-            FROM sys.tables
-            WHERE name = @Name AND schema_id = SCHEMA_ID(@Schema);
+            FROM information_schema.tables
+            WHERE table_name = @Name AND table_schema = @Schema;
             """;
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Name", table);
         cmd.Parameters.AddWithValue("@Schema", schema);
         var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
@@ -485,7 +485,7 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
     private static string BuildGuidInClause(int count, string prefix) =>
         string.Join(", ", Enumerable.Range(0, count).Select(i => $"@{prefix}{i}"));
 
-    private static void BindGuids(SqlCommand cmd, string prefix, IReadOnlyList<Guid> ids)
+    private static void BindGuids(NpgsqlCommand cmd, string prefix, IReadOnlyList<Guid> ids)
     {
         for (var i = 0; i < ids.Count; i++)
             cmd.Parameters.AddWithValue($"@{prefix}{i}", ids[i]);
