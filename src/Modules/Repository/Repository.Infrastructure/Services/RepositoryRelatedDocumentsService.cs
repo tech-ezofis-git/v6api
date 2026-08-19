@@ -99,20 +99,20 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
 
         await EnsureRelatedSchemaAsync(connectionString, cancellationToken);
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
         const string sql = """
-            SELECT Id, RelatedRepositoryId, RelatedItemId, MatchField, MatchValue, MatchScore, CreatedAtUtc
-            FROM repository.ItemRelatedDocuments
-            WHERE TenantId = @TenantId
-              AND RepositoryId = @RepositoryId
-              AND ItemId = @ItemId
-              AND IsDeleted = 0
-            ORDER BY CreatedAtUtc DESC, Id DESC;
+            SELECT "Id", "RelatedRepositoryId", "RelatedItemId", "MatchField", "MatchValue", "MatchScore", "CreatedAtUtc"
+            FROM repository."ItemRelatedDocuments"
+            WHERE "TenantId" = @TenantId
+              AND "RepositoryId" = @RepositoryId
+              AND "ItemId" = @ItemId
+              AND "IsDeleted" = false
+            ORDER BY "CreatedAtUtc" DESC, "Id" DESC;
             """;
 
-        await using var cmd = new SqlCommand(sql, connection);
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@TenantId", tenantId);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
@@ -207,19 +207,19 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
             .Select(g => g.First())
             .ToList();
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var tx = (SqlTransaction)await connection.BeginTransactionAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         // Replace semantics: soft-delete previous set for this source item.
-        await using (var clear = new SqlCommand(
+        await using (var clear = new NpgsqlCommand(
                          """
-                         UPDATE repository.ItemRelatedDocuments
-                         SET IsDeleted = 1
-                         WHERE TenantId = @TenantId
-                           AND RepositoryId = @RepositoryId
-                           AND ItemId = @ItemId
-                           AND IsDeleted = 0;
+                         UPDATE repository."ItemRelatedDocuments"
+                         SET "IsDeleted" = true
+                         WHERE "TenantId" = @TenantId
+                           AND "RepositoryId" = @RepositoryId
+                           AND "ItemId" = @ItemId
+                           AND "IsDeleted" = false;
                          """,
                          connection,
                          tx))
@@ -232,14 +232,14 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
 
         foreach (var item in items)
         {
-            await using var insert = new SqlCommand(
+            await using var insert = new NpgsqlCommand(
                 """
-                INSERT INTO repository.ItemRelatedDocuments
-                    (Id, TenantId, RepositoryId, ItemId, RelatedRepositoryId, RelatedItemId,
-                     MatchField, MatchValue, MatchScore, CreatedBy, CreatedAtUtc, IsDeleted)
+                INSERT INTO repository."ItemRelatedDocuments"
+                    ("Id", "TenantId", "RepositoryId", "ItemId", "RelatedRepositoryId", "RelatedItemId",
+                     "MatchField", "MatchValue", "MatchScore", "CreatedBy", "CreatedAtUtc", "IsDeleted")
                 VALUES
                     (@Id, @TenantId, @RepositoryId, @ItemId, @RelatedRepositoryId, @RelatedItemId,
-                     @MatchField, @MatchValue, @MatchScore, @CreatedBy, SYSUTCDATETIME(), 0);
+                     @MatchField, @MatchValue, @MatchScore, @CreatedBy, now(), false);
                 """,
                 connection,
                 tx);
@@ -729,9 +729,9 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         if (SchemaEnsured.ContainsKey(connectionString))
             return;
 
-        await using var connection = new SqlConnection(connectionString);
+        await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await using var cmd = new SqlCommand(EnsureRelatedSchemaSql, connection) { CommandTimeout = 120 };
+        await using var cmd = new NpgsqlCommand(EnsureRelatedSchemaSql, connection) { CommandTimeout = 120 };
         await cmd.ExecuteNonQueryAsync(cancellationToken);
         SchemaEnsured.TryAdd(connectionString, 0);
     }
@@ -776,28 +776,22 @@ public sealed class RepositoryRelatedDocumentsService : IRepositoryRelatedDocume
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
     private const string EnsureRelatedSchemaSql = """
-        IF NOT EXISTS (
-            SELECT 1 FROM sys.tables t
-            INNER JOIN sys.schemas s ON s.schema_id = t.schema_id
-            WHERE s.name = N'repository' AND t.name = N'ItemRelatedDocuments')
-        BEGIN
-            CREATE TABLE repository.ItemRelatedDocuments (
-                Id                      UNIQUEIDENTIFIER NOT NULL CONSTRAINT PK_ItemRelatedDocuments PRIMARY KEY DEFAULT NEWID(),
-                TenantId                UNIQUEIDENTIFIER NOT NULL,
-                RepositoryId            UNIQUEIDENTIFIER NOT NULL,
-                ItemId                  UNIQUEIDENTIFIER NOT NULL,
-                RelatedRepositoryId     UNIQUEIDENTIFIER NOT NULL,
-                RelatedItemId           UNIQUEIDENTIFIER NOT NULL,
-                MatchField              NVARCHAR(128) NULL,
-                MatchValue              NVARCHAR(450) NULL,
-                MatchScore              INT NULL,
-                CreatedBy               UNIQUEIDENTIFIER NULL,
-                CreatedAtUtc            DATETIME2(3) NOT NULL CONSTRAINT DF_ItemRelatedDocuments_CreatedAtUtc DEFAULT (SYSUTCDATETIME()),
-                IsDeleted               BIT NOT NULL CONSTRAINT DF_ItemRelatedDocuments_IsDeleted DEFAULT (0)
-            );
-            CREATE INDEX IX_ItemRelatedDocuments_Source
-                ON repository.ItemRelatedDocuments (TenantId, RepositoryId, ItemId, IsDeleted, CreatedAtUtc);
-        END
+        CREATE TABLE IF NOT EXISTS repository."ItemRelatedDocuments" (
+            "Id"                    uuid NOT NULL CONSTRAINT "PK_ItemRelatedDocuments" PRIMARY KEY,
+            "TenantId"              uuid NOT NULL,
+            "RepositoryId"          uuid NOT NULL,
+            "ItemId"                uuid NOT NULL,
+            "RelatedRepositoryId"   uuid NOT NULL,
+            "RelatedItemId"         uuid NOT NULL,
+            "MatchField"            varchar(128) NULL,
+            "MatchValue"            varchar(450) NULL,
+            "MatchScore"            integer NULL,
+            "CreatedBy"             uuid NULL,
+            "CreatedAtUtc"          timestamptz NOT NULL CONSTRAINT "DF_ItemRelatedDocuments_CreatedAtUtc" DEFAULT now(),
+            "IsDeleted"             boolean NOT NULL CONSTRAINT "DF_ItemRelatedDocuments_IsDeleted" DEFAULT false
+        );
+        CREATE INDEX IF NOT EXISTS "IX_ItemRelatedDocuments_Source"
+            ON repository."ItemRelatedDocuments" ("TenantId", "RepositoryId", "ItemId", "IsDeleted", "CreatedAtUtc");
         """;
 
     private sealed record MatchCriterion(string Key, string Value, string[] Aliases);
