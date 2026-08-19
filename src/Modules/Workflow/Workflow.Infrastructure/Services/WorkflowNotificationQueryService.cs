@@ -88,9 +88,7 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
                 var data = ParseData(dataJson);
                 var message = IsTicketSubmitted(status)
                     ? WorkflowNotificationMessageMapper.SubmittedMessage(ReadStageName(dataJson))
-                    : IsTicketReceived(status)
-                        ? WorkflowNotificationMessageMapper.ReceivedMessage(ReadStageName(dataJson))
-                        : storedMessage;
+                    : storedMessage;
 
                 items.Add(new WorkflowNotificationItemDto(
                     id,
@@ -221,9 +219,6 @@ public sealed class WorkflowNotificationQueryService : IWorkflowNotificationQuer
 
     private static bool IsTicketSubmitted(string? status) =>
         string.Equals(status, "Ticket Submitted", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsTicketReceived(string? status) =>
-        string.Equals(status, "Ticket Received", StringComparison.OrdinalIgnoreCase);
 
     private static string? ReadStageName(string? json)
     {

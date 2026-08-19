@@ -1,6 +1,6 @@
 namespace SaaSApp.Workflow.Application.Contracts;
 
-/// <summary>Inserts dbo.notification rows for move-next (Ticket Submitted / Ticket Received).</summary>
+/// <summary>Inserts a dbo.notification row for move-next (Ticket Received only).</summary>
 public interface IWorkflowMoveNotificationService
 {
     Task TryInsertMoveNotificationsAsync(
@@ -17,7 +17,7 @@ public sealed record WorkflowMoveNotificationContext(
     string? CurrentStageType,
     string? NextStageName,
     string? NextStageType,
-    /// <summary>Transaction ModifiedBy for Ticket Submitted (who submitted the review).</summary>
+    /// <summary>Current transaction ModifiedBy; used only if the received actor cannot be resolved.</summary>
     Guid SubmittedModifiedByUserId,
     /// <summary>Next transaction CreatedBy for Ticket Received; falls back to ModifiedBy when null.</summary>
     Guid? ReceivedCreatedByUserId,
