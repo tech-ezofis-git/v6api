@@ -9,7 +9,6 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 
 public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationService
 {
-    private const string TicketSubmitted = "Ticket Submitted";
     private const string TicketReceived = "Ticket Received";
     private const string SeverityInfo = "Info";
     private const string DetailsTab = "Details";
@@ -70,8 +69,6 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
 
             receivedTxn ??= submittedTxn;
 
-            var submittedStageName = FirstNonEmpty(submittedTxn?.StageName, context.CurrentStageName) ?? string.Empty;
-            var submittedStageType = FirstNonEmpty(submittedTxn?.StageType, context.CurrentStageType) ?? string.Empty;
             var receivedStageName = FirstNonEmpty(receivedTxn?.StageName, context.NextStageName, context.CurrentStageName) ?? string.Empty;
             var receivedStageType = FirstNonEmpty(receivedTxn?.StageType, context.NextStageType, context.CurrentStageType) ?? string.Empty;
 
@@ -84,22 +81,10 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
                     ? receivedFallback
                     : submittedActor;
 
-            var submittedCreatedAtUtc = submittedTxn?.ModifiedAt ?? submittedTxn?.CreatedAt;
             var receivedCreatedAtUtc = receivedTxn?.CreatedAt;
+            var receivedLegacyId = await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
+                connection, receivedActor, cancellationToken);
 
-            var submittedLegacyId = await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
-                connection, submittedActor, cancellationToken);
-            var receivedLegacyId = receivedActor == submittedActor
-                ? submittedLegacyId
-                : await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
-                    connection, receivedActor, cancellationToken);
-
-            var submittedData = BuildData(
-                context,
-                submittedStageName,
-                submittedStageType,
-                review,
-                submittedTxn);
             var receivedData = BuildData(
                 context,
                 receivedStageName,
@@ -107,32 +92,15 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
                 review,
                 receivedTxn);
 
-            var submittedTitle = string.IsNullOrWhiteSpace(submittedStageName)
-                ? "Ticket submitted"
-                : $"Ticket submitted to {submittedStageName}";
-            var submittedMessage = WorkflowNotificationMessageMapper.SubmittedMessage(submittedStageName);
-
-            var receivedTitle = "Ticket received information";
-            var receivedMessage = WorkflowNotificationMessageMapper.ReceivedMessage(receivedStageName);
+            var receivedText = WorkflowNotificationMessageMapper.ReceivedMessage(
+                context.WorkflowName,
+                context.InstanceId);
 
             await FormMasterFileNotificationStore.InsertMoveNotificationAsync(
                 connection,
-                title: submittedTitle,
-                status: TicketSubmitted,
-                message: submittedMessage,
-                data: submittedData,
-                severity: SeverityInfo,
-                createdAtUtc: submittedCreatedAtUtc,
-                createdByGuid: submittedActor,
-                createdByLegacyId: submittedLegacyId,
-                category: category,
-                cancellationToken);
-
-            await FormMasterFileNotificationStore.InsertMoveNotificationAsync(
-                connection,
-                title: receivedTitle,
+                title: receivedText,
                 status: TicketReceived,
-                message: receivedMessage,
+                message: receivedText,
                 data: receivedData,
                 severity: SeverityInfo,
                 createdAtUtc: receivedCreatedAtUtc,
@@ -142,7 +110,7 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
                 cancellationToken);
 
             _logger.LogInformation(
-                "Inserted Ticket Submitted and Ticket Received notifications for instance {InstanceId}.",
+                "Inserted Ticket Received notification for instance {InstanceId}.",
                 context.InstanceId);
         }
         catch (Exception ex)

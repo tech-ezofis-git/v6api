@@ -17,19 +17,14 @@ internal static class WorkflowNotificationMessageMapper
         return $"The ticket has been submitted for {stage}";
     }
 
-    public static string ReceivedMessage(string? stageName)
+    public static string ReceivedMessage(string? workflowName, Guid instanceId)
     {
-        var stage = stageName?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(stage))
-            return "You have received the ticket.";
+        var name = workflowName?.Trim();
+        var instanceSuffix = instanceId.ToString("N")[..8];
+        if (!string.IsNullOrWhiteSpace(name))
+            return $"Ticket received for {name} - {instanceSuffix}";
 
-        if (IsStart(stage))
-            return "You have received the ticket to initiate";
-
-        if (IsApprove(stage))
-            return "You have received the ticket for approve";
-
-        return $"You have received the ticket for {stage}";
+        return $"Ticket received - {instanceSuffix}";
     }
 
     private static bool IsStart(string stage) =>
