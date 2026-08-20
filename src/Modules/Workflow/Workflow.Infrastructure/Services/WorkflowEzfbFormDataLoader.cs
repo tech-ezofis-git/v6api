@@ -7,7 +7,11 @@ using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
-/// <summary>Reads ezfb row field values as JSON (jsonId keys) for inbox display.</summary>
+/// <summary>
+/// Reads ezfb row field values as JSON for inbox display. Old forms (jsonId-named columns) emit
+/// jsonId keys, unchanged. New forms (Label-named columns) emit the Label as the key, plus a
+/// jsonId alias, so both eras coexist without a table migration -- see EzfbColumnNaming.
+/// </summary>
 public sealed class WorkflowEzfbFormDataLoader : SaaSApp.Workflow.Application.Contracts.IWorkflowEzfbFormDataLoader
 {
     // Physical (snake_case unquoted) system columns -- see FormService.cs's
@@ -76,15 +80,21 @@ public sealed class WorkflowEzfbFormDataLoader : SaaSApp.Workflow.Application.Co
             return null;
 
         var normalizedFormId = FormIdNaming.NormalizeFormId(rawFormId);
-        var controls = await LoadFormControlJsonIdsAsync(connection, normalizedFormId, cancellationToken);
+        var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
 
         var selectColumns = new List<string>();
-        foreach (var jsonId in controls)
+        // Physical column -> (jsonId, Name, how it matched), so the JSON key can be chosen per
+        // column below: old-form (jsonId-named) columns keep emitting jsonId keys unchanged;
+        // new-form (Label-named) columns emit the human Name as the primary key (plus a jsonId
+        // alias, since it's cheap and helps a mixed/transitional FE).
+        var columnMeta = new Dictionary<string, (string? JsonId, string? Name, EzfbColumnNaming.EzfbColumnMatchKind Kind)>(StringComparer.OrdinalIgnoreCase);
+        foreach (var control in controls)
         {
-            if (TryResolveEzfbColumn(jsonId, ezfbColumns, out var col)
+            if (EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var col, out var kind)
                 && !selectColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
             {
                 selectColumns.Add(col);
+                columnMeta[col] = (control.JsonId, control.Name, kind);
             }
         }
 
@@ -121,16 +131,39 @@ WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL);";
         await using (var writer = new Utf8JsonWriter(stream))
         {
             writer.WriteStartObject();
+            var writtenKeys = new HashSet<string>(StringComparer.Ordinal);
             for (var i = 0; i < reader.FieldCount; i++)
             {
-                var name = reader.GetName(i);
-                if (string.IsNullOrWhiteSpace(name) || IsSystemColumn(name))
+                var physicalColumn = reader.GetName(i);
+                if (string.IsNullOrWhiteSpace(physicalColumn) || IsSystemColumn(physicalColumn))
                     continue;
 
                 var value = reader.IsDBNull(i)
                     ? string.Empty
                     : Convert.ToString(reader.GetValue(i), CultureInfo.InvariantCulture) ?? string.Empty;
-                writer.WriteString(name, value);
+
+                var outputKey = physicalColumn;
+                string? aliasKey = null;
+                if (columnMeta.TryGetValue(physicalColumn, out var meta))
+                {
+                    if (meta.Kind is EzfbColumnNaming.EzfbColumnMatchKind.ExactName or EzfbColumnNaming.EzfbColumnMatchKind.SanitizedName)
+                    {
+                        // New-form column: emit the human Label as the key, jsonId as a cheap alias.
+                        outputKey = !string.IsNullOrWhiteSpace(meta.Name) ? meta.Name!.Trim() : physicalColumn;
+                        aliasKey = !string.IsNullOrWhiteSpace(meta.JsonId) ? meta.JsonId!.Trim() : null;
+                    }
+                    else
+                    {
+                        // Old-form column: unchanged behavior, key stays the jsonId.
+                        outputKey = !string.IsNullOrWhiteSpace(meta.JsonId) ? meta.JsonId!.Trim() : physicalColumn;
+                    }
+                }
+
+                if (writtenKeys.Add(outputKey))
+                    writer.WriteString(outputKey, value);
+
+                if (aliasKey != null && writtenKeys.Add(aliasKey))
+                    writer.WriteString(aliasKey, value);
             }
 
             writer.WriteEndObject();
@@ -162,59 +195,27 @@ WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL);";
         return columns;
     }
 
-    private static async Task<List<string>> LoadFormControlJsonIdsAsync(
+    private sealed record ControlIdAndName(string JsonId, string? Name);
+
+    private static async Task<List<ControlIdAndName>> LoadFormControlsAsync(
         NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT "jsonId"
+            SELECT "jsonId", name
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId
               AND "isDeleted" = false
               AND "jsonId" IS NOT NULL
               AND TRIM("jsonId") <> ''
             """;
-        var jsonIds = new List<string>();
+        var controls = new List<ControlIdAndName>();
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", formId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-            jsonIds.Add(reader.GetString(0));
-        return jsonIds;
-    }
-
-    private static bool TryResolveEzfbColumn(string jsonId, IReadOnlySet<string> ezfbColumns, out string column)
-    {
-        column = string.Empty;
-        if (string.IsNullOrWhiteSpace(jsonId))
-            return false;
-
-        var trimmed = jsonId.Trim();
-        if (ezfbColumns.Contains(trimmed))
-        {
-            column = trimmed;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var fromJsonId) && ezfbColumns.Contains(fromJsonId))
-        {
-            column = fromJsonId;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var baseName)
-            && baseName.Length > 0
-            && char.IsDigit(baseName[0]))
-        {
-            var legacy = "F_" + baseName;
-            if (ezfbColumns.Contains(legacy))
-            {
-                column = legacy;
-                return true;
-            }
-        }
-
-        return false;
+            controls.Add(new ControlIdAndName(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+        return controls;
     }
 }

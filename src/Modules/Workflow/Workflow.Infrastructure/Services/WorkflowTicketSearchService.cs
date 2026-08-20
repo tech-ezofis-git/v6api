@@ -55,6 +55,12 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
         var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
 
+        // Resolve against the real ezfb table when it exists so the reported "column" is the
+        // actual physical column (Label-sanitized for new forms, jsonId-sanitized for old forms).
+        // Falls back to the jsonId-sanitized guess when the table isn't there yet.
+        var formSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
+        var ezfbColumns = await LoadTableColumnsAsync(connection, $"ezfb_{formSuffix}_items", cancellationToken);
+
         var fields = new List<WorkflowTicketFilterFieldDto>();
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var control in controls)
@@ -62,7 +68,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             if (string.IsNullOrWhiteSpace(control.JsonId))
                 continue;
 
-            if (!EzfbColumnNaming.TryToColumnName(control.JsonId, out var column))
+            string column;
+            if (ezfbColumns.Count > 0 && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var resolved))
+                column = resolved;
+            else if (!EzfbColumnNaming.TryToColumnName(control.JsonId, out column))
                 column = control.JsonId.Trim();
 
             if (!seen.Add(column))
@@ -773,7 +782,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         {
             if (!string.IsNullOrWhiteSpace(control.Name)
                 && string.Equals(control.Name.Trim(), key, StringComparison.OrdinalIgnoreCase)
-                && TryResolveEzfbColumn(control.JsonId, ezfbColumns, out column))
+                && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out column))
             {
                 return true;
             }
@@ -782,47 +791,13 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         foreach (var control in controls)
         {
             if (string.Equals(control.JsonId, key, StringComparison.OrdinalIgnoreCase)
-                && TryResolveEzfbColumn(control.JsonId, ezfbColumns, out column))
+                && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out column))
             {
                 return true;
             }
         }
 
-        return TryResolveEzfbColumn(key, ezfbColumns, out column);
-    }
-
-    private static bool TryResolveEzfbColumn(string jsonId, IReadOnlySet<string> ezfbColumns, out string column)
-    {
-        column = string.Empty;
-        if (string.IsNullOrWhiteSpace(jsonId))
-            return false;
-
-        var trimmed = jsonId.Trim();
-        if (ezfbColumns.Contains(trimmed))
-        {
-            column = trimmed;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var fromJsonId) && ezfbColumns.Contains(fromJsonId))
-        {
-            column = fromJsonId;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var baseName)
-            && baseName.Length > 0
-            && char.IsDigit(baseName[0]))
-        {
-            var legacy = "F_" + baseName;
-            if (ezfbColumns.Contains(legacy))
-            {
-                column = legacy;
-                return true;
-            }
-        }
-
-        return false;
+        return EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out column);
     }
 
     private static bool TryBuildOperatorCondition(

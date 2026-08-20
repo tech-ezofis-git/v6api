@@ -453,12 +453,26 @@ public sealed partial class FormService : IFormService
     }
 
     /// <summary>
+    /// System/reserved physical columns on dbo.ezfb_*_items (see below) -- a NEW form's
+    /// Label-derived column must never collide with one of these, so a colliding label gets a
+    /// numeric suffix the same way a duplicate label does (see <see cref="BuildFieldColumnsFromLabels"/>).
+    /// </summary>
+    private static readonly string[] ReservedEntryColumns =
+        { "item_id", "created_at", "modified_at", "created_by", "modified_by", "is_deleted", "today_task", "is_marked" };
+
+    /// <summary>
     /// dbo.ezfb_{id}_items -- trigger-based history (Decision 2) replaces SYSTEM_VERSIONING,
     /// same pattern already proven for workflow.WorkflowInstances (02_CreateTenantDatabase.sql)
     /// and repository items (StaticRepositoryProvisioner.cs). Column set is entirely dynamic
-    /// (one column per form field, sanitized via EzfbColumnNaming), so the trigger function's
-    /// explicit column list is built from the live field list, same approach as
-    /// StaticRepositoryProvisioner.BuildItemsTriggerFunctionScript.
+    /// (one column per form field), so the trigger function's explicit column list is built from
+    /// the live field list, same approach as StaticRepositoryProvisioner.BuildItemsTriggerFunctionScript.
+    ///
+    /// NEW forms (this table doesn't exist yet): column = sanitized field Label, e.g.
+    /// "PO Number" -&gt; "PO_Number" (EzfbColumnNaming.ToColumnNameFromLabel). wFormControl.jsonId is
+    /// still written unchanged by InsertControlAsync -- the designer still needs a stable field id
+    /// regardless of which naming era the ezfb table uses. OLD forms already have their table (this
+    /// method returns immediately above) and keep their existing jsonId-named columns forever; no
+    /// ALTER/migration ever runs against them from here.
     /// </summary>
     private static async Task EnsureFormEntryTableAsync(
         NpgsqlConnection connection,
@@ -472,7 +486,7 @@ public sealed partial class FormService : IFormService
         if (await TableExistsAsync(connection, tableName, cancellationToken))
             return;
 
-        var fieldCols = fields.Select(f => EscapeSqlIdentifier(f.Id!)).ToList();
+        var fieldCols = BuildFieldColumnsFromLabels(fields);
 
         // Fixed/system columns are snake_case unquoted (system-controlled, matching the
         // dynamic-DDL convention used everywhere else in this migration -- WorkflowTableCreator.cs,
@@ -496,8 +510,7 @@ public sealed partial class FormService : IFormService
         await using (var createCmd = new NpgsqlCommand(sb.ToString(), connection) { CommandTimeout = 120 })
             await createCmd.ExecuteNonQueryAsync(cancellationToken);
 
-        var reservedCols = new[] { "item_id", "created_at", "modified_at", "created_by", "modified_by", "is_deleted", "today_task", "is_marked" };
-        var allColsForTrigger = reservedCols.Concat(fieldCols.Select(c => $"\"{c}\"")).ToList();
+        var allColsForTrigger = ReservedEntryColumns.Concat(fieldCols.Select(c => $"\"{c}\"")).ToList();
         var colList = string.Join(", ", allColsForTrigger);
         var oldColList = string.Join(", ", allColsForTrigger.Select(c => $"OLD.{c}"));
 
@@ -536,6 +549,39 @@ public sealed partial class FormService : IFormService
 
     private static string EscapeSqlIdentifier(string name) =>
         EzfbColumnNaming.ToSqlBracketIdentifier(name);
+
+    /// <summary>
+    /// One ezfb column per field, named from the field's Label (falling back to its jsonId when
+    /// the label sanitizes to nothing, e.g. a label that is pure punctuation). Guards against two
+    /// kinds of collision, both resolved the same way -- append "_2", "_3", ... until free:
+    ///   - two fields whose labels sanitize to the same column ("PO Number" / "PO  Number")
+    ///   - a label that happens to sanitize to a reserved system column name (e.g. "Created At")
+    /// </summary>
+    private static List<string> BuildFieldColumnsFromLabels(List<FormFieldDto> fields)
+    {
+        var reserved = new HashSet<string>(ReservedEntryColumns, StringComparer.OrdinalIgnoreCase);
+        var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var columns = new List<string>(fields.Count);
+
+        foreach (var field in fields)
+        {
+            var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label! : field.Id!;
+            if (!EzfbColumnNaming.TryToColumnNameFromLabel(label, out var baseColumn) || string.IsNullOrWhiteSpace(baseColumn))
+                baseColumn = EscapeSqlIdentifier(field.Id!);
+
+            var candidate = baseColumn;
+            var suffix = 2;
+            while (reserved.Contains(candidate) || !used.Add(candidate))
+            {
+                candidate = $"{baseColumn}_{suffix}";
+                suffix++;
+            }
+
+            columns.Add(candidate);
+        }
+
+        return columns;
+    }
 
     /// <summary>Always allocates a new dashed GUID for dbo.wForm.id (designer uid stays in wForm.uid only).</summary>
     private static async Task<string> ResolveNewFormIdAsync(
