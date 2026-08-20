@@ -46,7 +46,7 @@ Edit `/opt/v6-hangfire/appsettings.Production.json` (or env vars). These are alr
   "ApAgent": {
     "Enabled": true,
     "ApiBaseUrl": "https://demo.ezofis.com/v6api/api/workflows",
-    "PythonServiceUrl": "https://REPLACE_WITH_PYTHON_HOST/api/ap-agent/run",
+    "PythonServiceUrl": "http://agents:8000/chat",
     "TimeoutMinutes": 30
   },
   "FormMasterFileImport": {

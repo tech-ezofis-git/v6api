@@ -4,6 +4,8 @@
 **Base path:** `/api/workflows`  
 **Auth:** JWT Bearer + `X-Tenant-Id` header (or JWT `tid` claim)
 
+**How to call agents `/chat` (OCR + AP curl + Azure URL):** see [CLOUD_OCR_AP_AGENT_CURL.md](./CLOUD_OCR_AP_AGENT_CURL.md).
+
 ---
 
 ## Quick reference
@@ -37,7 +39,7 @@ Frontend                          .NET API                         Python AP Age
 ```
 
 1. Workflow **start with file** (or `POST .../ap-agent/run?background=true`) creates a Hangfire job and returns `apAgentJobId`.
-2. .NET sends `startPayload` to Python. When `ApAgent:ApiBaseUrl` is configured, the payload includes callback URLs.
+2. .NET sends a `/chat` body (`intent=ap`, mapped `payload`) to the agents service. When `ApAgent:ApiBaseUrl` is configured, the payload includes callback URLs.
 3. **Python** calls `PATCH` progress as OCR / extraction / validation steps run.
 4. **Frontend** polls `GET` job status every **5 seconds** until `isTerminal` is `true`.
 
@@ -45,7 +47,7 @@ Frontend                          .NET API                         Python AP Age
 
 ## 1. Python — store progress (PATCH)
 
-Use the URL from `startPayload.apAgentProgressUrl` when present (recommended).  
+Use the URL from `payload.apAgentProgressUrl` when present (recommended).  
 Otherwise build:
 
 `PATCH /api/workflows/{workflowId}/instances/{instanceId}/ap-agent/progress`
@@ -110,7 +112,7 @@ def report_progress(progress_url: str, token: str, tenant_id: str,
     r.raise_for_status()  # expect 204
 ```
 
-### Fields injected into `startPayload` (background jobs)
+### Fields injected into `/chat` payload (background jobs)
 
 When the job runs via Hangfire and `ApAgent:ApiBaseUrl` is set (e.g. `https://api.example.com/api/workflows`):
 
@@ -229,11 +231,21 @@ async function pollApAgentStatus(jobId, token, tenantId) {
 ```json
 "ApAgent": {
   "Enabled": true,
-  "PythonServiceUrl": "http://localhost:8001/api/ap-agent/run",
+  "PythonServiceUrl": "http://agents:8000/chat",
   "TimeoutMinutes": 10,
-  "ApiBaseUrl": "https://your-api-host/api/workflows"
+  "ApiBaseUrl": "https://your-api-host/api/workflows",
+  "DefaultSkills": [
+    "extract_invoice",
+    "po_match",
+    "duplicate_detect",
+    "backorder_detect",
+    "finalize_decision",
+    "workflow_move_next"
+  ]
 }
 ```
+
+Hangfire posts the `/chat` body (`intent=ap`). Pass `skills` on `POST .../ap-agent/run` to override; omit/`[]` for full plan. Full curl samples: [CLOUD_OCR_AP_AGENT_CURL.md](./CLOUD_OCR_AP_AGENT_CURL.md).
 
 `ApiBaseUrl` must be the public base through which Python can reach the progress/status endpoints (used to populate `apAgentProgressUrl` / `apAgentJobStatusUrl` in the payload).
 
@@ -259,7 +271,7 @@ AP Agent Hangfire jobs **run in parallel** — one job per workflow start, no gl
 
 Increase `WorkerCount` when many customers start workflows at the same time (e.g. 20–50 for heavy load).
 
-**Python team:** If the `/api/ap-agent/run` endpoint blocks until OCR finishes, parallel Hangfire jobs will still pile up waiting on Python. Return **202 Accepted** quickly and run OCR in a worker thread/process.
+**Agents team:** If the `/chat` endpoint blocks until OCR finishes, parallel Hangfire jobs will still pile up waiting on agents. Return **202 Accepted** quickly and run OCR in a worker thread/process.
 
 ---
 

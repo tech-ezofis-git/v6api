@@ -1,3 +1,4 @@
+using System.Text.Json;
 using MediatR;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
@@ -15,6 +16,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly IWorkflowTableCreator _tableCreator;
     private readonly IWorkflowStartBootstrapService _startBootstrap;
     private readonly IApAgentPythonJobClient _apAgentPythonJobClient;
+    private readonly IApAgentPythonPipelineService _apAgentPythonPipeline;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
     private readonly ILogger<StartWorkflowCommandHandler> _logger;
 
@@ -26,6 +28,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         IWorkflowTableCreator tableCreator,
         IWorkflowStartBootstrapService startBootstrap,
         IApAgentPythonJobClient apAgentPythonJobClient,
+        IApAgentPythonPipelineService apAgentPythonPipeline,
         IApAgentJobProgressService apAgentJobProgress,
         ILogger<StartWorkflowCommandHandler> logger)
     {
@@ -36,6 +39,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _tableCreator = tableCreator;
         _startBootstrap = startBootstrap;
         _apAgentPythonJobClient = apAgentPythonJobClient;
+        _apAgentPythonPipeline = apAgentPythonPipeline;
         _apAgentJobProgress = apAgentJobProgress;
         _logger = logger;
     }
@@ -125,17 +129,31 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 bootstrap.CurrentTransactionId);
 
             string? apAgentJobId = null;
+            object? pythonInput = null;
+            // Empty/omitted → null (agents full plan). Non-empty → subset for /chat.
+            var skills = ApAgentStartPayloadJson.NormalizeSkills(request.Skills);
+            var formDataJson = ApAgentStartPayloadJson.MergeSkillsIntoPayloadJson(
+                bootstrap.FormDataJson,
+                skills);
+            var startPayload = ApAgentStartPayloadJson.MergeSkillsIntoStartPayload(
+                bootstrap.StartPayload,
+                skills);
+
             if (request.TriggerApAgentPythonJob
-                && !string.IsNullOrWhiteSpace(bootstrap.FormDataJson))
+                && !string.IsNullOrWhiteSpace(formDataJson))
             {
-                apAgentJobId = await _apAgentPythonJobClient.EnqueueAsync(
-                    new ApAgentPythonJobArgs(
-                        tenantId,
-                        userId,
-                        request.WorkflowId,
-                        instance.Id,
-                        bootstrap.FormDataJson),
-                    cancellationToken);
+                var jobArgs = new ApAgentPythonJobArgs(
+                    tenantId,
+                    userId,
+                    request.WorkflowId,
+                    instance.Id,
+                    formDataJson,
+                    Skills: skills);
+
+                apAgentJobId = await _apAgentPythonJobClient.EnqueueAsync(jobArgs, cancellationToken);
+
+                var chatJson = _apAgentPythonPipeline.BuildChatRequestJson(jobArgs, apAgentJobId);
+                pythonInput = JsonSerializer.Deserialize<JsonElement>(chatJson);
 
                 _logger.LogInformation(
                     "Enqueued AP Agent Python job {JobId} for instance {InstanceId} (multipart start with file).",
@@ -149,10 +167,12 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 bootstrap.CurrentTransactionId,
                 bootstrap.FormEntryId,
                 bootstrap.ApAgentStepInstanceId,
-                bootstrap.FormDataJson,
+                formDataJson,
                 bootstrap.FormDataBlobPath,
-                bootstrap.StartPayload,
-                apAgentJobId);
+                startPayload,
+                apAgentJobId,
+                skills,
+                pythonInput);
         }
         finally
         {

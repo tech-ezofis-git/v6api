@@ -9,6 +9,7 @@ using SaaSApp.Workflow.Infrastructure.Options;
 using SaaSApp.Workflow.Infrastructure.Persistence;
 using SaaSApp.Workflow.Infrastructure.Services;
 using SaaSApp.Workflow.Infrastructure.Services.ConnectorAdapters;
+using SaaSApp.SharedKernel.Options;
 
 namespace SaaSApp.Workflow.Infrastructure;
 
@@ -49,6 +50,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
             return new WorkflowDbContext(optionsBuilder.Options, tenantProvider);
         });
 
+        services.Configure<AgentsChatOptions>(configuration.GetSection(AgentsChatOptions.SectionName));
         services.AddScoped<IWorkflowInstanceStore, WorkflowInstanceStore>();
         services.AddScoped<IWorkflowRepository, WorkflowRepository>();
         services.AddScoped<IUnitOfWork, WorkflowUnitOfWork>();
@@ -93,12 +95,9 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IWorkflowLegacyTransactionSyncService, WorkflowLegacyTransactionSyncService>();
         services.AddScoped<IWorkflowInboxShareAssignmentService, WorkflowInboxShareAssignmentService>();
         services.AddScoped<IApDashboardQueryService, ApDashboardQueryService>();
-        services.Configure<ApDashboardInsightsOptions>(configuration.GetSection(ApDashboardInsightsOptions.SectionName));
-        services.AddHttpClient(nameof(ApDashboardInsightsClient), (sp, client) =>
+        services.AddHttpClient(nameof(ApDashboardInsightsClient), client =>
         {
-            var opts = sp.GetRequiredService<Microsoft.Extensions.Options.IOptions<ApDashboardInsightsOptions>>().Value;
-            var seconds = Math.Clamp(opts.TimeoutSeconds, 5, 300);
-            client.Timeout = TimeSpan.FromSeconds(seconds);
+            client.Timeout = TimeSpan.FromSeconds(ApDashboardInsightsDefaults.TimeoutSeconds);
         });
         services.AddScoped<IApDashboardInsightsClient, ApDashboardInsightsClient>();
         services.AddScoped<IWorkflowStepSyncService, WorkflowStepSyncService>();

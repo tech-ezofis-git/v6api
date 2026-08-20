@@ -154,7 +154,7 @@ API and Hangfire worker both need this connection string.
 },
 "ApAgent": {
   "Enabled": true,
-  "PythonServiceUrl": "https://<python-host>/api/ap-agent/run",
+  "PythonServiceUrl": "http://agents:8000/chat",
   "ApiBaseUrl": "https://<api-host>/V6API/api/workflows",
   "TimeoutMinutes": 30
 },

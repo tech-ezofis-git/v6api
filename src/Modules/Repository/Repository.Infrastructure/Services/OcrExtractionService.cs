@@ -1,27 +1,28 @@
-using System.Net.Http.Json;
+using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Options;
+using SaaSApp.SharedKernel.Options;
 
 namespace SaaSApp.Repository.Infrastructure.Services;
 
 public sealed class OcrExtractionService : IOcrExtractionService
 {
     private readonly HttpClient _httpClient;
-    private readonly RepositoryOcrOptions _options;
+    private readonly AgentsChatOptions _agentsChat;
     private readonly ILogger<OcrExtractionService> _logger;
 
     public OcrExtractionService(
         HttpClient httpClient,
-        IOptions<RepositoryOcrOptions> options,
+        IOptions<AgentsChatOptions> agentsChat,
         ILogger<OcrExtractionService> logger)
     {
         _httpClient = httpClient;
-        _options = options.Value;
+        _agentsChat = agentsChat.Value;
         _logger = logger;
-        _httpClient.Timeout = TimeSpan.FromMinutes(Math.Clamp(_options.TimeoutMinutes, 1, 30));
+        _httpClient.Timeout = TimeSpan.FromMinutes(RepositoryOcrDefaults.TimeoutMinutes);
     }
 
     public async Task<OcrExtractionResult> ExtractFromFileAsync(
@@ -41,113 +42,98 @@ public sealed class OcrExtractionService : IOcrExtractionService
         if (parameters.Count == 0)
             throw new ArgumentException("At least one OCR parameter is required in fields.");
 
-        var apiUrl = _options.UploadForOcrApiUrl?.Trim();
+        var apiUrl = _agentsChat.ResolveChatUrl();
         if (string.IsNullOrWhiteSpace(apiUrl))
         {
             throw new InvalidOperationException(
-                "Repository:Ocr:UploadForOcrApiUrl is not configured in appsettings.");
+                "Agents:ChatUrl is not configured in appsettings.");
         }
 
-        var resolvedPageNo = ResolvePageNo(pageNo, _options.PageNo);
-        var resolvedOcrType = ResolveOcrType(ocrType, _options.OcrType);
-        var resolvedValidateType = ResolveValidateType(validateType, _options.ValidateType);
-
-        var payload = BuildPayload(
-            fileBytes,
-            parameters,
-            tableParameters,
-            resolvedPageNo,
-            resolvedOcrType,
-            resolvedValidateType,
-            filename,
-            repositoryId);
+        var resolvedPageNo = ResolvePageNo(pageNo, RepositoryOcrDefaults.DefaultPageNo);
 
         _logger.LogInformation(
-            "Calling OCR API {Url} with {ParameterCount} parameters ({Parameters}), pageno={PageNo}, ocrtype={OcrType}, file size {FileSize} bytes",
+            "Calling OCR /chat {Url} with {ParameterCount} parameters, pageno={PageNo}, file size {FileSize} bytes",
             apiUrl,
             parameters.Count,
-            string.Join("; ", parameters),
             resolvedPageNo,
-            resolvedOcrType,
             fileBytes.Length);
 
-        var rawJson = await PostAsync(apiUrl, payload, cancellationToken);
-
-        if (IsNoTextExtractedError(rawJson)
-            && !string.Equals(resolvedOcrType, "tesseract", StringComparison.OrdinalIgnoreCase))
-        {
-            _logger.LogInformation(
-                "OCR returned no text with ocrtype={OcrType}; retrying with tesseract",
-                resolvedOcrType);
-
-            payload["ocrtype"] = "tesseract";
-            rawJson = await PostAsync(apiUrl, payload, cancellationToken);
-        }
+        var rawJson = await PostMultipartAsync(
+            apiUrl, fileBytes, parameters, tableParameters,
+            resolvedPageNo, filename, cancellationToken);
 
         var fieldList = OcrResultParser.TryParseFieldList(rawJson);
         return new OcrExtractionResult(rawJson, fieldList);
     }
 
-    private async Task<string> PostAsync(string apiUrl, Dictionary<string, object> payload, CancellationToken cancellationToken)
-    {
-        var logPayload = new Dictionary<string, object>(payload);
-        if (logPayload.TryGetValue("filepath", out var filepath) && filepath is string filepathText && filepathText.Length > 80)
-            logPayload["filepath"] = filepathText[..80] + "...";
-        if (logPayload.TryGetValue("file", out var file) && file is string fileText && fileText.Length > 80)
-            logPayload["file"] = fileText[..80] + "...";
-
-        _logger.LogDebug("OCR API request payload: {Payload}", JsonSerializer.Serialize(logPayload));
-
-        using var response = await _httpClient.PostAsJsonAsync(apiUrl, payload, cancellationToken);
-        var rawJson = await response.Content.ReadAsStringAsync(cancellationToken);
-
-        if (!response.IsSuccessStatusCode)
-        {
-            _logger.LogWarning("OCR API returned {StatusCode}: {Body}", (int)response.StatusCode, rawJson);
-            throw new InvalidOperationException(
-                $"OCR API failed ({(int)response.StatusCode}): {Truncate(rawJson, 500)}");
-        }
-
-        return rawJson;
-    }
-
-    private static Dictionary<string, object> BuildPayload(
+    private async Task<string> PostMultipartAsync(
+        string apiUrl,
         byte[] fileBytes,
         IReadOnlyList<string> parameters,
         IReadOnlyList<Dictionary<string, IReadOnlyList<string>>>? tableParameters,
         string pageNo,
-        string ocrType,
-        string validateType,
         string? filename,
-        Guid? repositoryId)
+        CancellationToken cancellationToken)
     {
-        var base64 = Convert.ToBase64String(fileBytes);
-        var payload = new Dictionary<string, object>
+        using var form = new MultipartFormDataContent();
+
+        form.Add(new StringContent($"ocr-{Guid.NewGuid():N}"), "session_id");
+        form.Add(new StringContent("ocr"), "intent");
+        form.Add(new StringContent(pageNo), "pageno");
+        form.Add(new StringContent(RepositoryOcrDefaults.Instruction), "instruction");
+
+        var parametersJson = JsonSerializer.Serialize(parameters);
+        form.Add(new StringContent(parametersJson), "parameters");
+
+        var tableParamsJson = tableParameters is { Count: > 0 }
+            ? JsonSerializer.Serialize(tableParameters)
+            : "[]";
+        form.Add(new StringContent(tableParamsJson), "tableparameters");
+
+        var fileContent = new ByteArrayContent(fileBytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
+        var resolvedFilename = string.IsNullOrWhiteSpace(filename) ? "document.pdf" : filename.Trim();
+        form.Add(fileContent, "file", resolvedFilename);
+
+        using var response = await _httpClient.PostAsync(apiUrl, form, cancellationToken);
+        var rawJson = await response.Content.ReadAsStringAsync(cancellationToken);
+
+        if (!response.IsSuccessStatusCode)
         {
-            ["filepath"] = base64,
-            ["file"] = base64,
-            ["pageno"] = pageNo,
-            ["ocrtype"] = ocrType,
-            ["validatetype"] = validateType,
-            ["parameters"] = parameters,
-            ["tableparameters"] = tableParameters ?? Array.Empty<Dictionary<string, IReadOnlyList<string>>>()
-        };
+            _logger.LogWarning("OCR /chat returned {StatusCode}: {Body}", (int)response.StatusCode, Truncate(rawJson, 500));
+            throw new InvalidOperationException(
+                $"OCR API failed ({(int)response.StatusCode}): {Truncate(rawJson, 500)}");
+        }
 
-        if (!string.IsNullOrWhiteSpace(filename))
-            payload["filename"] = filename.Trim();
-
-        if (repositoryId.HasValue && repositoryId.Value != Guid.Empty)
-            payload["repositoryId"] = repositoryId.Value.ToString("D");
-
-        return payload;
+        return ExtractOcrPayload(rawJson);
     }
 
-    private static bool IsNoTextExtractedError(string rawJson)
+    /// <summary>
+    /// Agents /chat wraps OCR output in <c>ocr_result</c>. Extract that for downstream parsing
+    /// or fall back to the raw body if shape doesn't match.
+    /// </summary>
+    private static string ExtractOcrPayload(string rawJson)
     {
         if (string.IsNullOrWhiteSpace(rawJson))
-            return false;
+            return rawJson;
 
-        return rawJson.Contains("no text extracted", StringComparison.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            var root = doc.RootElement;
+
+            if (root.TryGetProperty("ocr_result", out var ocrResult)
+                && ocrResult.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+            {
+                return ocrResult.GetRawText();
+            }
+        }
+        catch (JsonException)
+        {
+            // Not JSON; return raw body for legacy parsers.
+        }
+
+        return rawJson;
     }
 
     private static string ResolvePageNo(string? pageNo, string defaultPageNo)
@@ -178,24 +164,6 @@ public sealed class OcrExtractionService : IOcrExtractionService
         return int.TryParse(defaultPageNo, out var defaultPage) && defaultPage > 0
             ? defaultPage.ToString()
             : "1";
-    }
-
-    private static string ResolveOcrType(string? ocrType, string defaultOcrType)
-    {
-        var value = string.IsNullOrWhiteSpace(ocrType) ? defaultOcrType : ocrType.Trim();
-        if (IsPlaceholderValue(value))
-            return defaultOcrType.Trim();
-
-        return value;
-    }
-
-    private static string ResolveValidateType(string? validateType, string defaultValidateType)
-    {
-        var value = string.IsNullOrWhiteSpace(validateType) ? defaultValidateType : validateType.Trim();
-        if (IsPlaceholderValue(value))
-            return defaultValidateType.Trim();
-
-        return value;
     }
 
     private static bool IsPlaceholderValue(string value) =>
