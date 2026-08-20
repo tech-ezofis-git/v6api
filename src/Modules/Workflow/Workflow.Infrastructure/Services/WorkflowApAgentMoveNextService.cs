@@ -179,7 +179,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         foreach (var control in controls)
         {
             var jsonId = control.JsonId;
-            if (!TryResolveEzfbColumn(jsonId, ezfbColumns, out var col))
+            if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, jsonId, ezfbColumns, out var col))
                 continue;
 
             var current = await GetEzfbColumnValueAsync(connection, ezfbTable, entryId, col, cancellationToken);
@@ -255,7 +255,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
                 matchedControl = control;
-                if (!TryResolveEzfbColumn(control.JsonId, ezfbColumns, out var colFromControl))
+                if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var colFromControl))
                 {
                     _logger.LogWarning(
                         "ezfb column not found for jsonId {JsonId} (control name {ControlName}).",
@@ -266,7 +266,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
                 column = colFromControl;
             }
-            else if (!TryResolveEzfbColumn(key, ezfbColumns, out var colFromKey))
+            else if (!EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out var colFromKey))
             {
                 _logger.LogDebug("ezfb column not resolved for formData key {FieldKey}.", key);
                 continue;
@@ -599,7 +599,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 ezfbTable,
                 control.JsonId,
                 mutableColumns,
-                cancellationToken);
+                cancellationToken,
+                control.Name);
             if (!columnOk)
             {
                 _logger.LogWarning(
@@ -727,7 +728,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             ezfbTable,
             lineControl.JsonId,
             ezfbColumns,
-            cancellationToken);
+            cancellationToken,
+            lineControl.Name);
         if (!columnOk)
         {
             _logger.LogWarning(
@@ -955,9 +957,10 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         string ezfbTable,
         string jsonId,
         HashSet<string> ezfbColumns,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? name = null)
     {
-        if (TryResolveEzfbColumn(jsonId, ezfbColumns, out var existing))
+        if (EzfbColumnNaming.TryResolveEzfbColumn(name, jsonId, ezfbColumns, out var existing))
             return (true, existing);
 
         if (!EzfbColumnNaming.TryToColumnName(jsonId, out var newColumn) || string.IsNullOrWhiteSpace(newColumn))
@@ -1194,7 +1197,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 if (!TryResolveControlForField(key, controls, out var control) || control is null)
                     continue;
 
-                if (!TryResolveEzfbColumn(control.JsonId, ezfbColumns, out var col))
+                if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var col))
                 {
                     _logger.LogWarning(
                         "ezfb column not found for jsonId {JsonId} (control name {ControlName}).",
@@ -1340,7 +1343,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 return;
             }
 
-            if (!TryResolveEzfbColumn(control.JsonId, ezfbColumns, out var column))
+            if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var column))
             {
                 _logger.LogWarning(
                     "ezfb column not found for Matched Status jsonId {JsonId} on form {FormId}.",
@@ -1771,7 +1774,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             if (!IsInvoiceExtractedLineItemControl(row))
                 continue;
 
-            if (TryResolveEzfbColumn(row.JsonId, ezfbColumns, out var col))
+            if (EzfbColumnNaming.TryResolveEzfbColumn(row.Name, row.JsonId, ezfbColumns, out var col))
                 return col;
         }
 
@@ -1790,7 +1793,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
         if (dynamicCount == 1
             && onlyDynamic is not null
-            && TryResolveEzfbColumn(onlyDynamic.JsonId, ezfbColumns, out var singleCol))
+            && EzfbColumnNaming.TryResolveEzfbColumn(onlyDynamic.Name, onlyDynamic.JsonId, ezfbColumns, out var singleCol))
         {
             return singleCol;
         }
@@ -2124,38 +2127,4 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         return false;
     }
 
-    private static bool TryResolveEzfbColumn(string jsonId, IReadOnlySet<string> ezfbColumns, out string column)
-    {
-        column = string.Empty;
-        if (string.IsNullOrWhiteSpace(jsonId))
-            return false;
-
-        var trimmed = jsonId.Trim();
-        if (ezfbColumns.Contains(trimmed))
-        {
-            column = trimmed;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var fromJsonId) && ezfbColumns.Contains(fromJsonId))
-        {
-            column = fromJsonId;
-            return true;
-        }
-
-        // Legacy: older code used F_ prefix for leading-digit jsonIds.
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var baseName)
-            && baseName.Length > 0
-            && char.IsDigit(baseName[0]))
-        {
-            var legacy = "F_" + baseName;
-            if (ezfbColumns.Contains(legacy))
-            {
-                column = legacy;
-                return true;
-            }
-        }
-
-        return false;
-    }
 }

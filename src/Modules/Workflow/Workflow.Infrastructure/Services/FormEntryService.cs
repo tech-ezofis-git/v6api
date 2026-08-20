@@ -480,12 +480,14 @@ public sealed class FormEntryService : IFormEntryService
         {
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
-                if (TryResolveEzfbColumn(control.JsonId, ezfbColumns, out var col))
+                if (EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var col))
                     resolved.Add(new KeyValuePair<string, string>(col, value));
                 continue;
             }
 
-            if (TryResolveEzfbColumn(key, ezfbColumns, out var colFromKey))
+            // No wFormControl match: the incoming key could itself be a Label (new forms) or a
+            // jsonId (old forms) -- try it both ways.
+            if (EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out var colFromKey))
                 resolved.Add(new KeyValuePair<string, string>(colFromKey, value));
         }
 
@@ -509,7 +511,7 @@ public sealed class FormEntryService : IFormEntryService
 
         foreach (var rawColumn in uniqueColumns.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            if (!TryResolveEzfbColumn(rawColumn, fieldByColumn.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase), out var ezfbCol))
+            if (!EzfbColumnNaming.TryResolveEzfbColumn(rawColumn, rawColumn, fieldByColumn.Keys.ToHashSet(StringComparer.OrdinalIgnoreCase), out var ezfbCol))
             {
                 if (!fieldByColumn.ContainsKey(rawColumn))
                     continue;
@@ -851,40 +853,6 @@ public sealed class FormEntryService : IFormEntryService
 
     private static string EscapeColumn(string column) => column.Replace("\"", "\"\"", StringComparison.Ordinal);
 
-    private static bool TryResolveEzfbColumn(string jsonId, IReadOnlySet<string> ezfbColumns, out string column)
-    {
-        column = string.Empty;
-        if (string.IsNullOrWhiteSpace(jsonId))
-            return false;
-
-        var trimmed = jsonId.Trim();
-        if (ezfbColumns.Contains(trimmed))
-        {
-            column = trimmed;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var fromJsonId) && ezfbColumns.Contains(fromJsonId))
-        {
-            column = fromJsonId;
-            return true;
-        }
-
-        if (EzfbColumnNaming.TryToColumnName(trimmed, out var baseName)
-            && baseName.Length > 0
-            && char.IsDigit(baseName[0]))
-        {
-            var legacy = "F_" + baseName;
-            if (ezfbColumns.Contains(legacy))
-            {
-                column = legacy;
-                return true;
-            }
-        }
-
-        return false;
-    }
-
     public async Task<FormControlDistinctValuesResult> GetDistinctControlValuesAsync(
         string wFormId,
         string wFormControlName,
@@ -920,7 +888,7 @@ public sealed class FormEntryService : IFormEntryService
             return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.TableNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
 
         var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
-        if (!TryResolveEzfbColumn(control.JsonId, ezfbColumns, out var resolvedColumn))
+        if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var resolvedColumn))
             return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.ColumnNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
 
         var values = await LoadDistinctColumnValuesAsync(connection, tableName, resolvedColumn, cancellationToken);
