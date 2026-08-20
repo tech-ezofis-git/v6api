@@ -603,7 +603,7 @@ From `appsettings.example.json` / `appsettings.Production.json`:
   "PathBase": "/V6API",
   "ApAgent": {
     "Enabled": true,
-    "PythonServiceUrl": "http://localhost:8001/api/ap-agent/run",
+    "PythonServiceUrl": "http://agents:8000/chat",
     "ApiBaseUrl": "http://localhost/V6API/api/workflows",
     "TimeoutMinutes": 30
   },

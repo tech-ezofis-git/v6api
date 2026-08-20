@@ -3,7 +3,6 @@ using System.Text.Json;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 using SaaSApp.Api.Middleware;
 using SaaSApp.Billing.Application.Contracts;
 using SaaSApp.Billing.Application.Credits.Commands.UpdateCredit;
@@ -35,7 +34,6 @@ public sealed class RepositoriesController : ControllerBase
     private readonly ITenantConnectionStringResolver _connectionResolver;
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IRepositoryAiSummaryService _aiSummary;
-    private readonly RepositoryAiSummaryOptions _aiSummaryOptions;
     private readonly IMediator _mediator;
     private readonly ILogger<RepositoriesController> _logger;
 
@@ -54,7 +52,6 @@ public sealed class RepositoriesController : ControllerBase
         ITenantConnectionStringResolver connectionResolver,
         ITenantConnectionProvider connectionProvider,
         IRepositoryAiSummaryService aiSummary,
-        IOptions<RepositoryAiSummaryOptions> aiSummaryOptions,
         IMediator mediator,
         ILogger<RepositoriesController> logger)
     {
@@ -72,7 +69,6 @@ public sealed class RepositoriesController : ControllerBase
         _connectionResolver = connectionResolver;
         _connectionProvider = connectionProvider;
         _aiSummary = aiSummary;
-        _aiSummaryOptions = aiSummaryOptions.Value;
         _mediator = mediator;
         _logger = logger;
     }
@@ -534,7 +530,10 @@ public sealed class RepositoriesController : ControllerBase
         }
     }
 
-    /// <summary>Return the cached AI summary, or generate and cache it before consuming Document Summary credit.</summary>
+    /// <summary>
+    /// Return the cached AI summary, or generate and cache it via agents <c>/chat</c>
+    /// (<c>intent=summary</c>). Uses item <c>ocr_text</c> when present; otherwise sends blob <c>filepath</c>.
+    /// </summary>
     [HttpPost("/api/repositories/{repositoryId:guid}/items/{itemId:guid}/ai-summary")]
     public async Task<IActionResult> GetAiSummary(
         Guid repositoryId,
@@ -565,7 +564,7 @@ public sealed class RepositoriesController : ControllerBase
                                 "repository.items",
                                 0,
                                 $"AI summary for item {itemId}",
-                                _aiSummaryOptions.Credit)),
+                                RepositoryAiSummaryDefaults.Credit)),
                         cancellationToken);
                     creditConsumed = creditResult.Status == CreditUpdateStatus.Success;
                 }

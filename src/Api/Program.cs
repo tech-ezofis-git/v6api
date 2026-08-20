@@ -29,6 +29,7 @@ using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Infrastructure;
 using SaaSApp.ActivityLog.Application;
 using SaaSApp.ActivityLog.Infrastructure;
+using SaaSApp.SharedKernel.Options;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -59,6 +60,8 @@ builder.Services.Configure<TenantDefaultCreditOptions>(
     builder.Configuration.GetSection(TenantDefaultCreditOptions.SectionName));
 builder.Services.Configure<JiraOptions>(
     builder.Configuration.GetSection(JiraOptions.SectionName));
+builder.Services.Configure<AgentsChatOptions>(
+    builder.Configuration.GetSection(AgentsChatOptions.SectionName));
 builder.Services.AddHttpClient<JiraIssueClient>();
 builder.Services.AddScoped<SupportTicketStore>();
 builder.Services.AddScoped<SupportTicketEmailService>();

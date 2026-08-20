@@ -254,6 +254,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         new()
         {
             ["blobPath"] = blobPath ?? string.Empty,
+            ["filepath"] = blobPath ?? string.Empty,
             ["envType"] = envType,
             ["tenantId"] = tenantGuid.ToString("D"),
             ["workflowId"] = workflowGuid.ToString("D"),
@@ -262,8 +263,9 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             ["repositoryItemId"] = repositoryItemId?.ToString("D") ?? string.Empty,
             ["instanceId"] = instanceGuid.ToString("D"),
             ["transactionId"] = transactionGuid?.ToString("D") ?? string.Empty,
-            ["formentryId"] = formEntryItemId,
-            ["formId"] = formTemplateId ?? string.Empty
+            ["formentryId"] = formEntryItemId.ToString(System.Globalization.CultureInfo.InvariantCulture),
+            ["formId"] = formTemplateId ?? string.Empty,
+            ["formid"] = formTemplateId ?? string.Empty
         };
 
     private async Task<int> InsertFormEntryAsync(

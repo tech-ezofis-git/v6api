@@ -1,12 +1,10 @@
 namespace SaaSApp.Repository.Infrastructure.Options;
 
-public sealed class RepositoryAiSummaryOptions
+/// <summary>Hardcoded AI summary defaults. Agents URL comes from <c>Agents:ChatUrl</c>.</summary>
+public static class RepositoryAiSummaryDefaults
 {
-    public const string SectionName = "Repository:AiSummary";
-
-    public string ApiUrl { get; set; } = "http://localhost:8091/api/v1/summary";
-
-    public int TimeoutMinutes { get; set; } = 5;
-
-    public int Credit { get; set; } = 1;
+    public const int TimeoutMinutes = 5;
+    public const int Credit = 1;
+    public const int KeyFactsCount = 6;
+    public const string PageNo = "1";
 }

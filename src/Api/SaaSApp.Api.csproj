@@ -36,6 +36,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\BuildingBlocks\Catalog\SaaSApp.Catalog.csproj" />
+    <ProjectReference Include="..\BuildingBlocks\SharedKernel\SaaSApp.SharedKernel.csproj" />
     <ProjectReference Include="..\BuildingBlocks\Logging\SaaSApp.Logging.csproj" />
     <ProjectReference Include="..\BuildingBlocks\MultiTenancy\SaaSApp.MultiTenancy.csproj" />
     <ProjectReference Include="..\BuildingBlocks\Security\SaaSApp.Security.csproj" />

@@ -24,6 +24,7 @@
     <ProjectReference Include="..\..\BlobStorage\SaaSApp.BlobStorage.csproj" />
     <ProjectReference Include="..\..\..\BuildingBlocks\MultiTenancy\SaaSApp.MultiTenancy.csproj" />
     <ProjectReference Include="..\..\..\BuildingBlocks\Catalog\SaaSApp.Catalog.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\SharedKernel\SaaSApp.SharedKernel.csproj" />
     <ProjectReference Include="..\..\Users\Users.Infrastructure\SaaSApp.Users.Infrastructure.csproj" />
   </ItemGroup>
 

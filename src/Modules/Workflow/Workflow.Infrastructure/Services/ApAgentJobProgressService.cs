@@ -326,7 +326,8 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
             await cmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        if (!await TableExistsAsync(cancellationToken))
+        // Reuse the same connection — do not open a second slot while this one is held.
+        if (!await TableExistsAsync(connection, cancellationToken))
             throw new InvalidOperationException("Failed to create workflow.\"ApAgentJobProgress\" table.");
 
         TableEnsured.TryAdd(cacheKey, 0);
@@ -334,13 +335,18 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
 
     private async Task<bool> TableExistsAsync(CancellationToken cancellationToken)
     {
+        await using var connection = await OpenConnectionAsync(cancellationToken);
+        return await TableExistsAsync(connection, cancellationToken);
+    }
+
+    private static async Task<bool> TableExistsAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
+    {
         const string sql = """
             SELECT COUNT(1)
             FROM information_schema.tables
             WHERE table_schema = 'workflow' AND table_name = 'ApAgentJobProgress';
             """;
 
-        await using var connection = await OpenConnectionAsync(cancellationToken);
         await using var cmd = new NpgsqlCommand(sql, connection);
         return Convert.ToInt64(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
@@ -351,7 +357,14 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        var connection = new NpgsqlConnection(connectionString);
+        // Cap client pool so Hangfire + API + EF do not exhaust Azure Postgres max_connections.
+        var builder = new NpgsqlConnectionStringBuilder(connectionString);
+        if (builder.MaxPoolSize <= 0 || builder.MaxPoolSize > 20)
+            builder.MaxPoolSize = 20;
+        if (builder.MinPoolSize < 0)
+            builder.MinPoolSize = 0;
+
+        var connection = new NpgsqlConnection(builder.ConnectionString);
         await connection.OpenAsync(cancellationToken);
         return connection;
     }
