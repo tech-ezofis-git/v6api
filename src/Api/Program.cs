@@ -1,4 +1,5 @@
 using Hangfire;
+using Hangfire.Dashboard;
 using Hangfire.PostgreSql;
 using MediatR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -334,7 +335,13 @@ app.MapHealthChecks("/health");
 // Hangfire dashboard (protect in production with auth)
 if (hangfireEnabled)
 {
-    app.MapHangfireDashboard("/hangfire");
+    // Default Hangfire auth is localhost-only; that blocks the dashboard
+    // behind Azure nginx. Same public model as /swagger for now.
+    app.MapHangfireDashboard("/hangfire", new DashboardOptions
+    {
+        Authorization = Array.Empty<IDashboardAuthorizationFilter>(),
+        IgnoreAntiforgeryToken = true
+    });
 
     var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
     if (emailIngestHangfire)
