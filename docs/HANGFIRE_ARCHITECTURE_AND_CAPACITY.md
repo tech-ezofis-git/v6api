@@ -161,8 +161,11 @@ API and Hangfire worker both need this connection string.
 "FormMasterFileImport": {
   "Enabled": true,
   "UseHangfirePython": true,
-  "PythonServiceUrl": "https://<python-host>/api/master-file/import",
+  "PythonServiceUrl": "https://cloud.ezofis.com/api/ezDataImport",
   "TimeoutMinutes": 30
+},
+"Agents": {
+  "ChatUrl": "https://cloud.ezofis.com/chat"
 }
 ```
 
@@ -175,6 +178,8 @@ API and Hangfire worker both need this connection string.
 | `EmailIngest:TenantDiscoveryMinutes` | Rescan tenants for new mailboxes (default 30). |
 | `ApAgent:PythonServiceUrl` | Python AP Agent URL (reachable from Hangfire worker). |
 | `FormMasterFileImport:UseHangfirePython` | Enqueue master import job after upload. |
+| `FormMasterFileImport:PythonServiceUrl` | Master Excel import Python URL (cloud: `/api/ezDataImport`). |
+| `Agents:ChatUrl` | Chat UI base URL (config key for deploy; not used by API runtime code yet). |
 
 Per mailbox: set `PollIntervalMinutes` to **1** if you want processing as often as every minute (must align with cron).
 
