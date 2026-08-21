@@ -193,6 +193,9 @@ if (hangfireEnabled)
 {
     var hangfireStorageOptions = new PostgreSqlStorageOptions
     {
+        // Catalog hangfire.lock already has updatecount; auto-migrate loops on
+        // "column already exists" and hangs /hangfire (504). Schema is present — skip install.
+        PrepareSchemaIfNecessary = false,
         // Reduce catalog DB polling so HTTP requests are not competing with Hangfire every few seconds.
         QueuePollInterval = TimeSpan.FromSeconds(15),
         JobExpirationCheckInterval = TimeSpan.FromHours(1),
