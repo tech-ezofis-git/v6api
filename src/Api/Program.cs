@@ -1,4 +1,5 @@
 using Hangfire;
+using Hangfire.Dashboard;
 using Hangfire.PostgreSql;
 using MediatR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -192,6 +193,9 @@ if (hangfireEnabled)
 {
     var hangfireStorageOptions = new PostgreSqlStorageOptions
     {
+        // Catalog hangfire.lock already has updatecount; auto-migrate loops on
+        // "column already exists" and hangs /hangfire (504). Schema is present — skip install.
+        PrepareSchemaIfNecessary = false,
         // Reduce catalog DB polling so HTTP requests are not competing with Hangfire every few seconds.
         QueuePollInterval = TimeSpan.FromSeconds(15),
         JobExpirationCheckInterval = TimeSpan.FromHours(1),
@@ -334,7 +338,13 @@ app.MapHealthChecks("/health");
 // Hangfire dashboard (protect in production with auth)
 if (hangfireEnabled)
 {
-    app.MapHangfireDashboard("/hangfire");
+    // Default Hangfire auth is localhost-only; that blocks the dashboard
+    // behind Azure nginx. Same public model as /swagger for now.
+    app.MapHangfireDashboard("/hangfire", new DashboardOptions
+    {
+        Authorization = Array.Empty<IDashboardAuthorizationFilter>(),
+        IgnoreAntiforgeryToken = true
+    });
 
     var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
     if (emailIngestHangfire)
