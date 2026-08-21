@@ -191,6 +191,17 @@ var connectionString = builder.Configuration.GetConnectionString("DefaultConnect
 var hangfireEnabled = !string.IsNullOrWhiteSpace(connectionString);
 if (hangfireEnabled)
 {
+    // Hangfire must not inherit Command Timeout=0 / unbounded pool from DefaultConnection —
+    // that lets workers hold catalog connections forever and makes BackgroundJob.Enqueue hang.
+    var hangfireCsBuilder = new Npgsql.NpgsqlConnectionStringBuilder(connectionString)
+    {
+        MaxPoolSize = Math.Clamp(builder.Configuration.GetValue("Hangfire:MaxPoolSize", 5), 2, 15),
+        Timeout = Math.Clamp(builder.Configuration.GetValue("Hangfire:ConnectionTimeoutSeconds", 10), 5, 60),
+        CommandTimeout = Math.Clamp(builder.Configuration.GetValue("Hangfire:CommandTimeoutSeconds", 30), 5, 120),
+        ApplicationName = "V6Api-Hangfire"
+    };
+    var hangfireConnectionString = hangfireCsBuilder.ConnectionString;
+
     var hangfireStorageOptions = new PostgreSqlStorageOptions
     {
         // Catalog hangfire.lock already has updatecount; auto-migrate loops on
@@ -205,7 +216,7 @@ if (hangfireEnabled)
         .SetDataCompatibilityLevel(Hangfire.CompatibilityLevel.Version_180)
         .UseSimpleAssemblyNameTypeSerializer()
         .UseRecommendedSerializerSettings()
-        .UsePostgreSqlStorage(connectionString, hangfireStorageOptions));
+        .UsePostgreSqlStorage(hangfireConnectionString, hangfireStorageOptions));
 
     if (builder.Configuration.GetValue<bool?>("Hangfire:RunServerInApi") ?? true)
     {
@@ -213,8 +224,8 @@ if (hangfireEnabled)
         // starves IIS/Kestrel threads and makes every API call feel slow.
         var apiWorkers = builder.Configuration.GetValue<int?>("Hangfire:ApiWorkerCount")
             ?? builder.Configuration.GetValue<int?>("Hangfire:WorkerCount")
-            ?? 5;
-        apiWorkers = Math.Clamp(apiWorkers, 1, 10);
+            ?? 1;
+        apiWorkers = Math.Clamp(apiWorkers, 1, 3);
 
         builder.Services.AddHangfireServer(options =>
         {
@@ -224,7 +235,12 @@ if (hangfireEnabled)
             options.SchedulePollingInterval = TimeSpan.FromSeconds(15);
         });
 
-        Log.Information("Hangfire server in API process: {WorkerCount} worker(s)", apiWorkers);
+        Log.Information(
+            "Hangfire server in API process: {WorkerCount} worker(s), MaxPoolSize={MaxPoolSize}, ConnTimeout={ConnTimeout}s, CmdTimeout={CmdTimeout}s",
+            apiWorkers,
+            hangfireCsBuilder.MaxPoolSize,
+            hangfireCsBuilder.Timeout,
+            hangfireCsBuilder.CommandTimeout);
     }
 }
 else

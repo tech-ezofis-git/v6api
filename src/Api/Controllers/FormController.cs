@@ -33,6 +33,7 @@ public sealed class FormController : ControllerBase
     /// <summary>
     /// Upload master CSV/XLSX for a form (v5 POST /api/form/uploadMasterFile).
     /// Stores file in tenant blob, creates dbo.masterFileprocess + dbo.notification rows, enqueues Hangfire Python import.
+    /// Response includes <c>pythonInput</c> — the JSON body posted to <c>ezDataImport</c>.
     /// </summary>
     [HttpPost("uploadMasterFile")]
     [DisableRequestSizeLimit]
@@ -72,7 +73,8 @@ public sealed class FormController : ControllerBase
                 result.MasterFileProcessId,
                 result.FilePath,
                 result.NotificationId,
-                result.HangfireJobId));
+                result.HangfireJobId,
+                result.PythonInput));
         }
         catch (ArgumentException ex)
         {
@@ -440,4 +442,6 @@ public sealed record FormMasterFileUploadResponse(
     int MasterFileProcessId,
     string FilePath,
     int? NotificationId,
-    string? HangfireJobId);
+    string? HangfireJobId,
+    /// <summary>Exact JSON body Hangfire POSTs to Python <c>ezDataImport</c>.</summary>
+    object? PythonInput = null);

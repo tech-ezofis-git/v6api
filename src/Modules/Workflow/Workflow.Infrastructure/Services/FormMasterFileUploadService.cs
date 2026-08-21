@@ -66,132 +66,165 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
+        FormMasterMeta formMeta;
+        Guid? workflowId;
+        Guid? instanceId;
+        string settingsJson;
+        string safeFileName;
+        string blobRelativePath;
+        string queueFilePath;
+        int processId;
+        int notificationId;
+        object importPayload;
 
-        await EnsureMasterFileProcessTableAsync(connection, cancellationToken);
-
-        var formMeta = await LoadFormAsync(connection, normalizedFormId, cancellationToken)
-            ?? throw new InvalidOperationException("Form not found.");
-
-        var tenantIntId = await EnsureTenantIntIdAsync(connection, tenantGuid, cancellationToken);
-        var nowStamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
-        var uploadStamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
-
-        var safeFileName = Path.GetFileName(request.FileName);
-        var fileExtension = Path.GetExtension(safeFileName);
-        var fileType = string.IsNullOrWhiteSpace(fileExtension)
-            ? "csv"
-            : fileExtension.TrimStart('.').ToLowerInvariant();
-
-        var blobRelativePath = $"Form Files/{normalizedFormId}/Master CSV/{uploadStamp}/{safeFileName}";
-        var queueFilePath = $"Form Files/{normalizedFormId}/Master CSV/{uploadStamp}/{safeFileName}";
-
-        await using var bufferStream = new MemoryStream();
-        if (request.FileStream.CanSeek)
-            request.FileStream.Position = 0;
-        await request.FileStream.CopyToAsync(bufferStream, cancellationToken);
-        var fileBytes = bufferStream.ToArray();
-        var fileSize = request.FileSize > 0 ? request.FileSize : fileBytes.LongLength;
-
-        var cloudFileServer = await SaveMasterFileAsync(
-            tenantGuid,
-            blobRelativePath,
-            fileBytes,
-            request.ContentType,
-            cancellationToken);
-
-        var workflowId = await ResolveWorkflowIdAsync(
-            connection,
-            tenantGuid,
-            normalizedFormId,
-            request.WorkflowId,
-            cancellationToken);
-
-        var instanceId = ParseOptionalGuid(request.InstanceId, "instanceId");
-
-        var settingsJson = await BuildSettingsJsonAsync(
-            normalizedFormId,
-            workflowId,
-            cancellationToken);
-
-        var inputId = int.TryParse(normalizedFormId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var legacyFormId)
-            ? legacyFormId
-            : 0;
-
-        var processId = await InsertMasterFileProcessAsync(
-            connection,
-            tenantIntId,
-            inputId,
-            safeFileName,
-            Path.GetDirectoryName(blobRelativePath)?.Replace('\\', '/') ?? string.Empty,
-            fileType,
-            fileSize,
-            cloudFileServer,
-            settingsJson,
-            workflowId,
-            userId,
-            nowStamp,
-            cancellationToken);
-
-        await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);
-        var createdByLegacyId = await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
-            connection,
-            userId,
-            cancellationToken);
-
-        var notificationInputJson = new
+        // Keep tenant DB connection open only for DB work. Hangfire enqueue uses catalog Postgres
+        // and must not run while this connection is still held (connection pressure / hangs).
+        await using (var connection = new NpgsqlConnection(connectionString))
         {
-            workflowId = workflowId?.ToString("D") ?? string.Empty,
-            instanceId = instanceId?.ToString("D") ?? string.Empty
-        };
+            await connection.OpenAsync(cancellationToken);
 
-        var notificationId = await FormMasterFileNotificationStore.InsertAsync(
-            connection,
-            title: safeFileName,
-            remarks: instanceId.HasValue
-                ? $"Master file import queued for instance {instanceId.Value:D}."
-                : $"Master file import queued (masterFileProcess {processId}).",
-            notificationInputJson,
-            category: _importOptions.NotificationCategory,
-            createdByLegacyId,
-            cancellationToken);
+            await EnsureMasterFileProcessTableAsync(connection, cancellationToken);
 
-        var importPayload = BuildImportPayload(
-            tenantGuid,
-            processId,
-            normalizedFormId,
-            safeFileName,
-            queueFilePath,
-            formMeta.UniqueColumns,
-            userId,
-            workflowId,
-            instanceId,
-            settingsJson,
-            notificationId);
+            formMeta = await LoadFormAsync(connection, normalizedFormId, cancellationToken)
+                ?? throw new InvalidOperationException("Form not found.");
+
+            var tenantIntId = await EnsureTenantIntIdAsync(connection, tenantGuid, cancellationToken);
+            var nowStamp = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+            var uploadStamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss", CultureInfo.InvariantCulture);
+
+            safeFileName = Path.GetFileName(request.FileName);
+            var fileExtension = Path.GetExtension(safeFileName);
+            var fileType = string.IsNullOrWhiteSpace(fileExtension)
+                ? "csv"
+                : fileExtension.TrimStart('.').ToLowerInvariant();
+
+            blobRelativePath = $"Form Files/{normalizedFormId}/Master CSV/{uploadStamp}/{safeFileName}";
+            queueFilePath = $"Form Files/{normalizedFormId}/Master CSV/{uploadStamp}/{safeFileName}";
+
+            await using var bufferStream = new MemoryStream();
+            if (request.FileStream.CanSeek)
+                request.FileStream.Position = 0;
+            await request.FileStream.CopyToAsync(bufferStream, cancellationToken);
+            var fileBytes = bufferStream.ToArray();
+            var fileSize = request.FileSize > 0 ? request.FileSize : fileBytes.LongLength;
+
+            var cloudFileServer = await SaveMasterFileAsync(
+                tenantGuid,
+                blobRelativePath,
+                fileBytes,
+                request.ContentType,
+                cancellationToken);
+
+            workflowId = await ResolveWorkflowIdAsync(
+                connection,
+                tenantGuid,
+                normalizedFormId,
+                request.WorkflowId,
+                cancellationToken);
+
+            instanceId = ParseOptionalGuid(request.InstanceId, "instanceId");
+
+            settingsJson = await BuildSettingsJsonAsync(
+                normalizedFormId,
+                workflowId,
+                cancellationToken);
+
+            var inputId = int.TryParse(normalizedFormId, NumberStyles.Integer, CultureInfo.InvariantCulture, out var legacyFormId)
+                ? legacyFormId
+                : 0;
+
+            processId = await InsertMasterFileProcessAsync(
+                connection,
+                tenantIntId,
+                inputId,
+                safeFileName,
+                Path.GetDirectoryName(blobRelativePath)?.Replace('\\', '/') ?? string.Empty,
+                fileType,
+                fileSize,
+                cloudFileServer,
+                settingsJson,
+                workflowId,
+                userId,
+                nowStamp,
+                cancellationToken);
+
+            await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);
+            var createdByLegacyId = await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
+                connection,
+                userId,
+                cancellationToken);
+
+            var notificationInputJson = new
+            {
+                workflowId = workflowId?.ToString("D") ?? string.Empty,
+                instanceId = instanceId?.ToString("D") ?? string.Empty
+            };
+
+            notificationId = await FormMasterFileNotificationStore.InsertAsync(
+                connection,
+                title: safeFileName,
+                remarks: instanceId.HasValue
+                    ? $"Master file import queued for instance {instanceId.Value:D}."
+                    : $"Master file import queued (masterFileProcess {processId}).",
+                notificationInputJson,
+                category: FormMasterFileImportDefaults.NotificationCategory,
+                createdByLegacyId,
+                cancellationToken);
+
+            importPayload = BuildImportPayload(
+                tenantGuid,
+                processId,
+                normalizedFormId,
+                safeFileName,
+                queueFilePath,
+                formMeta.UniqueColumns,
+                userId,
+                workflowId,
+                instanceId,
+                settingsJson,
+                notificationId);
+        }
 
         string? hangfireJobId = null;
-        if (_importOptions.Enabled
-            && _importOptions.UseHangfirePython
+        if (FormMasterFileImportDefaults.Enabled
+            && FormMasterFileImportDefaults.UseHangfirePython
             && !string.IsNullOrWhiteSpace(_importOptions.PythonServiceUrl))
         {
             var payloadJson = JsonSerializer.Serialize(importPayload, JsonOptions);
-            hangfireJobId = await _masterFileImportJobClient.EnqueueAsync(
-                new MasterFileImportPythonJobArgs(
-                    tenantGuid,
-                    userId,
-                    processId,
-                    notificationId,
-                    payloadJson),
-                cancellationToken);
+            try
+            {
+                hangfireJobId = await _masterFileImportJobClient.EnqueueAsync(
+                    new MasterFileImportPythonJobArgs(
+                        tenantGuid,
+                        userId,
+                        processId,
+                        notificationId,
+                        payloadJson),
+                    cancellationToken);
 
-            _logger.LogInformation(
-                "Enqueued master file import Hangfire job {JobId} for process {ProcessId}",
-                hangfireJobId,
-                processId);
+                _logger.LogInformation(
+                    "Enqueued master file import Hangfire job {JobId} for process {ProcessId}",
+                    hangfireJobId,
+                    processId);
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                // File + DB rows are already saved. Do not fail the HTTP upload when Hangfire storage is stuck.
+                _logger.LogError(
+                    ex,
+                    "Master file uploaded (process {ProcessId}, notification {NotificationId}) but Hangfire enqueue failed. " +
+                    "Import will not run until Hangfire/catalog Postgres connections are healthy. Retry import later.",
+                    processId,
+                    notificationId);
+            }
         }
 
-        if (_importOptions.Enabled && _importOptions.QueueBlobEnabled)
+        // Exact body Hangfire POSTs to Python ezDataImport (plus hangfireJobId when enqueue succeeded).
+        var pythonInput = BuildPythonInputForResponse(
+            JsonSerializer.Serialize(importPayload, JsonOptions),
+            hangfireJobId);
+
+        if (FormMasterFileImportDefaults.Enabled && FormMasterFileImportDefaults.QueueBlobEnabled)
         {
             await QueueMasterFileImportAsync(
                 tenantGuid,
@@ -208,13 +241,44 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         }
 
         _logger.LogInformation(
-            "Master file uploaded for form {FormId}, masterFileprocess id {ProcessId}, notification {NotificationId}, path {Path}",
+            "Master file uploaded for form {FormId}, masterFileprocess id {ProcessId}, notification {NotificationId}, path {Path}, hangfireJobId={HangfireJobId}",
             normalizedFormId,
             processId,
             notificationId,
-            blobRelativePath);
+            blobRelativePath,
+            hangfireJobId ?? "(none)");
 
-        return new FormMasterFileUploadResult(processId, blobRelativePath, notificationId, hangfireJobId);
+        return new FormMasterFileUploadResult(processId, blobRelativePath, notificationId, hangfireJobId, pythonInput);
+    }
+
+    private static object? BuildPythonInputForResponse(string payloadJson, string? hangfireJobId)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(payloadJson);
+            var map = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                map[prop.Name] = prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString(),
+                    JsonValueKind.Number => prop.Value.TryGetInt64(out var l) ? l : prop.Value.GetDouble(),
+                    JsonValueKind.True => true,
+                    JsonValueKind.False => false,
+                    JsonValueKind.Null => null,
+                    _ => JsonSerializer.Deserialize<object>(prop.Value.GetRawText())
+                };
+            }
+
+            if (!string.IsNullOrWhiteSpace(hangfireJobId))
+                map["hangfireJobId"] = hangfireJobId;
+
+            return map;
+        }
+        catch (JsonException)
+        {
+            return payloadJson;
+        }
     }
 
     private static Guid? ParseOptionalGuid(string? value, string fieldName)
@@ -303,7 +367,7 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
         int notificationId,
         CancellationToken cancellationToken)
     {
-        if (!_importOptions.Enabled)
+        if (!FormMasterFileImportDefaults.Enabled)
             return;
 
         var queuePayload = BuildImportPayload(
@@ -320,7 +384,7 @@ public sealed class FormMasterFileUploadService : IFormMasterFileUploadService
             notificationId);
 
         var jsonData = JsonSerializer.Serialize(queuePayload, JsonOptions);
-        var queuePrefix = _importOptions.QueueBlobPathPrefix;
+        var queuePrefix = FormMasterFileImportDefaults.QueueBlobPathPrefix;
         var queueBlobPath = $"{queuePrefix}/{tenantGuid:N}_{processId}_{DateTime.UtcNow:yyyyMMddHHmmssfff}.json";
 
         if (TryGetBlobClient(tenantGuid, queueBlobPath, out var blobClient))
