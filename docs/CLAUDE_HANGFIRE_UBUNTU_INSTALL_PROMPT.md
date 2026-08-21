@@ -51,7 +51,10 @@ Edit `/opt/v6-hangfire/appsettings.Production.json` (or env vars). These are alr
   },
   "FormMasterFileImport": {
     "UseHangfirePython": true,
-    "PythonServiceUrl": "https://REPLACE_WITH_PYTHON_HOST/api/master-file/import"
+    "PythonServiceUrl": "https://cloud.ezofis.com/api/ezDataImport"
+  },
+  "Agents": {
+    "ChatUrl": "https://cloud.ezofis.com/chat"
   },
   "ConnectionStrings": {
     "DefaultConnection": "REPLACE_WITH_SAME_CATALOG_SQL_AS_DEMO_AZURE_API"
@@ -62,7 +65,7 @@ Edit `/opt/v6-hangfire/appsettings.Production.json` (or env vars). These are alr
 }
 ```
 
-Ask me for the real catalog SQL connection string and Python host URLs if still placeholders. Do not invent secrets. Keep blob / auth settings from published `appsettings.json` if they are already correct for demo, or ask me.
+For **cloud.ezofis.com** API production, also merge keys from `src/Api/appsettings.Production.example.json` (`FormMasterFileImport:PythonServiceUrl`, `Agents:ChatUrl`). Ask me for the real catalog SQL connection string and other Python host URLs if still placeholders. Do not invent secrets. Keep blob / auth settings from published `appsettings.json` if they are already correct for demo, or ask me.
 
 ### SSL / networking notes
 
