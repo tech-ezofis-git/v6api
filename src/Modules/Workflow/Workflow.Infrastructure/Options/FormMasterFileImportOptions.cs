@@ -1,22 +1,21 @@
 namespace SaaSApp.Workflow.Infrastructure.Options;
 
+/// <summary>Only the Python data-import URL is configured. Other settings are hardcoded defaults.</summary>
 public sealed class FormMasterFileImportOptions
 {
     public const string SectionName = "FormMasterFileImport";
 
-    public bool Enabled { get; set; } = true;
-
-    /// <summary>When set, enqueue Hangfire job to POST import payload to this Python URL.</summary>
+    /// <summary>POST target for Hangfire master-file import (e.g. https://cloud.ezofis.com/api/ezDataImport).</summary>
     public string? PythonServiceUrl { get; set; }
+}
 
-    public bool UseHangfirePython { get; set; } = true;
-
-    /// <summary>Legacy v5 blob queue JSON (external worker). Can run alongside Python when true.</summary>
-    public bool QueueBlobEnabled { get; set; }
-
-    public string QueueBlobPathPrefix { get; set; } = "ezPackages/MasterExcel";
-
-    public int TimeoutMinutes { get; set; } = 30;
-
-    public string NotificationCategory { get; set; } = "WORKFLOW";
+/// <summary>Hardcoded master-file import defaults. URL comes from <see cref="FormMasterFileImportOptions"/>.</summary>
+public static class FormMasterFileImportDefaults
+{
+    public const bool Enabled = true;
+    public const bool UseHangfirePython = true;
+    public const bool QueueBlobEnabled = false;
+    public const string QueueBlobPathPrefix = "ezPackages/MasterExcel";
+    public const int TimeoutMinutes = 30;
+    public const string NotificationCategory = "WORKFLOW";
 }
