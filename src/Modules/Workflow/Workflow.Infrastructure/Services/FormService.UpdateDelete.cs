@@ -83,8 +83,11 @@ public sealed partial class FormService
             if (fields.Count == 0)
                 return new FormUpdateResult(FormUpdateStatus.NotFound, storedId, "Formfields not found");
 
-            await SyncFormControlsAsync(connection, storedId, panels, secondaryPanels, fields, modifiedBy, now, cancellationToken);
-            await EnsureFormEntryTableAsync(connection, storedId, fields, cancellationToken);
+            var fieldCols = BuildFieldColumnsFromLabels(fields);
+            var existingEzfbColumns = await TryLoadEzfbColumnsAsync(connection, storedId, cancellationToken);
+            await SyncFormControlsAsync(
+                connection, storedId, panels, secondaryPanels, fields, fieldCols, existingEzfbColumns, modifiedBy, now, cancellationToken);
+            await EnsureFormEntryTableAsync(connection, storedId, fields, fieldCols, cancellationToken);
         }
 
         _logger.LogInformation("Updated form {FormId} ({Name}), published={Published}", storedId, name, isPublished);
