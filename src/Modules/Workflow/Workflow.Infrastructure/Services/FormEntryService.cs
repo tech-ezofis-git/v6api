@@ -468,7 +468,7 @@ public sealed class FormEntryService : IFormEntryService
 
     private sealed record FormMetadata(string? UniqueColumns);
 
-    private sealed record FormControlRow(string JsonId, string? Name, string? Type);
+    private sealed record FormControlRow(string JsonId, string? Name, string? Type, string? ColumnName = null);
 
     private static List<KeyValuePair<string, string>> ResolveFieldColumns(
         IReadOnlyDictionary<string, string> fields,
@@ -480,7 +480,8 @@ public sealed class FormEntryService : IFormEntryService
         {
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
-                if (EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var col))
+                if (EzfbColumnNaming.TryResolveEzfbColumn(
+                        control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var col))
                     resolved.Add(new KeyValuePair<string, string>(col, value));
                 continue;
             }
@@ -781,8 +782,13 @@ public sealed class FormEntryService : IFormEntryService
         string wFormIdValue,
         CancellationToken cancellationToken)
     {
+        await using (var alterCmd = new NpgsqlCommand(
+            """ALTER TABLE dbo."wFormControl" ADD COLUMN IF NOT EXISTS "columnName" varchar(200) NULL;""",
+            connection))
+            await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+
         const string sql = """
-            SELECT "jsonId", name, type
+            SELECT "jsonId", name, type, "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId
               AND "isDeleted" = false
@@ -798,7 +804,8 @@ public sealed class FormEntryService : IFormEntryService
             rows.Add(new FormControlRow(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2)));
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
 
         return rows;
@@ -888,7 +895,8 @@ public sealed class FormEntryService : IFormEntryService
             return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.TableNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
 
         var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
-        if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var resolvedColumn))
+        if (!EzfbColumnNaming.TryResolveEzfbColumn(
+                control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var resolvedColumn))
             return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.ColumnNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
 
         var values = await LoadDistinctColumnValuesAsync(connection, tableName, resolvedColumn, cancellationToken);

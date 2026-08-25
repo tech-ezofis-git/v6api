@@ -69,7 +69,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 continue;
 
             string column;
-            if (ezfbColumns.Count > 0 && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var resolved))
+            if (ezfbColumns.Count > 0
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var resolved))
                 column = resolved;
             else if (!EzfbColumnNaming.TryToColumnName(control.JsonId, out column))
                 column = control.JsonId.Trim();
@@ -737,15 +739,20 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         return columns;
     }
 
-    private sealed record FormControlRow(string JsonId, string? Name, string? Type);
+    private sealed record FormControlRow(string JsonId, string? Name, string? Type, string? ColumnName = null);
 
     private static async Task<List<FormControlRow>> LoadFormControlsAsync(
         NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
+        await using (var alterCmd = new NpgsqlCommand(
+            """ALTER TABLE dbo."wFormControl" ADD COLUMN IF NOT EXISTS "columnName" varchar(200) NULL;""",
+            connection))
+            await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+
         const string sql = """
-            SELECT "jsonId", name, type
+            SELECT "jsonId", name, type, "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId
               AND "isDeleted" = false
@@ -761,7 +768,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             rows.Add(new FormControlRow(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2)));
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
 
         return rows;
@@ -782,7 +790,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         {
             if (!string.IsNullOrWhiteSpace(control.Name)
                 && string.Equals(control.Name.Trim(), key, StringComparison.OrdinalIgnoreCase)
-                && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out column))
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out column))
             {
                 return true;
             }
@@ -791,7 +800,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         foreach (var control in controls)
         {
             if (string.Equals(control.JsonId, key, StringComparison.OrdinalIgnoreCase)
-                && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out column))
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out column))
             {
                 return true;
             }

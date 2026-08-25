@@ -90,7 +90,8 @@ public sealed class WorkflowEzfbFormDataLoader : SaaSApp.Workflow.Application.Co
         var columnMeta = new Dictionary<string, (string? JsonId, string? Name, EzfbColumnNaming.EzfbColumnMatchKind Kind)>(StringComparer.OrdinalIgnoreCase);
         foreach (var control in controls)
         {
-            if (EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var col, out var kind)
+            if (EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var col, out var kind)
                 && !selectColumns.Contains(col, StringComparer.OrdinalIgnoreCase))
             {
                 selectColumns.Add(col);
@@ -195,15 +196,20 @@ WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL);";
         return columns;
     }
 
-    private sealed record ControlIdAndName(string JsonId, string? Name);
+    private sealed record ControlIdAndName(string JsonId, string? Name, string? ColumnName = null);
 
     private static async Task<List<ControlIdAndName>> LoadFormControlsAsync(
         NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
+        await using (var alterCmd = new NpgsqlCommand(
+            """ALTER TABLE dbo."wFormControl" ADD COLUMN IF NOT EXISTS "columnName" varchar(200) NULL;""",
+            connection))
+            await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+
         const string sql = """
-            SELECT "jsonId", name
+            SELECT "jsonId", name, "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId
               AND "isDeleted" = false
@@ -215,7 +221,10 @@ WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL);";
         cmd.Parameters.AddWithValue("@FormId", formId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
-            controls.Add(new ControlIdAndName(reader.GetString(0), reader.IsDBNull(1) ? null : reader.GetString(1)));
+            controls.Add(new ControlIdAndName(
+                reader.GetString(0),
+                reader.IsDBNull(1) ? null : reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2)));
         return controls;
     }
 }

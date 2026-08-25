@@ -6,17 +6,14 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 /// Two naming eras coexist by design (columns are never migrated between them):
 ///   - OLD forms (created before the Label-column change): column = sanitized jsonId
 ///     (designer field.Id, a nanoid). See <see cref="ToColumnName"/>.
-///   - NEW forms (created after): column = sanitized field Label ("PO Number" -&gt; "PO_Number").
-///     See <see cref="ToColumnNameFromLabel"/>. wFormControl.jsonId is still written for every
-///     form (old and new) -- the designer needs it as a stable field id regardless of which
-///     naming era the table itself uses.
+///   - NEW forms (created after): column = sanitized field Label ("PO Number" -&gt; "PO_Number"),
+///     with collision suffixes (Address, Address_2). See <see cref="ToColumnNameFromLabel"/>.
+///     wFormControl.jsonId stays the designer field id; wFormControl.columnName stores the
+///     exact physical ezfb column when known.
 ///
-/// <see cref="TryResolveEzfbColumn(string?, string?, IReadOnlySet{string}, out string)"/> is the
-/// single shared lookup every read/write path (FormEntryService, WorkflowEzfbFormDataLoader,
-/// WorkflowApAgentMoveNextService, WorkflowTicketSearchService) should call instead of hand-rolling
-/// jsonId-only resolution: it tries the sanitized Name/Label first (matches new-form columns),
-/// then falls back through the legacy jsonId-based chain (matches old-form columns) so both eras
-/// resolve correctly against the same code path with no table migration required.
+/// Prefer <see cref="TryResolveEzfbColumn(string?, string?, string?, IReadOnlySet{string}, out string, out EzfbColumnMatchKind)"/>
+/// with the stored columnName first (fixes duplicate Labels). When columnName is null, falls
+/// back to Name/Label then jsonId (legacy dual-era path).
 /// </summary>
 public static class EzfbColumnNaming
 {
@@ -107,10 +104,11 @@ public static class EzfbColumnNaming
     public static string ToSqlBracketIdentifier(string jsonId) =>
         ToColumnName(jsonId).Replace("]", "]]", StringComparison.Ordinal);
 
-    /// <summary>How <see cref="TryResolveEzfbColumn(string?, string?, IReadOnlySet{string}, out string, out EzfbColumnMatchKind)"/> matched a column.</summary>
+    /// <summary>How <see cref="TryResolveEzfbColumn(string?, string?, string?, IReadOnlySet{string}, out string, out EzfbColumnMatchKind)"/> matched a column.</summary>
     public enum EzfbColumnMatchKind
     {
         None,
+        StoredColumnName,
         ExactName,
         SanitizedName,
         ExactJsonId,
@@ -119,9 +117,39 @@ public static class EzfbColumnNaming
     }
 
     /// <summary>
+    /// Prefers stored wFormControl.columnName (Address vs Address_2), then dual-era Name/jsonId
+    /// fallback for older rows where columnName is null.
+    /// </summary>
+    public static bool TryResolveEzfbColumn(
+        string? columnName,
+        string? name,
+        string? jsonId,
+        IReadOnlySet<string> ezfbColumns,
+        out string column,
+        out EzfbColumnMatchKind matchKind)
+    {
+        column = string.Empty;
+        matchKind = EzfbColumnMatchKind.None;
+
+        if (!string.IsNullOrWhiteSpace(columnName))
+        {
+            var trimmedColumn = columnName.Trim();
+            if (ezfbColumns.Contains(trimmedColumn))
+            {
+                column = trimmedColumn;
+                matchKind = EzfbColumnMatchKind.StoredColumnName;
+                return true;
+            }
+        }
+
+        return TryResolveEzfbColumn(name, jsonId, ezfbColumns, out column, out matchKind);
+    }
+
+    /// <summary>
     /// Shared dual-era resolver. Tries, in order: exact Name, sanitized Name (new-form Label
     /// columns), exact jsonId, sanitized jsonId, legacy "F_"+jsonId (old-form columns). Callers
     /// that only have a jsonId (no control/Name in scope) can omit <paramref name="name"/>.
+    /// Prefer the overload that accepts stored <c>columnName</c> when a wFormControl row is available.
     /// </summary>
     public static bool TryResolveEzfbColumn(
         string? name,
@@ -184,6 +212,15 @@ public static class EzfbColumnNaming
 
         return false;
     }
+
+    /// <summary>Convenience overload with stored columnName; ignores match-kind detail.</summary>
+    public static bool TryResolveEzfbColumn(
+        string? columnName,
+        string? name,
+        string? jsonId,
+        IReadOnlySet<string> ezfbColumns,
+        out string column) =>
+        TryResolveEzfbColumn(columnName, name, jsonId, ezfbColumns, out column, out _);
 
     /// <summary>Convenience overload for callers that don't need the match-kind detail.</summary>
     public static bool TryResolveEzfbColumn(string? name, string? jsonId, IReadOnlySet<string> ezfbColumns, out string column) =>

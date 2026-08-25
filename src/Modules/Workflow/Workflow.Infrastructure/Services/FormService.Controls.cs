@@ -18,6 +18,8 @@ public sealed partial class FormService
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        await EnsureFormSchemaAsync(connection, cancellationToken);
+
         if (!await TableExistsAsync(connection, "wFormControl", cancellationToken))
             return null;
 
@@ -70,7 +72,8 @@ public sealed partial class FormService
                 "activityBy",
                 "activityOn",
                 "activityId",
-                "validationJson"
+                "validationJson",
+                "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId AND "isDeleted" = false
             ORDER BY "parentId", id
@@ -98,7 +101,8 @@ public sealed partial class FormService
                 ActivityBy: reader.IsDBNull(12) ? null : Convert.ToString(reader.GetValue(12), CultureInfo.InvariantCulture),
                 ActivityOn: reader.IsDBNull(13) ? null : Convert.ToString(reader.GetValue(13), CultureInfo.InvariantCulture),
                 ActivityId: reader.IsDBNull(14) ? null : reader.GetInt32(14),
-                ValidationJson: reader.IsDBNull(15) ? null : reader.GetString(15)));
+                ValidationJson: reader.IsDBNull(15) ? null : reader.GetString(15),
+                ColumnName: reader.FieldCount > 16 && !reader.IsDBNull(16) ? reader.GetString(16) : null));
         }
 
         return controls;
