@@ -4,7 +4,7 @@ public sealed record ApAgentMetadataApplyRequest(
     Guid WorkflowId,
     Guid InstanceId,
     string FormId,
-    int FormEntryId,
+    Guid FormEntryId,
     Guid RepositoryId,
     Guid ItemId,
     IReadOnlyDictionary<string, string> Fields,
@@ -12,7 +12,7 @@ public sealed record ApAgentMetadataApplyRequest(
 
 public sealed record ApAgentMetadataApplyResult(
     Guid ItemId,
-    int FormEntryId,
+    Guid FormEntryId,
     int RepositoryFieldsUpdated,
     int EzfbFieldsUpdated,
     bool LineItemsUpdated,

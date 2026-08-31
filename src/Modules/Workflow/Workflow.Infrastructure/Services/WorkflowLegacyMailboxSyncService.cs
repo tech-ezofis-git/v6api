@@ -539,8 +539,8 @@ LIMIT 1;";
         {
             if (!string.IsNullOrWhiteSpace(formOverride.FormId))
                 formId = formOverride.FormId.Trim();
-            if (formOverride.FormEntryId is > 0)
-                formEntryId = formOverride.FormEntryId.Value.ToString(CultureInfo.InvariantCulture);
+            if (formOverride.FormEntryId is { } overrideEntryId && overrideEntryId != Guid.Empty)
+                formEntryId = overrideEntryId.ToString("D");
             if (!string.IsNullOrWhiteSpace(formOverride.FormDataJson))
                 formData = formOverride.FormDataJson;
         }
@@ -548,7 +548,8 @@ LIMIT 1;";
         if (string.IsNullOrWhiteSpace(formData)
             && !string.IsNullOrWhiteSpace(formId)
             && !string.IsNullOrWhiteSpace(formEntryId)
-            && int.TryParse(formEntryId, out var entryId))
+            && Guid.TryParse(formEntryId, out var entryId)
+            && entryId != Guid.Empty)
         {
             formData = await WorkflowEzfbFormDataLoader.LoadFormDataJsonAsync(
                 connection, formId!, entryId, cancellationToken);
@@ -595,7 +596,7 @@ WHERE "Id" = @WorkflowId AND "IsDeleted" = false;
         MailboxFormSnapshot formData,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(formData.FormId) || formData.FormEntryId is not > 0)
+        if (string.IsNullOrWhiteSpace(formData.FormId) || formData.FormEntryId is not { } entryGuid || entryGuid == Guid.Empty)
             return;
 
         var connectionString = _tenantContext.ConnectionString;
@@ -613,7 +614,7 @@ WHERE "Id" = @WorkflowId AND "IsDeleted" = false;
         var instanceStr = workflowInstanceId.ToString("D");
 
         var formId = formData.FormId.Trim();
-        var formEntryId = formData.FormEntryId.Value.ToString(CultureInfo.InvariantCulture);
+        var formEntryId = formData.FormEntryId.Value.ToString("D");
         var formDataJson = formData.FormDataJson;
 
         if (string.IsNullOrWhiteSpace(formDataJson))

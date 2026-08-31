@@ -374,7 +374,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 RepositoryId: repo.RepositoryId?.ToString("D") ?? form.RepositoryId,
                 ItemId: repo.ItemId?.ToString("D") ?? form.ItemId,
                 FormId: form.FormId,
-                FormEntryId: form.FormEntryId?.ToString(CultureInfo.InvariantCulture),
+                FormEntryId: form.FormEntryId?.ToString("D"),
                 FormData: form.FormDataJson,
                 MlPrediction: null,
                 MlCondition: null,
@@ -989,7 +989,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
     private sealed record FormIdentityResult(
         string? FormId,
-        int? FormEntryId,
+        Guid? FormEntryId,
         string? FormDataJson,
         string? RepositoryId,
         string? ItemId);
@@ -1098,7 +1098,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
-        int? formEntryId = null;
+        Guid? formEntryId = null;
         string? formGuid = null;
 
         // Prefer process_form (same FormEntryId path as ezfb filter join).
@@ -1117,19 +1117,14 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             if (await reader.ReadAsync(cancellationToken))
             {
                 formGuid = reader.IsDBNull(0) ? null : Convert.ToString(reader.GetValue(0))?.Trim();
-                if (!reader.IsDBNull(1))
-                {
-                    var entryId = reader.GetInt32(1);
-                    if (entryId > 0)
-                        formEntryId = entryId;
-                }
+                formEntryId = EzfbEntryIdReader.ReadOrNull(reader, 1);
             }
         }
         catch (PostgresException)
         {
         }
 
-        if (formEntryId is not > 0)
+        if (formEntryId is null)
         {
             try
             {
@@ -1143,12 +1138,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 await using var cmd = new NpgsqlCommand(formsSql, connection);
                 cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
-                {
-                    var entryId = reader.GetInt32(0);
-                    if (entryId > 0)
-                        formEntryId = entryId;
-                }
+                if (await reader.ReadAsync(cancellationToken))
+                    formEntryId = EzfbEntryIdReader.ReadOrNull(reader, 0);
             }
             catch (PostgresException)
             {
@@ -1181,7 +1172,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
         // Always load live field values from ezfb_{formSuffix}_items on the current tenant connection.
         string? fieldsJson = null;
-        if (formEntryId is > 0 && !string.IsNullOrWhiteSpace(formGuid))
+        if (formEntryId is not null && !string.IsNullOrWhiteSpace(formGuid))
         {
             fieldsJson = await WorkflowEzfbFormDataLoader.LoadFormDataJsonAsync(
                 connection,

@@ -213,15 +213,15 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
     public async Task<int> ApplyFormDataToEzfbAsync(
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         IReadOnlyDictionary<string, string> fields,
         string? lineItemsJson = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(formId))
             throw new ArgumentException("formId is required.");
-        if (formEntryId <= 0)
-            throw new ArgumentException("formEntryId must be a positive integer.");
+        if (formEntryId == Guid.Empty)
+            throw new ArgumentException("formEntryId must be a valid GUID.");
         if (fields.Count == 0 && string.IsNullOrWhiteSpace(lineItemsJson))
             return 0;
 
@@ -349,13 +349,13 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         Guid workflowId,
         Guid workflowInstanceId,
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         string? agentResponseJson = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(formId) || formEntryId <= 0)
+            if (string.IsNullOrWhiteSpace(formId) || formEntryId == Guid.Empty)
                 return 0;
 
             // Prefer live AIAGENTResponse from move-next body (engine always sends po_row there).
@@ -550,7 +550,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
     private async Task<int> ApplyPoRowFieldsToEzfbAsync(
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         IReadOnlyDictionary<string, string> poRowFields,
         CancellationToken cancellationToken)
     {
@@ -690,7 +690,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     private async Task<int> TryApplyPoLineItemFromPoRowAsync(
         NpgsqlConnection connection,
         string ezfbTable,
-        int formEntryId,
+        Guid formEntryId,
         IReadOnlyDictionary<string, string> poRowFields,
         IReadOnlyList<FormControlRow> controls,
         HashSet<string> ezfbColumns,
@@ -1140,8 +1140,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     {
         if (string.IsNullOrWhiteSpace(request.FormId))
             throw new ArgumentException("formId is required.");
-        if (request.FormEntryId <= 0)
-            throw new ArgumentException("formEntryId must be a positive integer.");
+        if (request.FormEntryId == Guid.Empty)
+            throw new ArgumentException("formEntryId must be a valid GUID.");
         if (request.Fields.Count == 0 && string.IsNullOrWhiteSpace(request.LineItemsJson))
             throw new ArgumentException("At least one field or lineItems is required.");
 
@@ -1888,7 +1888,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     private static async Task<string?> GetEzfbColumnValueAsync(
         NpgsqlConnection connection,
         string ezfbTable,
-        int itemId,
+        Guid itemId,
         string column,
         CancellationToken cancellationToken)
     {
@@ -1902,7 +1902,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     private async Task UpdateEzfbColumnAsync(
         NpgsqlConnection connection,
         string ezfbTable,
-        int itemId,
+        Guid itemId,
         string column,
         string value,
         CancellationToken cancellationToken)

@@ -10,7 +10,7 @@ public sealed class WorkflowForm : Entity<Guid>, ITenantEntity
     public Guid WorkflowInstanceId { get; private set; }
     public Guid? StepInstanceId { get; private set; }
     public int WFormId { get; private set; } // Form template ID
-    public int FormEntryId { get; private set; } // Form submission ID
+    public Guid FormEntryId { get; private set; } // Form submission ID
     public string? FormData { get; private set; } // JSON: form field values
     public bool HasFormPdf { get; private set; }
     public DateTime CreatedAtUtc { get; private set; }
@@ -22,7 +22,7 @@ public sealed class WorkflowForm : Entity<Guid>, ITenantEntity
     private WorkflowForm() { } // EF
 
     /// <summary>Create a workflow form entry.</summary>
-    public static WorkflowForm Create(Guid tenantId, Guid workflowInstanceId, int wFormId, int formEntryId, Guid createdBy, Guid? stepInstanceId = null, string? formData = null, bool hasFormPdf = false)
+    public static WorkflowForm Create(Guid tenantId, Guid workflowInstanceId, int wFormId, Guid formEntryId, Guid createdBy, Guid? stepInstanceId = null, string? formData = null, bool hasFormPdf = false)
     {
         return new WorkflowForm
         {
