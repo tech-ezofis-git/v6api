@@ -8,7 +8,8 @@ public record StartWorkflowCommand(
     string? Context = null,
     string? EnvType = null,
     StartWorkflowAttachmentPayload? Attachment = null,
-    bool TriggerApAgentPythonJob = false) : IRequest<StartWorkflowCommandResult>;
+    bool TriggerApAgentPythonJob = false,
+    IReadOnlyList<string>? Skills = null) : IRequest<StartWorkflowCommandResult>;
 
 /// <summary>Optional file uploaded during start (also supported via multipart on the API).</summary>
 public record StartWorkflowAttachmentPayload(
@@ -26,4 +27,7 @@ public record StartWorkflowCommandResult(
     string? FormDataJson = null,
     string? FormDataBlobPath = null,
     IReadOnlyDictionary<string, object?>? StartPayload = null,
-    string? ApAgentJobId = null);
+    string? ApAgentJobId = null,
+    IReadOnlyList<string>? Skills = null,
+    /// <summary>Exact body POSTed to AP Agent <c>/chat</c> (null when no AP job was enqueued).</summary>
+    object? PythonInput = null);

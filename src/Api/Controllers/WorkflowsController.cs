@@ -1045,6 +1045,7 @@ public sealed class WorkflowsController : ControllerBase
         IFormFile? file,
         [FromForm] string? context,
         [FromForm] string? envType,
+        [FromForm] string[]? skills,
         CancellationToken cancellationToken)
     {
         StartWorkflowAttachmentPayload? attachment = null;
@@ -1065,7 +1066,8 @@ public sealed class WorkflowsController : ControllerBase
                 context,
                 envType,
                 attachment,
-                TriggerApAgentPythonJob: attachment is { Content.Length: > 0 }),
+                TriggerApAgentPythonJob: attachment is { Content.Length: > 0 },
+                Skills: skills),
             cancellationToken);
     }
 
@@ -1082,7 +1084,12 @@ public sealed class WorkflowsController : ControllerBase
         CancellationToken cancellationToken) =>
         await ExecuteStartAsync(
             id,
-            new StartWorkflowCommand(id, request?.Context, request?.EnvType, request?.Attachment),
+            new StartWorkflowCommand(
+                id,
+                request?.Context,
+                request?.EnvType,
+                request?.Attachment,
+                Skills: request?.Skills),
             cancellationToken);
 
     private async Task<IActionResult> ExecuteStartAsync(
@@ -1653,8 +1660,11 @@ public sealed class WorkflowsController : ControllerBase
             return BadRequest(new { error = "Tenant connection not resolved." });
 
         string payloadJson;
+        IReadOnlyList<string>? skills = null;
         if (body is { ValueKind: JsonValueKind.Object })
         {
+            if (ApAgentStartPayloadJson.TryGetSkillsFromRequestBody(body.Value, out var fromBody))
+                skills = fromBody;
             payloadJson = ApAgentStartPayloadJson.UnwrapInner(body.Value.GetRawText());
         }
         else
@@ -1671,7 +1681,8 @@ public sealed class WorkflowsController : ControllerBase
             userId.Value,
             workflowId,
             instanceId,
-            payloadJson);
+            payloadJson,
+            skills);
 
         if (background)
         {
@@ -2227,7 +2238,8 @@ public record UpdateWorkflowRequest(
 public record StartWorkflowRequest(
     string? Context = null,
     string? EnvType = null,
-    StartWorkflowAttachmentPayload? Attachment = null);
+    StartWorkflowAttachmentPayload? Attachment = null,
+    IReadOnlyList<string>? Skills = null);
 
 /// <summary>Request to set SLA policy for a workflow.</summary>
 public record SetWorkflowSlaRequest(SlaPriority Priority, int ResponseTimeMinutes, int ResolutionTimeMinutes, int? EscalationTimeMinutes = null, Guid? EscalateToUserId = null, string? EscalateToRole = null, bool SendNotificationOnBreach = true, string? NotificationEmails = null);

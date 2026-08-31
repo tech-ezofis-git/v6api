@@ -46,7 +46,7 @@ public sealed class ApDashboardController : ControllerBase
   /// <item><c>supplierConcentrationRisk</c> — Active Suppliers, High Risk, Top-3 Concentration</item>
   /// <item><c>agingProcessOversight</c> — 90+ Days, Critical Exceptions, Approval Rate</item>
   /// <item><c>invoiceAgingAnalysis</c> — aging buckets for the Invoice aging analysis chart</item>
-  /// <item><c>insights</c> — AI insight strings from Python <c>/api/v1/insights</c></item>
+  /// <item><c>insights</c> — AI insight strings from agents <c>/chat</c> using <c>intent=insight</c></item>
   /// </list>
   /// </remarks>
   [HttpPost]

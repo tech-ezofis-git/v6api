@@ -5,6 +5,7 @@ using SaaSApp.Repository.Infrastructure.Options;
 using SaaSApp.Repository.Infrastructure.Jobs;
 using SaaSApp.Repository.Infrastructure.Services;
 using SaaSApp.Repository.Infrastructure.Storage;
+using SaaSApp.SharedKernel.Options;
 
 namespace SaaSApp.Repository.Infrastructure;
 
@@ -12,9 +13,8 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
 {
     public static IServiceCollection AddRepositoryInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
+        services.Configure<AgentsChatOptions>(configuration.GetSection(AgentsChatOptions.SectionName));
         services.Configure<RepositoryFileStorageOptions>(configuration.GetSection(RepositoryFileStorageOptions.SectionName));
-        services.Configure<RepositoryOcrOptions>(configuration.GetSection(RepositoryOcrOptions.SectionName));
-        services.Configure<RepositoryAiSummaryOptions>(configuration.GetSection(RepositoryAiSummaryOptions.SectionName));
         services.Configure<RepositoryShareOptions>(configuration.GetSection(RepositoryShareOptions.SectionName));
         services.Configure<RepositorySignRequestOptions>(configuration.GetSection(RepositorySignRequestOptions.SectionName));
         services.AddHttpClient<IOcrExtractionService, OcrExtractionService>();

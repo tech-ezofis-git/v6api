@@ -1,8 +1,9 @@
-using System.Net.Http.Json;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SaaSApp.SharedKernel.Options;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Infrastructure.Options;
 
@@ -18,16 +19,16 @@ public sealed class ApDashboardInsightsClient : IApDashboardInsightsClient
     };
 
     private readonly IHttpClientFactory _httpClientFactory;
-    private readonly ApDashboardInsightsOptions _options;
+    private readonly AgentsChatOptions _agentsChat;
     private readonly ILogger<ApDashboardInsightsClient> _logger;
 
     public ApDashboardInsightsClient(
         IHttpClientFactory httpClientFactory,
-        IOptions<ApDashboardInsightsOptions> options,
+        IOptions<AgentsChatOptions> agentsChat,
         ILogger<ApDashboardInsightsClient> logger)
     {
         _httpClientFactory = httpClientFactory;
-        _options = options.Value;
+        _agentsChat = agentsChat.Value;
         _logger = logger;
     }
 
@@ -35,20 +36,23 @@ public sealed class ApDashboardInsightsClient : IApDashboardInsightsClient
         ApDashboardResult dashboard,
         CancellationToken cancellationToken = default)
     {
-        if (!_options.Enabled)
+        if (!ApDashboardInsightsDefaults.Enabled)
             return Array.Empty<string>();
 
-        var apiUrl = _options.ApiUrl?.Trim();
+        var apiUrl = _agentsChat.ResolveChatUrl();
         if (string.IsNullOrWhiteSpace(apiUrl))
         {
-            _logger.LogWarning("ApDashboard:Insights:ApiUrl is not configured; skipping insights.");
+            _logger.LogWarning("Agents:ChatUrl is not configured; skipping insights.");
             return Array.Empty<string>();
         }
 
         try
         {
             var client = _httpClientFactory.CreateClient(nameof(ApDashboardInsightsClient));
-            using var response = await client.PostAsJsonAsync(apiUrl, dashboard, JsonOptions, cancellationToken);
+            var request = BuildChatRequest(dashboard);
+            var requestJson = JsonSerializer.Serialize(request, JsonOptions);
+            using var content = new StringContent(requestJson, Encoding.UTF8, "application/json");
+            using var response = await client.PostAsync(apiUrl, content, cancellationToken);
             var body = await response.Content.ReadAsStringAsync(cancellationToken);
 
             if (!response.IsSuccessStatusCode)
@@ -67,10 +71,9 @@ public sealed class ApDashboardInsightsClient : IApDashboardInsightsClient
             }
 
             using var doc = JsonDocument.Parse(body);
-            if (!doc.RootElement.TryGetProperty("insights", out var insightsEl)
-                || insightsEl.ValueKind != JsonValueKind.Array)
+            if (!TryGetInsightsArray(doc.RootElement, out var insightsEl))
             {
-                _logger.LogWarning("AP dashboard insights API response missing insights array.");
+                _logger.LogWarning("AP dashboard /chat response missing insight_result.insights array.");
                 return Array.Empty<string>();
             }
 
@@ -92,6 +95,45 @@ public sealed class ApDashboardInsightsClient : IApDashboardInsightsClient
             _logger.LogWarning(ex, "AP dashboard insights API call failed; returning dashboard without insights.");
             return Array.Empty<string>();
         }
+    }
+
+    private static object BuildChatRequest(ApDashboardResult dashboard)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["insights_count"] = ApDashboardInsightsDefaults.InsightsCount,
+            ["insight_area"] = ApDashboardInsightsDefaults.InsightArea,
+            ["insight_json"] = dashboard
+        };
+
+        return new
+        {
+            session_id = $"ap-dashboard-{Guid.NewGuid():N}",
+            intent = "insight",
+            payload
+        };
+    }
+
+    private static bool TryGetInsightsArray(JsonElement root, out JsonElement insights)
+    {
+        // Current agents /chat contract.
+        if (root.TryGetProperty("insight_result", out var result)
+            && result.ValueKind == JsonValueKind.Object
+            && result.TryGetProperty("insights", out insights)
+            && insights.ValueKind == JsonValueKind.Array)
+        {
+            return true;
+        }
+
+        // Keep compatibility with the retired /api/v1/insights response.
+        if (root.TryGetProperty("insights", out insights)
+            && insights.ValueKind == JsonValueKind.Array)
+        {
+            return true;
+        }
+
+        insights = default;
+        return false;
     }
 
     private static string Truncate(string value, int maxLength) =>

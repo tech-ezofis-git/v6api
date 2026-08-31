@@ -32,6 +32,7 @@
     <ProjectReference Include="..\..\Repository\Repository.Application\SaaSApp.Repository.Application.csproj" />
     <ProjectReference Include="..\..\..\BuildingBlocks\MultiTenancy\SaaSApp.MultiTenancy.csproj" />
     <ProjectReference Include="..\..\..\BuildingBlocks\Catalog\SaaSApp.Catalog.csproj" />
+    <ProjectReference Include="..\..\..\BuildingBlocks\SharedKernel\SaaSApp.SharedKernel.csproj" />
   </ItemGroup>
 
 </Project>

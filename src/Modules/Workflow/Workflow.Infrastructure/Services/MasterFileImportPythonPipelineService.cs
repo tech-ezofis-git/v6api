@@ -41,7 +41,7 @@ public sealed class MasterFileImportPythonPipelineService : IMasterFileImportPyt
         CancellationToken cancellationToken = default)
     {
         var options = _options.Value;
-        if (!options.Enabled)
+        if (!FormMasterFileImportDefaults.Enabled)
         {
             _logger.LogInformation(
                 "Master file import disabled; skipping process {ProcessId}.",
@@ -181,7 +181,7 @@ public sealed class MasterFileImportPythonPipelineService : IMasterFileImportPyt
         content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
         using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromMinutes(Math.Max(1, options.TimeoutMinutes)));
+        timeoutCts.CancelAfter(TimeSpan.FromMinutes(Math.Max(1, FormMasterFileImportDefaults.TimeoutMinutes)));
 
         _logger.LogInformation(
             "Posting master file import payload to Python at {Url}",

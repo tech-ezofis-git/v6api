@@ -6,7 +6,12 @@ public sealed record ApAgentPythonJobArgs(
     Guid UserId,
     Guid WorkflowId,
     Guid InstanceId,
-    string StartPayloadJson);
+    string StartPayloadJson,
+    /// <summary>
+    /// Optional skill subset for <c>/chat</c>. Null/empty = full tenant default plan on agents
+    /// (unless <c>ApAgent:DefaultSkills</c> is configured).
+    /// </summary>
+    IReadOnlyList<string>? Skills = null);
 
 public interface IApAgentPythonJobClient
 {
@@ -19,4 +24,7 @@ public interface IApAgentPythonPipelineService
         ApAgentPythonJobArgs args,
         string? hangfireJobId = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Exact JSON body POSTed to agents <c>/chat</c> for the given job args.</summary>
+    string BuildChatRequestJson(ApAgentPythonJobArgs args, string? hangfireJobId = null);
 }

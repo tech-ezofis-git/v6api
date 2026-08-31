@@ -96,7 +96,7 @@ public sealed record ApDashboardResult(
   /// <summary>Invoice aging analysis chart buckets (current / 1–30 / 31–60 / 61–90 / 90+).</summary>
   ApDashboardAgingAnalysisDto InvoiceAgingAnalysis,
   IReadOnlyList<ApDashboardInvoiceDto>? Invoices = null,
-  /// <summary>AI insights from Python <c>/api/v1/insights</c> (attached after dashboard build).</summary>
+  /// <summary>AI insights from agents <c>/chat</c> with <c>intent=insight</c> (attached after dashboard build).</summary>
   IReadOnlyList<string>? Insights = null);
 
 /// <summary>Collapsible dashboard panel with title, subtitle, and KPI cards.</summary>

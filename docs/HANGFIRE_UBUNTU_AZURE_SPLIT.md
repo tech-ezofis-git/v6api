@@ -93,7 +93,7 @@ Set on Azure App Service (Configuration / `appsettings`):
   "HangfireCron": "*/5 * * * *"
 },
 "ApAgent": {
-  "PythonServiceUrl": "https://<python-host>/api/ap-agent/run",
+  "PythonServiceUrl": "http://agents:8000/chat",
   "ApiBaseUrl": "https://<your-azure-api>/V6API/api/workflows",
   "TimeoutMinutes": 30
 }
@@ -133,7 +133,7 @@ Checklist:
   "DefaultConnection": "<same catalog SQL as Azure API>"
 },
 "ApAgent": {
-  "PythonServiceUrl": "https://<python-host>/api/ap-agent/run",
+  "PythonServiceUrl": "http://agents:8000/chat",
   "ApiBaseUrl": "https://<your-azure-api>/V6API/api/workflows",
   "TimeoutMinutes": 30
 },
