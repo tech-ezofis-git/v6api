@@ -543,7 +543,7 @@ public sealed partial class FormService : IFormService
         // string elsewhere (WorkflowEzfbFormDataLoader.cs).
         var sb = new StringBuilder();
         sb.Append($"CREATE TABLE dbo.\"{tableName}\" (");
-        sb.Append("item_id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,");
+        sb.Append("item_id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),");
         foreach (var col in columns)
             sb.Append($"\"{col}\" text NULL,");
         sb.Append("created_at varchar(50) NULL, modified_at varchar(50) NULL,");

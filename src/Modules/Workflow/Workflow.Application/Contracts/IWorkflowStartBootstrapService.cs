@@ -25,7 +25,7 @@ public sealed record WorkflowStartBootstrapRequest(
 public sealed record WorkflowStartBootstrapResult(
     int? FirstTransactionId,
     int? CurrentTransactionId,
-    int? FormEntryId,
+    Guid? FormEntryId,
     Guid? ApAgentStepInstanceId,
     string FormDataJson,
     string? FormDataBlobPath,

@@ -31,10 +31,10 @@ public sealed class WorkflowEzfbFormDataLoader : SaaSApp.Workflow.Application.Co
 
     public async Task<string?> LoadFormDataJsonAsync(
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(formId) || formEntryId <= 0)
+        if (string.IsNullOrWhiteSpace(formId) || formEntryId == Guid.Empty)
             return null;
 
         var connectionString = _tenantContext.ConnectionString;
@@ -49,10 +49,10 @@ public sealed class WorkflowEzfbFormDataLoader : SaaSApp.Workflow.Application.Co
     internal static async Task<string?> LoadFormDataJsonAsync(
         NpgsqlConnection connection,
         string rawFormId,
-        int formEntryId,
+        Guid formEntryId,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(rawFormId) || formEntryId <= 0)
+        if (string.IsNullOrWhiteSpace(rawFormId) || formEntryId == Guid.Empty)
             return null;
 
         string tableSuffix;

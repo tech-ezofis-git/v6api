@@ -76,7 +76,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         var lineItemsJson = request.FormLineItemsJson;
 
         if (!string.IsNullOrWhiteSpace(request.FormId)
-            && request.FormEntryId is > 0
+            && request.FormEntryId is { } reqEntryId && reqEntryId != Guid.Empty
             && ((request.FormDataFields is { Count: > 0 })
                 || !string.IsNullOrWhiteSpace(lineItemsJson)))
         {
@@ -108,7 +108,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         var formId = !string.IsNullOrWhiteSpace(request.FormId)
             ? request.FormId
             : request.ApAgent?.FormId;
-        var formEntryId = request.FormEntryId is > 0
+        var formEntryId = request.FormEntryId is { } fe && fe != Guid.Empty
             ? request.FormEntryId
             : request.ApAgent?.FormEntryId;
 
@@ -127,7 +127,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             }
 
             // Still push po_row → form even when review does not advance the workflow.
-            if (!string.IsNullOrWhiteSpace(formId) && formEntryId is > 0)
+            if (!string.IsNullOrWhiteSpace(formId) && formEntryId is { } entry && entry != Guid.Empty)
             {
                 await _apAgentMoveNext.ApplyPoRowFromStoredAgentValidationAsync(
                     instance.WorkflowId,
@@ -203,7 +203,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         var appliedPoRowToEzfb = false;
         if (isApAgentMoveNext
             && !string.IsNullOrWhiteSpace(formId)
-            && formEntryId is > 0)
+            && formEntryId is { } poEntry && poEntry != Guid.Empty)
         {
             await _apAgentMoveNext.ApplyPoRowFromStoredAgentValidationAsync(
                 instance.WorkflowId,
@@ -396,13 +396,13 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private async Task<MailboxFormSnapshot?> BuildMailboxFormSnapshotAsync(
         MoveToNextStepCommand request,
         string? formId,
-        int? formEntryId,
+        Guid? formEntryId,
         CancellationToken cancellationToken,
         bool preferEzfb = false)
     {
         var resolvedFormId = !string.IsNullOrWhiteSpace(formId) ? formId : request.FormId;
-        var resolvedEntryId = formEntryId is > 0 ? formEntryId : request.FormEntryId;
-        if (string.IsNullOrWhiteSpace(resolvedFormId) || resolvedEntryId is not > 0)
+        var resolvedEntryId = formEntryId is { } e && e != Guid.Empty ? formEntryId : request.FormEntryId;
+        if (string.IsNullOrWhiteSpace(resolvedFormId) || resolvedEntryId is not { } resolved || resolved == Guid.Empty)
             return null;
 
         string? formDataJson = null;
@@ -442,7 +442,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         MoveToNextStepCommand request,
         WorkflowInstance instance,
         string? formId,
-        int? formEntryId,
+        Guid? formEntryId,
         bool preferEzfb,
         CancellationToken cancellationToken)
     {

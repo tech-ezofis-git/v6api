@@ -288,11 +288,11 @@ LIMIT 1;
       return;
 
     var formId = ReadScalarString(reader, 0);
-    var formEntryId = reader.IsDBNull(1) ? 0 : Convert.ToInt32(reader.GetValue(1), CultureInfo.InvariantCulture);
-    if (string.IsNullOrWhiteSpace(formId) || formEntryId <= 0)
+    var formEntryId = EzfbEntryIdReader.ReadOrNull(reader, 1);
+    if (string.IsNullOrWhiteSpace(formId) || formEntryId is not { } entryId || entryId == Guid.Empty)
       return;
 
-    var formJson = await _formDataLoader.LoadFormDataJsonAsync(formId, formEntryId, cancellationToken);
+    var formJson = await _formDataLoader.LoadFormDataJsonAsync(formId, entryId, cancellationToken);
     MergeFormFields(fields, formJson);
     ApplyApFieldAliases(fields);
   }

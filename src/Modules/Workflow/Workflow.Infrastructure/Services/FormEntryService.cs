@@ -29,7 +29,7 @@ public sealed class FormEntryService : IFormEntryService
 
     public Task<FormEntryResult> UpsertEntryAsync(
         string formId,
-        int entryId,
+        Guid entryId,
         JsonElement body,
         CancellationToken cancellationToken = default)
     {
@@ -39,7 +39,7 @@ public sealed class FormEntryService : IFormEntryService
 
     public async Task<FormEntryResult> UpsertEntryAsync(
         string formId,
-        int entryId,
+        Guid entryId,
         FormEntryUpsertRequest request,
         CancellationToken cancellationToken = default)
     {
@@ -83,7 +83,7 @@ public sealed class FormEntryService : IFormEntryService
             tableName,
             formMeta.UniqueColumns,
             resolvedFields,
-            entryId > 0 ? entryId : null,
+            entryId != Guid.Empty ? entryId : null,
             controls,
             cancellationToken);
         if (duplicate != null)
@@ -92,7 +92,7 @@ public sealed class FormEntryService : IFormEntryService
         var userStamp = userId.ToString("D");
         var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 
-        if (entryId == 0)
+        if (entryId == Guid.Empty)
         {
             var newId = await InsertEntryAsync(
                 connection,
@@ -101,10 +101,10 @@ public sealed class FormEntryService : IFormEntryService
                 now,
                 userStamp,
                 cancellationToken);
-            if (newId <= 0)
+            if (newId == Guid.Empty)
                 return Failed("form entry not found");
 
-            return new FormEntryResult(1, newId.ToString(CultureInfo.InvariantCulture), "created new form entry");
+            return new FormEntryResult(1, newId.ToString("D"), "created new form entry");
         }
 
         if (!await EntryExistsAsync(connection, tableName, entryId, cancellationToken))
@@ -123,7 +123,7 @@ public sealed class FormEntryService : IFormEntryService
 
         return new FormEntryResult(
             2,
-            entryId.ToString(CultureInfo.InvariantCulture),
+            entryId.ToString("D"),
             "updated form entry");
     }
 
@@ -137,8 +137,8 @@ public sealed class FormEntryService : IFormEntryService
 
         var ids = entryIds
             .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(s => int.TryParse(s, NumberStyles.Integer, CultureInfo.InvariantCulture, out var n) ? n : 0)
-            .Where(n => n > 0)
+            .Select(s => Guid.TryParse(s, out var g) ? g : Guid.Empty)
+            .Where(g => g != Guid.Empty)
             .Distinct()
             .ToList();
         if (ids.Count == 0)
@@ -294,7 +294,15 @@ public sealed class FormEntryService : IFormEntryService
                 if (!entries[i].TryGetValue("item_id", out var itemObj) || itemObj == null)
                     continue;
 
-                var entryId = Convert.ToInt32(itemObj, CultureInfo.InvariantCulture);
+                var entryId = itemObj switch
+                {
+                    Guid guid => guid,
+                    string text when Guid.TryParse(text, out var parsed) => parsed,
+                    _ => Guid.Empty
+                };
+                if (entryId == Guid.Empty)
+                    continue;
+
                 var formDataJson = await _formDataLoader.LoadFormDataJsonAsync(normalizedFormId, entryId, cancellationToken);
                 if (string.IsNullOrWhiteSpace(formDataJson))
                     continue;
@@ -500,7 +508,7 @@ public sealed class FormEntryService : IFormEntryService
         string tableName,
         string? uniqueColumns,
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
-        int? excludeEntryId,
+        Guid? excludeEntryId,
         IReadOnlyList<FormControlRow> controls,
         CancellationToken cancellationToken)
     {
@@ -567,12 +575,12 @@ public sealed class FormEntryService : IFormEntryService
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
-    private static async Task<int?> FindDuplicateEntryIdAsync(
+    private static async Task<Guid?> FindDuplicateEntryIdAsync(
         NpgsqlConnection connection,
         string tableName,
         string column,
         string fieldValue,
-        int? excludeEntryId,
+        Guid? excludeEntryId,
         CancellationToken cancellationToken)
     {
         var escapedCol = EscapeColumn(column);
@@ -600,24 +608,24 @@ public sealed class FormEntryService : IFormEntryService
                 """;
         }
 
-        if (excludeEntryId is > 0)
+        if (excludeEntryId is { } excluded && excluded != Guid.Empty)
             sql += " AND item_id <> @ExcludeId";
         sql += " LIMIT 1;";
 
         await using var cmd = new NpgsqlCommand(sql, connection);
         if (!string.IsNullOrWhiteSpace(fieldValue))
             cmd.Parameters.AddWithValue("@Value", fieldValue);
-        if (excludeEntryId is > 0)
-            cmd.Parameters.AddWithValue("@ExcludeId", excludeEntryId.Value);
+        if (excludeEntryId is { } excludedId && excludedId != Guid.Empty)
+            cmd.Parameters.AddWithValue("@ExcludeId", excludedId);
 
         var result = await cmd.ExecuteScalarAsync(cancellationToken);
         if (result == null || result == DBNull.Value)
             return null;
 
-        return Convert.ToInt32(result, CultureInfo.InvariantCulture);
+        return (Guid)result;
     }
 
-    private static async Task<int> InsertEntryAsync(
+    private static async Task<Guid> InsertEntryAsync(
         NpgsqlConnection connection,
         string tableName,
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
@@ -647,13 +655,13 @@ public sealed class FormEntryService : IFormEntryService
         cmd.Parameters.AddWithValue("@CreatedAt", createdAt);
         cmd.Parameters.AddWithValue("@CreatedBy", createdBy);
 
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+        return (Guid)(await cmd.ExecuteScalarAsync(cancellationToken))!;
     }
 
     private static async Task<bool> UpdateEntryAsync(
         NpgsqlConnection connection,
         string tableName,
-        int entryId,
+        Guid entryId,
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
         string modifiedAt,
         string modifiedBy,
@@ -684,7 +692,7 @@ public sealed class FormEntryService : IFormEntryService
     private static async Task<bool> EntryExistsAsync(
         NpgsqlConnection connection,
         string tableName,
-        int entryId,
+        Guid entryId,
         CancellationToken cancellationToken)
     {
         var sql = $"""
@@ -701,7 +709,7 @@ public sealed class FormEntryService : IFormEntryService
         NpgsqlConnection connection,
         string tableName,
         IReadOnlySet<string> ezfbColumns,
-        int entryId,
+        Guid entryId,
         CancellationToken cancellationToken)
     {
         var selectColumns = ezfbColumns

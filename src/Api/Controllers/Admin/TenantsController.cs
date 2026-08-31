@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
 using SaaSApp.Security;
+using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Api.Controllers.Admin;
 
@@ -14,10 +15,14 @@ namespace SaaSApp.Api.Controllers.Admin;
 public sealed class TenantsController : ControllerBase
 {
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
+    private readonly IEzfbEntryIdMigrationService _ezfbEntryIdMigration;
 
-    public TenantsController(IDbContextFactory<CatalogDbContext> catalogFactory)
+    public TenantsController(
+        IDbContextFactory<CatalogDbContext> catalogFactory,
+        IEzfbEntryIdMigrationService ezfbEntryIdMigration)
     {
         _catalogFactory = catalogFactory;
+        _ezfbEntryIdMigration = ezfbEntryIdMigration;
     }
 
     /// <summary>
@@ -66,6 +71,28 @@ public sealed class TenantsController : ControllerBase
         if (tenant == null)
             return NotFound();
         return Ok(tenant);
+    }
+
+    /// <summary>
+    /// Migrate legacy integer ezfb item_id and workflow form_entry_id values to uuid for an existing tenant DB.
+    /// Run once per tenant before using the Guid formEntryId API on live data.
+    /// </summary>
+    [HttpPost("{id:guid}/migrate-ezfb-entry-ids")]
+    [ProducesResponseType(typeof(EzfbEntryIdMigrationResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> MigrateEzfbEntryIds(Guid id, CancellationToken cancellationToken)
+    {
+        await using var context = await _catalogFactory.CreateDbContextAsync(cancellationToken);
+        var tenant = await context.Tenants
+            .AsNoTracking()
+            .Where(t => t.Id == id)
+            .Select(t => new { t.ConnectionString })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (tenant == null || string.IsNullOrWhiteSpace(tenant.ConnectionString))
+            return NotFound();
+
+        var result = await _ezfbEntryIdMigration.MigrateTenantAsync(tenant.ConnectionString, cancellationToken);
+        return Ok(result);
     }
 }
 

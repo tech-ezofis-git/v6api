@@ -466,7 +466,7 @@ Frontend → POST /workflows/{id}/start (with file)
     "itemId": "guid",
     "instanceId": "guid",
     "transactionId": "guid",
-    "formentryId": 123,
+    "formentryId": "33333333-3333-3333-3333-333333333333",
     "formId": "...",
     "apAgentJobId": "12345",
     "apAgentJobStatusUrl": "/api/workflows/ap-agent/jobs/12345",

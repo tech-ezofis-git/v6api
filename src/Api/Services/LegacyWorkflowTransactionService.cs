@@ -551,7 +551,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
         var sql = $"""
             CREATE SCHEMA IF NOT EXISTS dbo;
             CREATE TABLE IF NOT EXISTS {table} (
-                item_id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,
+                item_id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
                 created_at timestamptz NOT NULL DEFAULT now(),
                 created_by uuid NULL,
                 modified_at timestamptz NULL,
@@ -563,7 +563,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
         await cmd.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<int> InsertEzfbItemAsync(NpgsqlConnection connection, string suffix, Guid? createdBy, CancellationToken cancellationToken)
+    private static async Task<Guid> InsertEzfbItemAsync(NpgsqlConnection connection, string suffix, Guid? createdBy, CancellationToken cancellationToken)
     {
         var table = $"dbo.ezfb_{suffix}_items";
         var sql = $"""
@@ -573,7 +573,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
             """;
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@CreatedBy", (object?)createdBy ?? DBNull.Value);
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false));
+        return (Guid)(await cmd.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false))!;
     }
 
     private async Task<Guid?> ResolveCreatedByAsync(string tenantConnectionString, JsonElement body, CancellationToken cancellationToken)
@@ -736,7 +736,7 @@ public sealed class V5ProcessResultDto
     public string? TransactionId { get; set; }
     public string? AutoGenDocNo { get; set; }
     public string Log { get; set; } = "";
-    public int FormEntryId { get; set; }
+    public Guid FormEntryId { get; set; }
     public string ActivityId { get; set; } = "";
     public string ApplicationId { get; set; } = "";
     public string PersonalEntryId { get; set; } = "";

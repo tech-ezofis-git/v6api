@@ -249,7 +249,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         Guid? repositoryItemId,
         Guid instanceGuid,
         Guid? transactionGuid,
-        int formEntryItemId,
+        Guid formEntryItemId,
         string? formTemplateId) =>
         new()
         {
@@ -262,11 +262,11 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             ["repositoryItemId"] = repositoryItemId?.ToString("D") ?? string.Empty,
             ["instanceId"] = instanceGuid.ToString("D"),
             ["transactionId"] = transactionGuid?.ToString("D") ?? string.Empty,
-            ["formentryId"] = formEntryItemId,
+            ["formentryId"] = formEntryItemId.ToString("D"),
             ["formId"] = formTemplateId ?? string.Empty
         };
 
-    private async Task<int> InsertFormEntryAsync(
+    private async Task<Guid> InsertFormEntryAsync(
         string connectionString,
         string? formId,
         Guid userId,
@@ -294,7 +294,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         var sql = $"""
             CREATE SCHEMA IF NOT EXISTS dbo;
             CREATE TABLE IF NOT EXISTS dbo.ezfb_{tableSuffix}_items (
-                item_id integer GENERATED ALWAYS AS IDENTITY NOT NULL PRIMARY KEY,
+                item_id uuid NOT NULL PRIMARY KEY DEFAULT gen_random_uuid(),
                 created_at varchar(50) NULL,
                 modified_at varchar(50) NULL,
                 created_by varchar(50) NOT NULL DEFAULT '0',
@@ -321,7 +321,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
-    private static async Task<int> InsertEzfbItemRowAsync(
+    private static async Task<Guid> InsertEzfbItemRowAsync(
         NpgsqlConnection connection,
         string tableSuffix,
         Guid userId,
@@ -336,7 +336,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             """;
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@CreatedBy", createdBy);
-        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken));
+        return (Guid)(await cmd.ExecuteScalarAsync(cancellationToken))!;
     }
 
     /// <summary>
@@ -354,7 +354,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         string workflowSuffix,
         Guid workflowInstanceId,
         string? formId,
-        int formEntryItemId,
+        Guid formEntryItemId,
         Guid userId,
         CancellationToken cancellationToken)
     {
@@ -392,7 +392,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 id integer GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
                 workflow_instance_id uuid NOT NULL,
                 w_form_id varchar(64) NOT NULL,
-                form_entry_id integer NOT NULL,
+                form_entry_id uuid NOT NULL,
                 created_at timestamptz NOT NULL DEFAULT now(),
                 created_by uuid NOT NULL,
                 is_deleted boolean NOT NULL DEFAULT false
@@ -419,7 +419,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         Guid workflowInstanceId,
         Guid? stepInstanceId,
         int wFormId,
-        int formEntryId,
+        Guid formEntryId,
         string formDataJson,
         Guid userId,
         CancellationToken cancellationToken)

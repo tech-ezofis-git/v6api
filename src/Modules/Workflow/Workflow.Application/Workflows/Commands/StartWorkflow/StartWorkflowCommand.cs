@@ -21,7 +21,7 @@ public record StartWorkflowCommandResult(
     Guid InstanceId,
     int? FirstTransactionId = null,
     int? CurrentTransactionId = null,
-    int? FormEntryId = null,
+    Guid? FormEntryId = null,
     Guid? ApAgentStepInstanceId = null,
     string? FormDataJson = null,
     string? FormDataBlobPath = null,

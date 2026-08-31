@@ -7,19 +7,19 @@ namespace SaaSApp.Workflow.Application.Contracts;
 public interface IFormEntryService
 {
     /// <summary>
-    /// Add (<paramref name="entryId"/> = 0) or update an ezfb form entry row.
+    /// Add (<paramref name="entryId"/> = empty Guid) or update an ezfb form entry row.
     /// Returns v5 result codes: 1=created, 2=updated, 3=duplicate, 0=failed.
     /// </summary>
     Task<FormEntryResult> UpsertEntryAsync(
         string formId,
-        int entryId,
+        Guid entryId,
         FormEntryUpsertRequest request,
         CancellationToken cancellationToken = default);
 
     /// <summary>Parse v5-style body and upsert.</summary>
     Task<FormEntryResult> UpsertEntryAsync(
         string formId,
-        int entryId,
+        Guid entryId,
         JsonElement body,
         CancellationToken cancellationToken = default);
 
