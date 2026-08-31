@@ -85,6 +85,90 @@ public sealed class EzfbEntryIdMigrationService : IEzfbEntryIdMigrationService
             messages);
     }
 
+    /// <summary>
+    /// If <paramref name="tableName"/> still has integer <c>item_id</c> (old API / bootstrap-before-deploy),
+    /// migrate it to uuid in-place and update workflow <c>form_entry_id</c> references.
+    /// Returns true when the table was dropped as empty legacy (caller should CREATE uuid table).
+    /// </summary>
+    public static async Task<bool> UpgradeLegacyIntegerTableAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        CancellationToken cancellationToken = default)
+    {
+        if (!await HasIntegerItemIdAsync(connection, tableName, cancellationToken))
+            return false;
+
+        var rowCount = await CountRowsAsync(connection, tableName, cancellationToken);
+        if (rowCount == 0)
+        {
+            await DropEzfbTablesAsync(connection, tableName, cancellationToken);
+            return true;
+        }
+
+        await EnsureMappingTableAsync(connection, cancellationToken);
+        var formIdsByEzfbTable = await LoadFormIdsByEzfbTableAsync(connection, cancellationToken);
+        formIdsByEzfbTable.TryGetValue(tableName, out var wFormIds);
+        wFormIds ??= [];
+
+        await PopulateMappingAsync(connection, tableName, cancellationToken);
+        await AddAndBackfillUuidColumnAsync(connection, tableName, cancellationToken);
+        await SwapEzfbPrimaryKeyAsync(connection, tableName, cancellationToken);
+        await MigrateHistoryTableAsync(connection, tableName, cancellationToken);
+
+        await UpdateProcessFormReferencesAsync(connection, tableName, wFormIds, cancellationToken);
+        await UpdateWorkflowFormsReferencesAsync(connection, tableName, wFormIds, cancellationToken);
+        await UpdateWorkflowTasksReferencesAsync(connection, tableName, wFormIds, cancellationToken);
+        await FinalizeAllWorkflowFormEntryColumnsAsync(connection, cancellationToken);
+
+        return false;
+    }
+
+    private static async Task<bool> HasIntegerItemIdAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT data_type
+            FROM information_schema.columns
+            WHERE table_schema = 'dbo'
+              AND table_name = @TableName
+              AND column_name = 'item_id';
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TableName", tableName);
+        var dataType = Convert.ToString(await cmd.ExecuteScalarAsync(cancellationToken));
+        return string.Equals(dataType, "integer", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task<int> CountRowsAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        var sql = $"""SELECT COUNT(1) FROM dbo."{tableName}";""";
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken), CultureInfo.InvariantCulture);
+    }
+
+    private static async Task DropEzfbTablesAsync(
+        NpgsqlConnection connection,
+        string itemsTableName,
+        CancellationToken cancellationToken)
+    {
+        if (!itemsTableName.EndsWith("_items", StringComparison.Ordinal))
+            return;
+
+        var historyTable = itemsTableName[..^"_items".Length] + "_history";
+        await using var cmd = new NpgsqlCommand(
+            $"""
+            DROP TABLE IF EXISTS dbo."{historyTable}";
+            DROP TABLE IF EXISTS dbo."{itemsTableName}";
+            """,
+            connection) { CommandTimeout = 120 };
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     private static async Task EnsureMappingTableAsync(NpgsqlConnection connection, CancellationToken cancellationToken)
     {
         const string sql = """

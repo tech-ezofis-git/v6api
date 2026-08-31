@@ -527,7 +527,12 @@ public sealed partial class FormService : IFormService
         var tableName = $"ezfb_{tableSuffix}_items";
         var historyTable = $"ezfb_{tableSuffix}_history";
         if (await TableExistsAsync(connection, tableName, cancellationToken))
-            return;
+        {
+            var droppedEmptyLegacy = await EzfbEntryIdMigrationService.UpgradeLegacyIntegerTableAsync(
+                connection, tableName, cancellationToken);
+            if (!droppedEmptyLegacy)
+                return;
+        }
 
         var columns = fieldCols.Count > 0 ? fieldCols : BuildFieldColumnsFromLabels(fields);
 

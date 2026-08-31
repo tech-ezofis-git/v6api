@@ -279,8 +279,16 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        if (!await EzfbTableExistsAsync(connection, tableSuffix, cancellationToken))
+        var tableName = $"ezfb_{tableSuffix}_items";
+        if (await EzfbTableExistsAsync(connection, tableSuffix, cancellationToken))
+        {
+            await EzfbEntryIdMigrationService.UpgradeLegacyIntegerTableAsync(
+                connection, tableName, cancellationToken);
+        }
+        else
+        {
             await EnsureMinimalEzfbTableAsync(connection, tableSuffix, cancellationToken);
+        }
 
         return await InsertEzfbItemRowAsync(connection, tableSuffix, userId, cancellationToken);
     }
