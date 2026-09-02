@@ -16,6 +16,7 @@ public sealed class ApAgentPythonPipelineService : IApAgentPythonPipelineService
     private readonly ITenantConnectionStringResolver _connectionStringResolver;
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly JobExecutionContext _jobContext;
+    private readonly IApAgentPilotAuthProvider _pilotAuthProvider;
     private readonly IOptions<ApAgentOptions> _options;
     private readonly AgentsChatOptions _agentsChat;
     private readonly ILogger<ApAgentPythonPipelineService> _logger;
@@ -25,6 +26,7 @@ public sealed class ApAgentPythonPipelineService : IApAgentPythonPipelineService
         ITenantConnectionStringResolver connectionStringResolver,
         ITenantConnectionProvider connectionProvider,
         JobExecutionContext jobContext,
+        IApAgentPilotAuthProvider pilotAuthProvider,
         IOptions<ApAgentOptions> options,
         IOptions<AgentsChatOptions> agentsChat,
         ILogger<ApAgentPythonPipelineService> logger)
@@ -33,6 +35,7 @@ public sealed class ApAgentPythonPipelineService : IApAgentPythonPipelineService
         _connectionStringResolver = connectionStringResolver;
         _connectionProvider = connectionProvider;
         _jobContext = jobContext;
+        _pilotAuthProvider = pilotAuthProvider;
         _options = options;
         _agentsChat = agentsChat.Value;
         _logger = logger;
@@ -69,7 +72,7 @@ public sealed class ApAgentPythonPipelineService : IApAgentPythonPipelineService
 
         try
         {
-            var requestBody = BuildChatRequestJson(args, hangfireJobId);
+            var requestBody = await BuildChatRequestJsonAsync(args, hangfireJobId, cancellationToken);
             await PostToPythonAsync(options, chatUrl, requestBody, cancellationToken);
 
             _logger.LogInformation(
@@ -84,14 +87,14 @@ public sealed class ApAgentPythonPipelineService : IApAgentPythonPipelineService
 
     /// <inheritdoc />
     public string BuildChatRequestJson(ApAgentPythonJobArgs args, string? hangfireJobId = null) =>
-        BuildChatRequestBody(args, hangfireJobId, _options.Value);
+        BuildChatRequestJsonAsync(args, hangfireJobId, CancellationToken.None).GetAwaiter().GetResult();
 
-    /// <summary>Maps workflow start payload to agents <c>/chat</c> JSON (<c>intent=ap</c>).</summary>
-    private static string BuildChatRequestBody(
+    private async Task<string> BuildChatRequestJsonAsync(
         ApAgentPythonJobArgs args,
         string? hangfireJobId,
-        ApAgentOptions options)
+        CancellationToken cancellationToken)
     {
+        var options = _options.Value;
         if (string.IsNullOrWhiteSpace(args.StartPayloadJson))
             throw new InvalidOperationException("Start payload JSON is empty.");
 
@@ -110,10 +113,24 @@ public sealed class ApAgentPythonPipelineService : IApAgentPythonPipelineService
                 options.ApiBaseUrl);
         }
 
-        // Workflow start / run with no skills → null → omit from /chat (agents full plan).
-        // Do not fall back to ApAgent:DefaultSkills here; only pass skills when explicitly provided.
-        var skills = ApAgentStartPayloadJson.NormalizeSkills(args.Skills);
+        if (options.IncludePilotAuthInPayload)
+        {
+            try
+            {
+                var pilotAuth = await _pilotAuthProvider.GetAuthForTenantAsync(args.TenantId, cancellationToken);
+                if (pilotAuth != null)
+                    inner = ApAgentStartPayloadJson.EnrichWithPilotAuth(inner, pilotAuth);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Could not enrich AP Agent payload with pilot auth for tenant {TenantId}.",
+                    args.TenantId);
+            }
+        }
 
+        var skills = ApAgentStartPayloadJson.NormalizeSkills(args.Skills);
         return ApAgentStartPayloadJson.BuildChatApRequestJson(inner, sessionId, skills);
     }
 

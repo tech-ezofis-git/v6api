@@ -57,6 +57,8 @@ builder.Services.AddScoped<IPlaygroundApiKeyService, PlaygroundApiKeyService>();
 builder.Services.AddScoped<ITenantSignupService, TenantSignupService>();
 builder.Services.Configure<TenantPilotUserOptions>(
     builder.Configuration.GetSection(TenantPilotUserOptions.SectionName));
+builder.Services.AddScoped<ITenantPilotUserProvisioningService, TenantPilotUserProvisioningService>();
+builder.Services.AddScoped<SaaSApp.Workflow.Application.Contracts.IApAgentPilotAuthProvider, TenantPilotTokenService>();
 builder.Services.Configure<TenantDefaultCreditOptions>(
     builder.Configuration.GetSection(TenantDefaultCreditOptions.SectionName));
 builder.Services.Configure<JiraOptions>(
