@@ -5,6 +5,7 @@ using MediatR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Identity.Web;
 using SaaSApp.Api.Middleware;
+using SaaSApp.Api.Configuration;
 using SaaSApp.Api.Options;
 using SaaSApp.Api.Services;
 using SaaSApp.Api.Services.Jira;
@@ -97,7 +98,7 @@ builder.Services.AddScoped<SaaSApp.Users.Application.Contracts.IUserTenantRoleSy
 // JWT Bearer: Microsoft Entra ID (Azure AD), Auth0, and Ezofis
 var azureAdClientId = builder.Configuration["AzureAd:ClientId"];
 var auth0Domain = builder.Configuration["Auth0:Domain"];
-var ezofisKey = builder.Configuration["EzofisAuth:SigningKey"];
+var ezofisKey = EzofisAuthConfiguration.ResolveSigningKey(builder.Configuration);
 var hasAzureAd = !string.IsNullOrWhiteSpace(azureAdClientId);
 var hasAuth0 = !string.IsNullOrEmpty(auth0Domain);
 var hasEzofis = !string.IsNullOrEmpty(ezofisKey);
@@ -168,9 +169,9 @@ if (hasEzofis)
         options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
         {
             ValidateIssuer = true,
-            ValidIssuer = builder.Configuration["EzofisAuth:Issuer"] ?? "Ezofis",
+            ValidIssuer = EzofisAuthConfiguration.ResolveIssuer(builder.Configuration),
             ValidateAudience = true,
-            ValidAudience = builder.Configuration["EzofisAuth:Audience"] ?? "Ezofis",
+            ValidAudience = EzofisAuthConfiguration.ResolveAudience(builder.Configuration),
             ValidateLifetime = true,
             IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(ezofisKey!)),
             ValidateIssuerSigningKey = true,
