@@ -5,6 +5,7 @@ using BCrypt.Net;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.IdentityModel.Tokens;
+using SaaSApp.Api.Configuration;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Users.Application.Contracts;
 using SaaSApp.Users.Infrastructure.Persistence;
@@ -413,7 +414,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
 
     private string GenerateJwt(Guid userId, string email, string displayName, string role, Guid tenantId)
     {
-        var key = _configuration["EzofisAuth:SigningKey"];
+        var key = EzofisAuthConfiguration.ResolveSigningKey(_configuration);
         if (string.IsNullOrEmpty(key))
             throw new InvalidOperationException("EzofisAuth:SigningKey not configured.");
 
@@ -424,8 +425,8 @@ public sealed class EzofisAuthService : IEzofisAuthService
         var signingKey = new SymmetricSecurityKey(keyBytes);
         var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);
 
-        var issuer = _configuration["EzofisAuth:Issuer"] ?? "Ezofis";
-        var audience = _configuration["EzofisAuth:Audience"] ?? "Ezofis";
+        var issuer = EzofisAuthConfiguration.ResolveIssuer(_configuration);
+        var audience = EzofisAuthConfiguration.ResolveAudience(_configuration);
 
         var claims = new[]
         {
