@@ -124,6 +124,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
             client.Timeout = Timeout.InfiniteTimeSpan;
         });
         services.AddScoped<IApAgentPythonPipelineService, ApAgentPythonPipelineService>();
+        services.AddScoped<IApAgentPilotAuthProvider, NullApAgentPilotAuthProvider>();
         services.AddScoped<IApAgentPythonJobClient, ApAgentPythonJobClient>();
         services.AddScoped<RunApAgentPythonJob>();
 

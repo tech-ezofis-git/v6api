@@ -425,16 +425,27 @@ Created automatically on **new tenant signup** when configured.
 
 **Each tenant** gets its own `pilot@ezofis.com` user in its own database. Isolation is by `X-Tenant-Id`.
 
-**Existing tenants:** Pilot user is not auto-created. Add manually via `POST /api/users` (Admin) or run a one-time script.
+**Existing tenants:** Call `POST /api/admin/tenants/{tenantId}/ensure-pilot-user` (Admin) or `POST /api/admin/tenants/ensure-pilot-user-all` for all active tenants.
+
+### Pilot auth in AP Agent payload
+
+When `ApAgent:IncludePilotAuthInPayload` is `true` (default), .NET logs in as the tenant pilot user before calling agents `/chat` and adds to the payload:
+
+| Field | Purpose |
+|-------|---------|
+| `pilotAccessToken` | Bearer JWT for V6 API callbacks (progress, metadata, move-next) |
+| `pilotUserId` | Pilot user GUID in that tenant (audit / `CreatedBy`) |
+| `pilotEmail` | Usually `pilot@ezofis.com` |
+
+Python should prefer `pilotAccessToken` + `tenantId` for callbacks. Fallback: `POST /api/auth/ezofis/login` with shared `TenantPilotUser:Password` and `X-Tenant-Id`.
 
 ### AP Agent flow
 
 ```
 Frontend → POST /workflows/{id}/start (with file)
          → .NET enqueues Hangfire job, returns apAgentJobId
-         → .NET POSTs startPayload to Python (includes tenantId, callback URLs)
-         → Python logs in as pilot@ezofis.com (POST /api/auth/ezofis/login + X-Tenant-Id)
-         → Python PATCHes progress, applies metadata
+         → .NET logs in as pilot for tenantId, POSTs /chat payload (tenantId, pilotAccessToken, callback URLs)
+         → Python uses pilotAccessToken for PATCH progress / metadata / move-next
          → Frontend polls GET /ap-agent/jobs/{jobId} every ~5s
 ```
 
@@ -470,17 +481,21 @@ Frontend → POST /workflows/{id}/start (with file)
     "formId": "...",
     "apAgentJobId": "12345",
     "apAgentJobStatusUrl": "/api/workflows/ap-agent/jobs/12345",
-    "apAgentProgressUrl": "/api/workflows/{wf}/instances/{inst}/ap-agent/progress"
+    "apAgentProgressUrl": "/api/workflows/{wf}/instances/{inst}/ap-agent/progress",
+    "pilotAccessToken": "<jwt>",
+    "pilotUserId": "guid",
+    "pilotEmail": "pilot@ezofis.com"
   }
 }
 ```
 
 ### Python multi-tenant contract
 
-1. Read `startPayload.tenantId`
-2. Login: `POST /api/auth/ezofis/login` with pilot credentials + `X-Tenant-Id`
-3. Call tenant APIs with JWT + `X-Tenant-Id`
-4. PATCH progress using URLs from payload
+1. Read `startPayload.tenantId` (or `tenant_id` from `/chat` payload)
+2. **Preferred:** use `pilotAccessToken` from payload as `Authorization: Bearer …` with `X-Tenant-Id`
+3. **Fallback:** `POST /api/auth/ezofis/login` with pilot credentials + `X-Tenant-Id`
+4. Call tenant APIs with JWT + `X-Tenant-Id`
+5. PATCH progress using URLs from payload
 
 ### Key files
 
@@ -610,7 +625,7 @@ From `appsettings.example.json` / `appsettings.Production.json`:
   "TenantPilotUser": {
     "Enabled": true,
     "Email": "pilot@ezofis.com",
-    "Password": "CHANGE_ME",
+    "Password": "Ezofis@123",
     "DisplayName": "AP Agent Pilot",
     "Role": "TenantUser"
   },
@@ -641,7 +656,7 @@ From `appsettings.example.json` / `appsettings.Production.json`:
 | Item | Status | Notes |
 |------|--------|-------|
 | Master file row import | **Pending** | Python/data-import worker for `ezPackages/MasterExcel/*.json` |
-| Pilot user for existing tenants | Manual | Use Admin `POST /api/users` or migration script |
+| Pilot user for existing tenants | Admin API | `POST /api/admin/tenants/{id}/ensure-pilot-user` or `ensure-pilot-user-all` |
 | Social login ID token validation | Future | Currently trusts frontend OAuth result |
 | Hangfire master import job in V6 | Optional | Could replace external worker |
 

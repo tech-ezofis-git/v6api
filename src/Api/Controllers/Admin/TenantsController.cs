@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.EntityFrameworkCore;
+using SaaSApp.Api.Services;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
 using SaaSApp.Security;
@@ -16,13 +17,16 @@ public sealed class TenantsController : ControllerBase
 {
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
     private readonly IEzfbEntryIdMigrationService _ezfbEntryIdMigration;
+    private readonly ITenantPilotUserProvisioningService _pilotUserProvisioning;
 
     public TenantsController(
         IDbContextFactory<CatalogDbContext> catalogFactory,
-        IEzfbEntryIdMigrationService ezfbEntryIdMigration)
+        IEzfbEntryIdMigrationService ezfbEntryIdMigration,
+        ITenantPilotUserProvisioningService pilotUserProvisioning)
     {
         _catalogFactory = catalogFactory;
         _ezfbEntryIdMigration = ezfbEntryIdMigration;
+        _pilotUserProvisioning = pilotUserProvisioning;
     }
 
     /// <summary>
@@ -94,7 +98,67 @@ public sealed class TenantsController : ControllerBase
         var result = await _ezfbEntryIdMigration.MigrateTenantAsync(tenant.ConnectionString, cancellationToken);
         return Ok(result);
     }
+
+    /// <summary>
+    /// Ensure AP Agent pilot user (<c>pilot@ezofis.com</c>) exists in the tenant DB and catalog.
+    /// Idempotent; syncs password from <c>TenantPilotUser:Password</c> when user already exists.
+    /// </summary>
+    [HttpPost("{id:guid}/ensure-pilot-user")]
+    [ProducesResponseType(typeof(TenantPilotUserEnsureResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> EnsurePilotUser(Guid id, CancellationToken cancellationToken)
+    {
+        await using var context = await _catalogFactory.CreateDbContextAsync(cancellationToken);
+        var tenant = await context.Tenants
+            .AsNoTracking()
+            .Where(t => t.Id == id)
+            .Select(t => new { t.ConnectionString })
+            .FirstOrDefaultAsync(cancellationToken);
+        if (tenant == null || string.IsNullOrWhiteSpace(tenant.ConnectionString))
+            return NotFound();
+
+        var result = await _pilotUserProvisioning.EnsurePilotUserAsync(
+            id,
+            tenant.ConnectionString,
+            cancellationToken: cancellationToken);
+        if (result == null)
+            return BadRequest(new { error = "Pilot user provisioning is disabled or TenantPilotUser:Password is not configured." });
+
+        return Ok(result);
+    }
+
+    /// <summary>Ensure pilot user for every active tenant in the catalog.</summary>
+    [HttpPost("ensure-pilot-user-all")]
+    [ProducesResponseType(typeof(EnsurePilotUserAllResult), StatusCodes.Status200OK)]
+    public async Task<IActionResult> EnsurePilotUserAll(CancellationToken cancellationToken)
+    {
+        await using var context = await _catalogFactory.CreateDbContextAsync(cancellationToken);
+        var tenants = await context.Tenants
+            .AsNoTracking()
+            .Where(t => t.IsActive && t.ConnectionString != null && t.ConnectionString != "")
+            .Select(t => new { t.Id, t.ConnectionString })
+            .ToListAsync(cancellationToken);
+
+        var results = new List<TenantPilotUserEnsureResult>(tenants.Count);
+        foreach (var tenant in tenants)
+        {
+            var ensured = await _pilotUserProvisioning.EnsurePilotUserAsync(
+                tenant.Id,
+                tenant.ConnectionString!,
+                cancellationToken: cancellationToken);
+            if (ensured != null)
+                results.Add(ensured);
+        }
+
+        return Ok(new EnsurePilotUserAllResult(tenants.Count, results.Count, results));
+    }
 }
+
+public sealed record EnsurePilotUserAllResult(
+    int TenantCount,
+    int EnsuredCount,
+    IReadOnlyList<TenantPilotUserEnsureResult> Results);
 
 /// <summary>Request to register a tenant in the catalog. Create DB and run migrations first.</summary>
 public record RegisterTenantRequest(Guid Id, string Name, string ConnectionString);
