@@ -295,9 +295,9 @@ if (!string.IsNullOrWhiteSpace(pathBase))
     app.UsePathBase(pathBase);
 }
 
-// HTTPS redirection (configurable; keep off when hosting IIS on HTTP-only localhost)
-var httpsRedirectionEnabled = builder.Configuration.GetValue<bool?>("HttpsRedirection:Enabled")
-    ?? !app.Environment.IsDevelopment();
+// HTTPS redirection (off by default: Azure/nginx terminate TLS and proxy HTTP :5000.
+// Enabling this without forwarded headers 307-loops /swagger and /hangfire.)
+var httpsRedirectionEnabled = builder.Configuration.GetValue<bool?>("HttpsRedirection:Enabled") ?? false;
 if (httpsRedirectionEnabled)
 {
     app.UseHttpsRedirection();
@@ -312,7 +312,7 @@ app.UseMiddleware<RequestPerformanceLoggingMiddleware>();
 
 app.UseCors();
 
-var swaggerEnabled = app.Environment.IsDevelopment() || (builder.Configuration.GetValue<bool?>("Swagger:Enabled") ?? false);
+var swaggerEnabled = app.Environment.IsDevelopment() || (builder.Configuration.GetValue<bool?>("Swagger:Enabled") ?? true);
 if (swaggerEnabled)
 {
     app.UseSwagger(options =>
