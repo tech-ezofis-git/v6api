@@ -257,6 +257,13 @@ public sealed class LoginController : ControllerBase
             || _configuration.GetValue<bool>("Diagnostics:ShowDetailedErrors");
         if (showDetails)
             return new { error = ex.Message };
+
+        if (ex.Message.Contains("SigningKey", StringComparison.OrdinalIgnoreCase))
+            return new { error = "Login configuration is invalid. JWT signing key is not configured on the server." };
+
+        if (ex.Message.Contains("User email is missing", StringComparison.OrdinalIgnoreCase))
+            return new { error = "Login configuration is invalid. User profile is incomplete." };
+
         return new { error = "Login configuration is invalid. Please contact support." };
     }
 }
