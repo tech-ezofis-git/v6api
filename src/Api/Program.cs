@@ -38,7 +38,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration
     .AddJsonFile("appsettings.ActivityLog.json", optional: true, reloadOnChange: true)
-    .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true);
+    .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true)
+    // Loaded last so committed production secrets (EzofisAuth, TenantPilotUser) win over blank .env.azure overrides.
+    .AddJsonFile("appsettings.Production.json", optional: true, reloadOnChange: true);
 
 
 // Serilog + Application Insights (clear default providers to avoid duplicate log lines)

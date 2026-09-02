@@ -2,7 +2,6 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SaaSApp.Api.Services;
 using SaaSApp.MultiTenancy;
-using Microsoft.Extensions.Hosting;
 
 namespace SaaSApp.Api.Controllers.Auth;
 
@@ -15,21 +14,15 @@ public sealed class LoginController : ControllerBase
     private readonly IEzofisAuthService _authService;
     private readonly ITenantProvider _tenantProvider;
     private readonly ILogger<LoginController> _logger;
-    private readonly IConfiguration _configuration;
-    private readonly IHostEnvironment _environment;
 
     public LoginController(
         IEzofisAuthService authService,
         ITenantProvider tenantProvider,
-        ILogger<LoginController> logger,
-        IConfiguration configuration,
-        IHostEnvironment environment)
+        ILogger<LoginController> logger)
     {
         _authService = authService;
         _tenantProvider = tenantProvider;
         _logger = logger;
-        _configuration = configuration;
-        _environment = environment;
     }
 
     /// <summary>Login with email and password. If 2FA enabled, returns tempToken; call POST /2fa/complete with code.</summary>
@@ -251,21 +244,7 @@ public sealed class LoginController : ControllerBase
         }
     }
 
-    private object BuildLoginConfigError(InvalidOperationException ex)
-    {
-        var showDetails = _environment.IsDevelopment()
-            || _configuration.GetValue<bool>("Diagnostics:ShowDetailedErrors");
-        if (showDetails)
-            return new { error = ex.Message };
-
-        if (ex.Message.Contains("SigningKey", StringComparison.OrdinalIgnoreCase))
-            return new { error = "Login configuration is invalid. JWT signing key is not configured on the server." };
-
-        if (ex.Message.Contains("User email is missing", StringComparison.OrdinalIgnoreCase))
-            return new { error = "Login configuration is invalid. User profile is incomplete." };
-
-        return new { error = "Login configuration is invalid. Please contact support." };
-    }
+    private object BuildLoginConfigError(InvalidOperationException ex) => new { error = ex.Message };
 }
 
 /// <summary>Email and password for Ezofis login. Requires X-Tenant-Id header.</summary>

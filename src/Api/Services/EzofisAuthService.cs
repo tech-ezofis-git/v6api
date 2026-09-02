@@ -444,6 +444,13 @@ public sealed class EzofisAuthService : IEzofisAuthService
             expires: DateTime.UtcNow.Add(AccessTokenExpiry),
             signingCredentials: credentials);
 
-        return new JwtSecurityTokenHandler().WriteToken(token);
+        try
+        {
+            return new JwtSecurityTokenHandler().WriteToken(token);
+        }
+        catch (Exception ex)
+        {
+            throw new InvalidOperationException($"JWT issuance failed: {ex.Message}", ex);
+        }
     }
 }
