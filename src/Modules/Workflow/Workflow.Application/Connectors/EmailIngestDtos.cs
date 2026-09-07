@@ -29,7 +29,7 @@ public sealed record EmailIngestMailboxUpsertRequest(
     Guid ConnectorId,
     Guid WorkflowId,
     bool IsEnabled = true,
-    int PollIntervalMinutes = 5,
+    int PollIntervalMinutes = 0,
     string? QueryFilter = null,
     string MasterSource = EmailIngestMasterSources.InternalForm,
     string? MasterFormId = null,

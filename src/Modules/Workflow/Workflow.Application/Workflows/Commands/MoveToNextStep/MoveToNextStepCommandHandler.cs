@@ -14,6 +14,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IWorkflowLegacyMailboxSyncService _mailboxSync;
     private readonly IWorkflowApAgentMoveNextService _apAgentMoveNext;
     private readonly IWorkflowEzfbFormDataLoader _ezfbFormDataLoader;
+    private readonly IWorkflowPdfGenerationService _pdfGeneration;
     private readonly IWorkflowMoveNotificationService _moveNotifications;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
@@ -25,6 +26,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IWorkflowLegacyMailboxSyncService mailboxSync,
         IWorkflowApAgentMoveNextService apAgentMoveNext,
         IWorkflowEzfbFormDataLoader ezfbFormDataLoader,
+        IWorkflowPdfGenerationService pdfGeneration,
         IWorkflowMoveNotificationService moveNotifications,
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider)
@@ -35,6 +37,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _mailboxSync = mailboxSync;
         _apAgentMoveNext = apAgentMoveNext;
         _ezfbFormDataLoader = ezfbFormDataLoader;
+        _pdfGeneration = pdfGeneration;
         _moveNotifications = moveNotifications;
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
@@ -239,9 +242,50 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
 
         WorkflowStep? nextDefinitionStep = null;
         var workflowCompleted = legacySync.WorkflowCompleted;
+        WorkflowPdfGenerationResult? generatedPdf = null;
 
         if (legacySync.Status == LegacyTransactionSyncStatus.ReviewUpdated)
         {
+            // Generate PDF when leaving this step — including when this move completes the workflow.
+            generatedPdf = await _pdfGeneration.TryGenerateOnStepCompleteAsync(
+                workflow,
+                instance,
+                targetDefinitionStep,
+                formId,
+                formEntryId,
+                userId,
+                legacySync.CurrentTransactionId,
+                cancellationToken,
+                submittedFormDataJson: request.SubmittedFormDataJson);
+
+            // PDF is archived after the first mailbox sync — re-sync so itemId / FILE binds appear.
+            if (generatedPdf != null)
+            {
+                if (legacySync.CurrentTransactionId is > 0)
+                {
+                    await _mailboxSync.SyncTransactionRowAsync(
+                        instance.WorkflowId,
+                        legacySync.CurrentTransactionId.Value,
+                        cancellationToken);
+                }
+
+                if (legacySync.NextTransactionId is > 0)
+                {
+                    await _mailboxSync.SyncTransactionRowAsync(
+                        instance.WorkflowId,
+                        legacySync.NextTransactionId.Value,
+                        cancellationToken);
+                }
+
+                if (workflowCompleted)
+                {
+                    await _mailboxSync.SyncInstanceEndTransactionsAsync(
+                        instance.WorkflowId,
+                        instance.Id,
+                        cancellationToken);
+                }
+            }
+
             nextDefinitionStep = WorkflowStepActionsHelper.ResolveNextStepByReview(
                     targetDefinitionStep, request.Review, orderedSteps)
                 ?? orderedSteps
@@ -316,43 +360,51 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 cancellationToken: cancellationToken);
         }
 
-        var displayStep = nextDefinitionStep ?? targetDefinitionStep;
-        var displayStepInstance = WorkflowStepTransitionHelper.FindStepInstance(instance, displayStep.Id);
-
         var isCompleted = workflowCompleted || instance.Status == WorkflowInstanceStatus.Completed;
         int? legacyNextTransactionId = isCompleted ? 0 : legacySync.NextTransactionId;
         Guid? legacyNextTransactionGuid = isCompleted ? null : legacySync.NextTransactionGuid;
 
-        // Refresh mailbox formData after any later form writes (user formData / comments path).
+        // Refresh mailbox formData after any later form writes (user formData / PDF FILE binds / comments).
         await PropagateMailboxFormDataAsync(
             request,
             instance,
             formId,
             formEntryId,
-            preferEzfb: appliedPoRowToEzfb,
+            preferEzfb: appliedPoRowToEzfb || generatedPdf != null,
             cancellationToken);
+
+        // On completion, do not surface END/"Workflow Success" as a move-to next step.
+        var notifyNextStep = isCompleted ? null : nextDefinitionStep;
+        var displayStep = isCompleted ? targetDefinitionStep : (nextDefinitionStep ?? targetDefinitionStep);
+        var displayStepInstance = WorkflowStepTransitionHelper.FindStepInstance(instance, displayStep.Id);
+        var resultMessage = isCompleted ? "Workflow completed." : message;
 
         await NotifyMoveAsync(
             workflow,
             instance,
             request.Review,
             targetDefinitionStep,
-            nextDefinitionStep,
+            notifyNextStep,
             submittedModifiedByUserId: userId,
-            receivedCreatedByUserId: legacySync.NextCreatedByUserId ?? userId,
-            cancellationToken);
+            receivedCreatedByUserId: isCompleted ? userId : (legacySync.NextCreatedByUserId ?? userId),
+            cancellationToken,
+            currentTransactionId: legacySync.CurrentTransactionId,
+            nextTransactionId: isCompleted ? null : legacySync.NextTransactionId);
 
         return new MoveToNextStepCommandResult(
             true,
-            message,
-            displayStepInstance?.Id,
-            displayStep.Name,
-            displayStep.Order,
+            resultMessage,
+            isCompleted ? null : displayStepInstance?.Id,
+            isCompleted ? null : displayStep.Name,
+            isCompleted ? null : displayStep.Order,
             isCompleted,
             legacySync.WorkflowInstanceId,
             legacySync.CurrentTransactionId,
             legacyNextTransactionId,
-            legacyNextTransactionGuid);
+            legacyNextTransactionGuid,
+            GeneratedPdfAttachmentId: generatedPdf?.AttachmentId,
+            GeneratedPdfFileName: generatedPdf?.FileName,
+            GeneratedPdfInput: generatedPdf?.PythonRequest);
     }
 
     private Task NotifyMoveAsync(
@@ -363,7 +415,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         WorkflowStep? nextStep,
         Guid submittedModifiedByUserId,
         Guid? receivedCreatedByUserId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        int? currentTransactionId = null,
+        int? nextTransactionId = null)
         => _moveNotifications.TryInsertMoveNotificationsAsync(
             new WorkflowMoveNotificationContext(
                 instance.WorkflowId,
@@ -375,7 +429,10 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 nextStep?.Name,
                 nextStep?.StageType,
                 submittedModifiedByUserId,
-                receivedCreatedByUserId),
+                receivedCreatedByUserId,
+                instance.ReferenceNumber,
+                currentTransactionId,
+                nextTransactionId),
             cancellationToken);
 
     internal static WorkflowStep? ResolveStepByActivityId(IReadOnlyList<WorkflowStep> orderedSteps, string activityId)

@@ -150,4 +150,17 @@ public interface IRepositorySecurityService
         Func<T, IReadOnlyDictionary<string, string?>> fieldSelector,
         string permission = RepositorySecurityPermissions.View,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// SQL fragment (no leading AND) that excludes items hidden by document-security hide rules for this user.
+    /// <paramref name="fieldToSqlColumn"/> maps field Name / SqlColumnName → actual items-table column.
+    /// </summary>
+    Task<(string? Sql, IReadOnlyList<(string Name, object Value)> Parameters)> BuildHideDocumentsSqlFilterAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid userId,
+        bool isAdmin,
+        IReadOnlyDictionary<string, string> fieldToSqlColumn,
+        string paramPrefix,
+        CancellationToken cancellationToken = default);
 }

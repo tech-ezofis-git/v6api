@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using SaaSApp.ActivityLog.Application.Contracts;
 using SaaSApp.ActivityLog.Infrastructure.Options;
+using SaaSApp.Api.Options;
 using SaaSApp.Catalog;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Security;
@@ -51,19 +52,22 @@ public sealed class UsersController : ControllerBase
     private readonly IUserTenantRegistry _userTenantRegistry;
     private readonly IActivityLogQueryService _activityLogQuery;
     private readonly ActivityLogOptions _activityLogOptions;
+    private readonly TenantPilotUserOptions _pilotUserOptions;
 
     public UsersController(
         IMediator mediator,
         ITenantContext tenantContext,
         IUserTenantRegistry userTenantRegistry,
         IActivityLogQueryService activityLogQuery,
-        IOptions<ActivityLogOptions> activityLogOptions)
+        IOptions<ActivityLogOptions> activityLogOptions,
+        IOptions<TenantPilotUserOptions> pilotUserOptions)
     {
         _mediator = mediator;
         _tenantContext = tenantContext;
         _userTenantRegistry = userTenantRegistry;
         _activityLogQuery = activityLogQuery;
         _activityLogOptions = activityLogOptions.Value;
+        _pilotUserOptions = pilotUserOptions.Value;
     }
 
     /// <summary>Create a new user in the current tenant. Admin only. Optionally set password for Ezofis login.</summary>
@@ -142,13 +146,20 @@ public sealed class UsersController : ControllerBase
         return Ok(result);
     }
 
-    /// <summary>List all users in the current tenant (excluding soft-deleted).</summary>
+    /// <summary>List all users in the current tenant (excluding soft-deleted and the tenant pilot service account).</summary>
     [HttpGet]
     [ProducesResponseType(typeof(ListUsersQueryResult), StatusCodes.Status200OK)]
     public async Task<IActionResult> List(CancellationToken cancellationToken)
     {
         var result = await _mediator.Send(new ListUsersQuery(), cancellationToken);
-        return Ok(result);
+        var pilotEmail = _pilotUserOptions.Email?.Trim();
+        if (string.IsNullOrWhiteSpace(pilotEmail))
+            return Ok(result);
+
+        var filtered = result.Items
+            .Where(u => !string.Equals(u.Email, pilotEmail, StringComparison.OrdinalIgnoreCase))
+            .ToList();
+        return Ok(new ListUsersQueryResult(filtered));
     }
 
     /// <summary>List permission categories (key + name) for the role Permissions tab. Admin only.</summary>
@@ -227,7 +238,10 @@ public sealed class UsersController : ControllerBase
         return NoContent();
     }
 
-    /// <summary>Soft-delete a custom role. Fails if the role is assigned to any user. Admin only.</summary>
+    /// <summary>
+    /// Soft-delete a custom role. Unassigns users (removes UserRoles, updates Users.Role).
+    /// Built-in Admin/TenantUser roles cannot be deleted. Admin only.
+    /// </summary>
     [HttpDelete("roles/{roleId:guid}")]
     [Authorize(Policy = AuthorizationPolicies.Admin)]
     [ProducesResponseType(StatusCodes.Status204NoContent)]
