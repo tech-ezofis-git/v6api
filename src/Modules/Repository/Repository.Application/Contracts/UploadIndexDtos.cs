@@ -13,6 +13,25 @@ public sealed record UploadForOcrResult(
     string OcrJson,
     IReadOnlyList<UploadIndexFieldDto>? OcrFieldList);
 
+/// <summary>uploadWithOcr — staged file + OCR metadata (pre-ticket).</summary>
+public sealed record UploadWithOcrResult(
+    string FileId,
+    Guid RepositoryId,
+    string FileName,
+    string FilePath,
+    string OcrJson,
+    IReadOnlyList<UploadIndexFieldDto>? OcrFieldList);
+
+/// <summary>Promote a staged monitor file into repository archive.</summary>
+public sealed record UploadIndexPromoteResult(
+    Guid ItemId,
+    Guid RepositoryId,
+    string FileName,
+    string FilePath,
+    string? MetadataJson,
+    long? FileSize,
+    string? ContentType);
+
 /// <summary>v5 resArray.</summary>
 public sealed record UploadIndexRefDto(string? Id, string? Value);
 

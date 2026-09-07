@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace SaaSApp.Workflow.Application.Workflows.Commands.CreateWorkflow;
@@ -116,7 +117,13 @@ public record WorkflowBlockSettingsDto(
     bool? MlCompareMaster = null,
     int? MlMasterFormId = null,
     List<WorkflowMlCompareFieldDto>? MlCompareFields = null,
-    string? MlPredictionField = null
+    string? MlPredictionField = null,
+    [property: JsonPropertyName("generatePDF")]
+    bool? GeneratePDF = null,
+    [property: JsonPropertyName("pdfTemplate")]
+    JsonElement? PdfTemplate = null,
+    [property: JsonPropertyName("generatePDFFields")]
+    string[]? GeneratePDFFields = null
 );
 
 public record WorkflowFileSettingsDto(

@@ -206,9 +206,11 @@ public sealed class ApiEventLoggingMiddleware
                 && EventLogRouteMapper.TryGetUserIdFromPath(path, out var userId)
                 && (string.IsNullOrWhiteSpace(subject.Name) || string.IsNullOrWhiteSpace(subject.Email)))
             {
-                var (displayName, email) = await EventLogActorLookup.TryGetUserAsync(
+                var (displayName, email, loginName) = await EventLogActorLookup.TryGetUserAsync(
                     connectionString, userId, cancellationToken);
-                subject = subject.With(name: displayName, email: email);
+                subject = subject.With(
+                    name: FirstNonWhiteSpace(displayName, loginName),
+                    email: email);
             }
 
             if (HttpMethods.IsPut(method)
@@ -218,6 +220,52 @@ public sealed class ApiEventLoggingMiddleware
                 var roleName = await EventLogActorLookup.TryGetRoleNameAsync(
                     connectionString, roleId, cancellationToken);
                 subject = subject.With(roleName: roleName);
+            }
+
+            if ((HttpMethods.IsPut(method) || HttpMethods.IsDelete(method))
+                && EventLogRouteMapper.TryGetGroupIdFromPath(path, out var groupId)
+                && string.IsNullOrWhiteSpace(subject.GroupName)
+                && string.IsNullOrWhiteSpace(subject.Name))
+            {
+                var groupName = await EventLogActorLookup.TryGetGroupNameAsync(
+                    connectionString, groupId, cancellationToken);
+                subject = subject.With(groupName: groupName);
+            }
+
+            if ((HttpMethods.IsPut(method) || HttpMethods.IsDelete(method))
+                && EventLogRouteMapper.TryGetWorkflowIdFromPath(path, out var workflowId)
+                && string.IsNullOrWhiteSpace(subject.Name))
+            {
+                var workflowName = await EventLogActorLookup.TryGetWorkflowNameAsync(
+                    connectionString, workflowId, cancellationToken);
+                subject = subject.With(name: workflowName);
+            }
+
+            if (HttpMethods.IsPost(method)
+                && EventLogRouteMapper.TryGetWorkflowInstanceIdFromPath(path, out var instanceId)
+                && string.IsNullOrWhiteSpace(subject.Name))
+            {
+                var workflowName = await EventLogActorLookup.TryGetWorkflowNameByInstanceIdAsync(
+                    connectionString, instanceId, cancellationToken);
+                subject = subject.With(name: workflowName);
+            }
+
+            if ((HttpMethods.IsPut(method) || HttpMethods.IsDelete(method))
+                && EventLogRouteMapper.TryGetFormIdFromPath(path, out var formId)
+                && string.IsNullOrWhiteSpace(subject.Name))
+            {
+                var formName = await EventLogActorLookup.TryGetFormNameAsync(
+                    connectionString, formId, cancellationToken);
+                subject = subject.With(name: formName);
+            }
+
+            if (HttpMethods.IsPut(method)
+                && EventLogRouteMapper.TryGetRepositoryIdFromPath(path, out var repositoryId)
+                && string.IsNullOrWhiteSpace(subject.Name))
+            {
+                var repositoryName = await EventLogActorLookup.TryGetRepositoryNameAsync(
+                    connectionString, repositoryId, cancellationToken);
+                subject = subject.With(name: repositoryName);
             }
         }
         catch
@@ -289,7 +337,8 @@ public sealed class ApiEventLoggingMiddleware
 
                 string? email = TryForm(request, "email", "Email");
                 string? name = TryForm(request, "displayName", "DisplayName")
-                    ?? TryForm(request, "name", "Name");
+                    ?? TryForm(request, "name", "Name")
+                    ?? TryForm(request, "userName", "UserName");
                 string? roleName = TryForm(request, "roleName", "RoleName");
                 string? role = TryForm(request, "role", "Role");
                 string? groupName = TryForm(request, "groupName", "GroupName");

@@ -2,6 +2,7 @@ using System.Text.Json;
 using MediatR;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Domain.Entities;
 using SaaSApp.Workflow.Domain.Enums;
 
@@ -62,7 +63,14 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         await _tableCreator.EnsureWorkflowTablesForStartAsync(workflow.Id, connectionString, cancellationToken);
         await _apAgentJobProgress.EnsureProgressTableAsync(cancellationToken);
 
-        var instance = WorkflowInstance.Create(tenantId, workflow.Id, workflow.Name, workflow.Version, userId, request.Context);
+        var instance = WorkflowInstance.Create(
+            tenantId,
+            workflow.Id,
+            workflow.Name,
+            workflow.Version,
+            userId,
+            request.Context,
+            referenceNumber: $"REQ-{DateTime.UtcNow:yyyyMMddHHmmssfff}");
         instance.Start();
 
         foreach (var step in workflow.Steps.OrderBy(s => s.Order))
@@ -109,6 +117,9 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
 
         try
         {
+            var orderedSteps = workflow.Steps.OrderBy(s => s.Order).ToList();
+            var dedicatedApAgent = WorkflowStepTransitionHelper.TryResolveDedicatedApAgentStep(orderedSteps);
+
             var bootstrap = await _startBootstrap.RunAsync(
                 new WorkflowStartBootstrapRequest(
                     workflow,
@@ -118,7 +129,10 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                     request.EnvType,
                     attachmentStream,
                     request.Attachment?.FileName,
-                    request.Attachment?.ContentType),
+                    request.Attachment?.ContentType,
+                    request.FormDataFields,
+                    request.FormLineItemsJson,
+                    request.StagedFiles),
                 cancellationToken);
 
             _logger.LogInformation(
@@ -140,6 +154,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 skills);
 
             if (request.TriggerApAgentPythonJob
+                && dedicatedApAgent != null
                 && !string.IsNullOrWhiteSpace(formDataJson))
             {
                 var jobArgs = new ApAgentPythonJobArgs(

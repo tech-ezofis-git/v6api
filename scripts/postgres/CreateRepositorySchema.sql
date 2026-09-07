@@ -200,4 +200,22 @@ CREATE TABLE IF NOT EXISTS repository."ShareRecipients" (
 );
 CREATE UNIQUE INDEX IF NOT EXISTS "IX_ShareRecipients_Repo_User" ON repository."ShareRecipients" ("RepositoryId", "UserId");
 
+-- Saved related documents for an open item (replace-on-save semantics).
+CREATE TABLE IF NOT EXISTS repository."ItemRelatedDocuments" (
+    "Id" uuid NOT NULL CONSTRAINT "PK_ItemRelatedDocuments" PRIMARY KEY,
+    "TenantId" uuid NOT NULL,
+    "RepositoryId" uuid NOT NULL,
+    "ItemId" uuid NOT NULL,
+    "RelatedRepositoryId" uuid NOT NULL,
+    "RelatedItemId" uuid NOT NULL,
+    "MatchField" varchar(128) NULL,
+    "MatchValue" varchar(450) NULL,
+    "MatchScore" integer NULL,
+    "CreatedBy" uuid NULL,
+    "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
+    "IsDeleted" boolean NOT NULL DEFAULT false
+);
+CREATE INDEX IF NOT EXISTS "IX_ItemRelatedDocuments_Source"
+    ON repository."ItemRelatedDocuments" ("TenantId", "RepositoryId", "ItemId", "IsDeleted", "CreatedAtUtc");
+
 -- 'Repository base schema complete.'

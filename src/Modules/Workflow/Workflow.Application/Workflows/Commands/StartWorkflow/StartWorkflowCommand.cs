@@ -1,4 +1,5 @@
 using MediatR;
+using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Application.Workflows.Commands.StartWorkflow;
 
@@ -9,7 +10,10 @@ public record StartWorkflowCommand(
     string? EnvType = null,
     StartWorkflowAttachmentPayload? Attachment = null,
     bool TriggerApAgentPythonJob = false,
-    IReadOnlyList<string>? Skills = null) : IRequest<StartWorkflowCommandResult>;
+    IReadOnlyList<string>? Skills = null,
+    IReadOnlyDictionary<string, string>? FormDataFields = null,
+    string? FormLineItemsJson = null,
+    IReadOnlyList<StartWorkflowStagedFileRef>? StagedFiles = null) : IRequest<StartWorkflowCommandResult>;
 
 /// <summary>Optional file uploaded during start (also supported via multipart on the API).</summary>
 public record StartWorkflowAttachmentPayload(

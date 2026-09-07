@@ -1,7 +1,6 @@
-using System.Text.Json;
-using Npgsql;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Infrastructure.Options;
 
@@ -9,27 +8,20 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 
 public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationService
 {
-    private const string TicketSubmitted = "Ticket Submitted";
     private const string TicketReceived = "Ticket Received";
-
-    private static readonly JsonSerializerOptions RemarksJsonOptions = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-    };
+    private const string SeverityInfo = "Info";
+    private const string DetailsTab = "Details";
 
     private readonly ITenantContext _tenantContext;
-    private readonly IUserEmailLookup _userEmailLookup;
     private readonly WorkflowMoveNotificationOptions _options;
     private readonly ILogger<WorkflowMoveNotificationService> _logger;
 
     public WorkflowMoveNotificationService(
         ITenantContext tenantContext,
-        IUserEmailLookup userEmailLookup,
         IOptions<WorkflowMoveNotificationOptions> options,
         ILogger<WorkflowMoveNotificationService> logger)
     {
         _tenantContext = tenantContext;
-        _userEmailLookup = userEmailLookup;
         _options = options.Value;
         _logger = logger;
     }
@@ -52,86 +44,72 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
                 return;
             }
 
-            var submittedUserId = context.SubmittedModifiedByUserId;
-            var receivedUserId = context.ReceivedCreatedByUserId is Guid createdBy && createdBy != Guid.Empty
-                ? createdBy
-                : submittedUserId;
-
-            var userIds = new List<Guid> { submittedUserId };
-            if (receivedUserId != Guid.Empty && receivedUserId != submittedUserId)
-                userIds.Add(receivedUserId);
-
-            var profiles = await _userEmailLookup.GetProfilesAsync(userIds, cancellationToken);
-            var submittedUserName = ResolveUserName(submittedUserId, profiles);
-            var receivedUserName = ResolveUserName(receivedUserId, profiles);
-
-            var receivedStageName = !string.IsNullOrWhiteSpace(context.NextStageName)
-                ? context.NextStageName!
-                : context.CurrentStageName;
-            var receivedStageType = !string.IsNullOrWhiteSpace(context.NextStageName)
-                ? context.NextStageType
-                : context.CurrentStageType;
-
-            var inputJson = new
-            {
-                workflowId = context.WorkflowId.ToString("D"),
-                processId = context.InstanceId.ToString("D")
-            };
-
             var category = string.IsNullOrWhiteSpace(_options.Category) ? "workflow" : _options.Category.Trim();
             var review = context.Review?.Trim() ?? string.Empty;
+            var suffix = context.WorkflowId.ToString("N")[..8];
+            var transactionTable = $"workflow.transaction_{suffix}";
 
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
 
             await FormMasterFileNotificationStore.EnsureTableAsync(connection, cancellationToken);
-            var createdByLegacyId = await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
+
+            var submittedTxn = await LoadTransactionAsync(
                 connection,
-                submittedUserId,
+                transactionTable,
+                context.CurrentTransactionId,
+                context.InstanceId,
+                openOnly: false,
                 cancellationToken);
 
-            var submittedRemarks = JsonSerializer.Serialize(new
-            {
-                workflowName = context.WorkflowName,
-                instanceId = context.InstanceId.ToString("D"),
+            var receivedTxn = context.NextTransactionId is int nextId
+                ? await LoadTransactionByIdAsync(connection, transactionTable, nextId, cancellationToken)
+                : await LoadOpenTransactionAsync(connection, transactionTable, context.InstanceId, cancellationToken);
+
+            receivedTxn ??= submittedTxn;
+
+            var receivedStageName = FirstNonEmpty(receivedTxn?.StageName, context.NextStageName, context.CurrentStageName) ?? string.Empty;
+            var receivedStageType = FirstNonEmpty(receivedTxn?.StageType, context.NextStageType, context.CurrentStageType) ?? string.Empty;
+
+            var submittedActor = submittedTxn?.ActivityUserId is Guid submittedActorId && submittedActorId != Guid.Empty
+                ? submittedActorId
+                : context.SubmittedModifiedByUserId;
+            var receivedActor = receivedTxn?.ActivityUserId is Guid receivedActorId && receivedActorId != Guid.Empty
+                ? receivedActorId
+                : context.ReceivedCreatedByUserId is Guid receivedFallback && receivedFallback != Guid.Empty
+                    ? receivedFallback
+                    : submittedActor;
+
+            var receivedCreatedAtUtc = receivedTxn?.CreatedAt;
+            var receivedLegacyId = await FormMasterFileNotificationStore.TryResolveLegacyUserIdAsync(
+                connection, receivedActor, cancellationToken);
+
+            var receivedData = BuildData(
+                context,
+                receivedStageName,
+                receivedStageType,
                 review,
-                stageName = context.CurrentStageName,
-                stageType = context.CurrentStageType ?? string.Empty,
-                userName = submittedUserName
-            }, RemarksJsonOptions);
+                receivedTxn);
 
-            var receivedRemarks = JsonSerializer.Serialize(new
-            {
-                workflowName = context.WorkflowName,
-                instanceId = context.InstanceId.ToString("D"),
-                review,
-                stageName = receivedStageName,
-                stageType = receivedStageType ?? string.Empty,
-                userName = receivedUserName
-            }, RemarksJsonOptions);
+            var receivedText = WorkflowNotificationMessageMapper.ReceivedMessage(
+                context.WorkflowName,
+                context.InstanceId);
 
-            await FormMasterFileNotificationStore.InsertAsync(
+            await FormMasterFileNotificationStore.InsertMoveNotificationAsync(
                 connection,
-                title: TicketSubmitted,
-                status: TicketSubmitted,
-                remarks: submittedRemarks,
-                inputJson: inputJson,
-                category: category,
-                createdByLegacyId,
-                cancellationToken);
-
-            await FormMasterFileNotificationStore.InsertAsync(
-                connection,
-                title: TicketReceived,
+                title: receivedText,
                 status: TicketReceived,
-                remarks: receivedRemarks,
-                inputJson: inputJson,
+                message: receivedText,
+                data: receivedData,
+                severity: SeverityInfo,
+                createdAtUtc: receivedCreatedAtUtc,
+                createdByGuid: receivedActor,
+                createdByLegacyId: receivedLegacyId,
                 category: category,
-                createdByLegacyId,
                 cancellationToken);
 
             _logger.LogInformation(
-                "Inserted Ticket Submitted and Ticket Received notifications for instance {InstanceId}.",
+                "Inserted Ticket Received notification for instance {InstanceId}.",
                 context.InstanceId);
         }
         catch (Exception ex)
@@ -143,31 +121,144 @@ public sealed class WorkflowMoveNotificationService : IWorkflowMoveNotificationS
         }
     }
 
-    private static string ResolveUserName(
-        Guid userId,
-        IReadOnlyDictionary<Guid, UserProfileLookupDto> profiles)
+    private static object BuildData(
+        WorkflowMoveNotificationContext context,
+        string stageName,
+        string stageType,
+        string review,
+        TransactionNotifyRow? txn) =>
+        new
+        {
+            instanceId = context.InstanceId.ToString("D"),
+            stageName,
+            stageType,
+            review,
+            tab = DetailsTab,
+            transactionId = txn?.TransactionGuid is Guid guid && guid != Guid.Empty
+                ? guid.ToString("D")
+                : txn?.Id.ToString(System.Globalization.CultureInfo.InvariantCulture) ?? string.Empty,
+            workflowId = context.WorkflowId.ToString("D"),
+            workflowName = context.WorkflowName?.Trim() ?? string.Empty
+        };
+
+    private static async Task<TransactionNotifyRow?> LoadTransactionAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        int? transactionId,
+        Guid instanceId,
+        bool openOnly,
+        CancellationToken cancellationToken)
     {
-        if (userId == Guid.Empty)
-            return string.Empty;
+        if (transactionId is int id)
+        {
+            var byId = await LoadTransactionByIdAsync(connection, transactionTable, id, cancellationToken);
+            if (byId != null)
+                return byId;
+        }
 
-        if (!profiles.TryGetValue(userId, out var profile))
-            return userId.ToString("D");
-
-        var fullName = string.Join(
-            " ",
-            new[] { profile.FirstName, profile.LastName }
-                .Where(s => !string.IsNullOrWhiteSpace(s))
-                .Select(s => s!.Trim()));
-
-        if (!string.IsNullOrWhiteSpace(fullName))
-            return fullName;
-
-        if (!string.IsNullOrWhiteSpace(profile.DisplayName))
-            return profile.DisplayName.Trim();
-
-        if (!string.IsNullOrWhiteSpace(profile.Email))
-            return profile.Email.Trim();
-
-        return userId.ToString("D");
+        return openOnly
+            ? await LoadOpenTransactionAsync(connection, transactionTable, instanceId, cancellationToken)
+            : await LoadLatestTransactionAsync(connection, transactionTable, instanceId, cancellationToken);
     }
+
+    private static Task<TransactionNotifyRow?> LoadTransactionByIdAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        int transactionId,
+        CancellationToken cancellationToken) =>
+        LoadSingleTransactionAsync(
+            connection,
+            $"""
+            SELECT id, transaction_guid, activity_user_id, created_at, modified_at, stage_name, stage_type, review
+            FROM {transactionTable}
+            WHERE id = @Id AND is_deleted = false
+            LIMIT 1
+            """,
+            cmd => cmd.Parameters.AddWithValue("@Id", transactionId),
+            cancellationToken);
+
+    private static Task<TransactionNotifyRow?> LoadOpenTransactionAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        Guid instanceId,
+        CancellationToken cancellationToken) =>
+        LoadSingleTransactionAsync(
+            connection,
+            $"""
+            SELECT id, transaction_guid, activity_user_id, created_at, modified_at, stage_name, stage_type, review
+            FROM {transactionTable}
+            WHERE workflow_instance_id = @InstanceId AND is_deleted = false AND action_status = 0
+            ORDER BY created_at DESC, id DESC
+            LIMIT 1
+            """,
+            cmd => cmd.Parameters.AddWithValue("@InstanceId", instanceId),
+            cancellationToken);
+
+    private static Task<TransactionNotifyRow?> LoadLatestTransactionAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        Guid instanceId,
+        CancellationToken cancellationToken) =>
+        LoadSingleTransactionAsync(
+            connection,
+            $"""
+            SELECT id, transaction_guid, activity_user_id, created_at, modified_at, stage_name, stage_type, review
+            FROM {transactionTable}
+            WHERE workflow_instance_id = @InstanceId AND is_deleted = false
+            ORDER BY COALESCE(modified_at, created_at) DESC, id DESC
+            LIMIT 1
+            """,
+            cmd => cmd.Parameters.AddWithValue("@InstanceId", instanceId),
+            cancellationToken);
+
+    private static async Task<TransactionNotifyRow?> LoadSingleTransactionAsync(
+        NpgsqlConnection connection,
+        string sql,
+        Action<NpgsqlCommand> bind,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 15 };
+            bind(cmd);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                return null;
+
+            return new TransactionNotifyRow(
+                reader.GetInt32(0),
+                reader.IsDBNull(1) ? null : reader.GetGuid(1),
+                reader.IsDBNull(2) ? null : reader.GetGuid(2),
+                reader.GetDateTime(3),
+                reader.IsDBNull(4) ? null : reader.GetDateTime(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                reader.IsDBNull(6) ? null : reader.GetString(6),
+                reader.IsDBNull(7) ? null : reader.GetString(7));
+        }
+        catch (PostgresException)
+        {
+            return null;
+        }
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return null;
+    }
+
+    private sealed record TransactionNotifyRow(
+        int Id,
+        Guid? TransactionGuid,
+        Guid? ActivityUserId,
+        DateTime CreatedAt,
+        DateTime? ModifiedAt,
+        string? StageName,
+        string? StageType,
+        string? Review);
 }

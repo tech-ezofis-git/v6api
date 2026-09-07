@@ -1,5 +1,6 @@
 using Npgsql;
 using SaaSApp.MultiTenancy;
+using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Storage;
 
@@ -43,6 +44,13 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
         if (string.IsNullOrWhiteSpace(request.FileName))
             throw new ArgumentException("File name is required.");
 
+        request = request with
+        {
+            FileName = RepositoryFileNameHelper.EnsureExtension(
+                request.FileName,
+                request.ContentType)
+        };
+
         var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
             ?? throw new InvalidOperationException("Repository not found.");
 
@@ -78,24 +86,36 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
             .ThenBy(f => f.OrderId ?? int.MaxValue)
             .ToList();
 
+        RepositoryArchiveFileNameResolver.EnsureMandatoryNamingMetadata(
+            repo.Fields,
+            fieldValues,
+            request.AllowIncompleteFolderMetadata);
+
+        Guid? leafFolderId = null;
+        IReadOnlyList<string> folderNames;
+        string repositoryName;
+
         if (folderFieldDefs.Count == 0)
         {
-            throw new InvalidOperationException(
-                "Archive upload requires at least one repository field with IncludeInFolderStructure = 1. " +
-                "Use POST /api/repositories/{id}/items/upload for the standard flat path.");
+            // Repositories without folder-structure fields still archive under the repository root.
+            folderNames = Array.Empty<string>();
+            repositoryName = repo.Name;
         }
+        else
+        {
+            var folderPath = await _folderService.ResolveOrCreateFolderPathAsync(
+                repositoryId,
+                tenantId,
+                fieldValues,
+                userId,
+                cancellationToken,
+                request.AllowIncompleteFolderMetadata)
+                ?? throw new InvalidOperationException("Folder structure could not be resolved.");
 
-        RepositoryArchiveFileNameResolver.EnsureMandatoryNamingMetadata(repo.Fields, fieldValues);
-
-        var folderPath = await _folderService.ResolveOrCreateFolderPathAsync(
-            repositoryId,
-            tenantId,
-            fieldValues,
-            userId,
-            cancellationToken)
-            ?? throw new InvalidOperationException("Folder structure could not be resolved.");
-
-        var leafFolderId = folderPath.LeafFolderId == Guid.Empty ? (Guid?)null : folderPath.LeafFolderId;
+            leafFolderId = folderPath.LeafFolderId == Guid.Empty ? null : folderPath.LeafFolderId;
+            folderNames = folderPath.FolderNames;
+            repositoryName = folderPath.RepositoryName;
+        }
 
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
@@ -121,8 +141,8 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
         var versionedFileName = RepositoryFilePathHelper.ApplyVersionToFileName(baseFileName, fileVersion);
 
         var storageRelativePath = RepositoryFilePathHelper.BuildArchiveRelativePath(
-            folderPath.RepositoryName,
-            folderPath.FolderNames,
+            repositoryName,
+            folderNames,
             archiveBaseFileName,
             fileVersion);
 
@@ -194,9 +214,9 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
             relativePath,
             providerCode,
             fileVersion,
-            folderPath.LeafFolderId,
-            folderPath.FolderNames,
-            folderPath.RepositoryName,
+            leafFolderId ?? Guid.Empty,
+            folderNames,
+            repositoryName,
             workflowAttached,
             request.WorkflowId,
             request.ProcessId,

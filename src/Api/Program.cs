@@ -381,8 +381,8 @@ if (hangfireEnabled)
     var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
     if (emailIngestHangfire)
     {
-        var cron = app.Configuration.GetValue("EmailIngest:HangfireCron", "*/5 * * * *")
-                   ?? "*/5 * * * *";
+        var cron = app.Configuration.GetValue("EmailIngest:HangfireCron", "*/30 * * * * *")
+                   ?? "*/30 * * * * *";
         RecurringJob.AddOrUpdate<RunEmailIngestPollJob>(
             "email-ingest-poll",
             job => job.Execute(null),

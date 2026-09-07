@@ -8,10 +8,16 @@ public sealed class EmailIngestOptions
     public bool HangfireEnabled { get; set; } = true;
 
     /// <summary>
-    /// Hangfire cron for the scheduler. Default every 5 minutes (not every minute).
+    /// Hangfire cron for the scheduler (6-field with seconds). Default every 30 seconds.
     /// Only tenants with an enabled mailbox are polled.
     /// </summary>
-    public string HangfireCron { get; set; } = "*/5 * * * *";
+    public string HangfireCron { get; set; } = "*/30 * * * * *";
+
+    /// <summary>
+    /// Minimum seconds between mailbox polls when <c>pollIntervalMinutes</c> is 0 on the mailbox.
+    /// Also used as the floor when Hangfire runs more often than the mailbox interval.
+    /// </summary>
+    public int MinimumPollIntervalSeconds { get; set; } = 30;
 
     /// <summary>How often Hangfire may scan all tenants to discover new mailboxes (minutes).</summary>
     public int TenantDiscoveryMinutes { get; set; } = 30;

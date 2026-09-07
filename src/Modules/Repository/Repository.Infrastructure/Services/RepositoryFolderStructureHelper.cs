@@ -3,9 +3,8 @@ using SaaSApp.Repository.Application.Contracts;
 namespace SaaSApp.Repository.Infrastructure.Services;
 
 /// <summary>
-/// Ordered repository fields that participate in archive folder paths
-/// (<see cref="RepositoryFieldDto.IncludeInFolderStructure"/>).
-/// The uploaded file name is always appended after these levels in blob storage.
+/// Ordered repository fields marked <see cref="RepositoryFieldDto.IncludeInFolderStructure"/>.
+/// Path segments exclude the archive naming field (see <see cref="RepositoryArchiveFileNameResolver"/>).
 /// </summary>
 internal static class RepositoryFolderStructureHelper
 {

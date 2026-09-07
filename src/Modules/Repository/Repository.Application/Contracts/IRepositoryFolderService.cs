@@ -14,7 +14,8 @@ public interface IRepositoryFolderService
         Guid tenantId,
         IReadOnlyDictionary<string, string> metadata,
         Guid? userId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool allowIncompleteFolderMetadata = false);
 }
 
 public sealed record RepositoryFolderResolveResult(
