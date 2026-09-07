@@ -73,10 +73,14 @@ internal static class RepositoryItemListReader
 
         void AddColumn(string column)
         {
-            if (!RepositoryItemTableColumns.Has(tableColumns, column) || !added.Add(column))
+            // Has() is case-insensitive, but Postgres quoted custom columns are not.
+            // Resolve the exact physical name from information_schema (e.g. PoNumber → PONumber)
+            // before building SQL, or we emit i."PoNumber" and get 42703.
+            if (!RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, column, out var canonical)
+                || !added.Add(canonical))
                 return;
 
-            parts.Add($"i.{RepositorySqlHelper.ColumnRef(column)} AS \"{column}\"");
+            parts.Add(RepositorySqlHelper.SelectColumn(canonical, "i"));
         }
 
         foreach (var col in OptionalListColumns)
