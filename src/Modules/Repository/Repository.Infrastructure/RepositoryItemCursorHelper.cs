@@ -52,7 +52,7 @@ internal static class RepositoryItemCursorHelper
         string? sortValueRaw,
         Guid lastId)
     {
-        var col = $"i.{RepositorySqlHelper.ColumnRef(sortCol)}";
+        var col = $"i.{RepositorySqlHelper.PhysicalColumnRef(sortCol)}";
         parameters.Add(new NpgsqlParameter("@CursorId", lastId));
 
         if (string.IsNullOrEmpty(sortValueRaw))
