@@ -7,7 +7,7 @@ using SaaSApp.Security;
 namespace SaaSApp.Api.Controllers;
 
 /// <summary>
-/// Proxies repository assistant calls to the local Python Azure Functions host (search / chatbot).
+/// Proxies repository assistant search/chatbot to agents <c>/chat</c> (<c>intent=global_search</c>).
 /// </summary>
 [ApiController]
 [Route("api/repositories/assistant")]
@@ -26,7 +26,7 @@ public sealed class RepositoryAssistantController : ControllerBase
     }
 
     /// <summary>
-    /// POST body → <c>http://localhost:7071/api/search</c>.
+    /// Proxies to <c>Agents:ChatUrl</c> with <c>intent=global_search</c>.
     /// Example: <c>{"actionFrom":"Repository","query":"po","specificId":"...","tenantId":"..."}</c>
     /// </summary>
     [HttpPost("search")]
@@ -52,7 +52,7 @@ public sealed class RepositoryAssistantController : ControllerBase
     }
 
     /// <summary>
-    /// POST body → <c>http://localhost:7071/api/chatbot</c>.
+    /// Proxies to <c>Agents:ChatUrl</c> with <c>intent=global_search</c> (message mapped to query).
     /// Example: <c>{"actionFrom":"Repository","message":"hai","specificId":"...","tenantId":"...","token":"Bearer ..."}</c>
     /// </summary>
     [HttpPost("chatbot")]
