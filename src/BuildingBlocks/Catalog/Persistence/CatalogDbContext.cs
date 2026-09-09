@@ -19,6 +19,12 @@ public sealed class CatalogDbContext : DbContext
     public DbSet<RepositoryItemShare> RepositoryItemShares => Set<RepositoryItemShare>();
     public DbSet<CreditMaster> CreditMasters => Set<CreditMaster>();
     public DbSet<ConnectorProvider> ConnectorProviders => Set<ConnectorProvider>();
+    public DbSet<Branding> Brandings => Set<Branding>();
+    public DbSet<PortalJsonSnapshot> PortalJsonSnapshots => Set<PortalJsonSnapshot>();
+    public DbSet<FolderCreationDraft> FolderCreationDrafts => Set<FolderCreationDraft>();
+    public DbSet<UserCreationDraft> UserCreationDrafts => Set<UserCreationDraft>();
+    public DbSet<ReportBuilderDraft> ReportBuilderDrafts => Set<ReportBuilderDraft>();
+    public DbSet<DashboardSchemaSnapshot> DashboardSchemaSnapshots => Set<DashboardSchemaSnapshot>();
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)
     {
@@ -161,6 +167,89 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(e => e.CreatedAtUtc);
             entity.Property(e => e.ModifiedAtUtc);
             entity.HasIndex(e => e.ProviderCode).IsUnique();
+        });
+
+        modelBuilder.Entity<Branding>(entity =>
+        {
+            // Created at runtime by BrandingService.EnsureSchemaAsync (Postgres IF NOT EXISTS).
+            entity.ToTable("Branding", t => t.ExcludeFromMigrations());
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.UserEmail).HasMaxLength(256).IsRequired();
+            entity.Property(e => e.BrandingName).HasMaxLength(256).IsRequired();
+            entity.Property(e => e.BrandingJson).IsRequired();
+            entity.Property(e => e.CreatedAtUtc);
+            entity.Property(e => e.ModifiedAtUtc);
+            entity.Property(e => e.IsDeleted);
+            entity.HasIndex(e => e.BrandingName);
+            entity.HasIndex(e => new { e.TenantId, e.BrandingName });
+        });
+
+        modelBuilder.Entity<PortalJsonSnapshot>(entity =>
+        {
+            // Created at runtime by PortalJsonService.EnsureSchemaAsync (Postgres IF NOT EXISTS).
+            entity.ToTable("PortalJsonSnapshots", t => t.ExcludeFromMigrations());
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.Token).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.PortalJson).IsRequired();
+            entity.Property(e => e.CreatedAtUtc);
+            entity.Property(e => e.ModifiedAtUtc);
+            entity.Property(e => e.IsDeleted);
+            entity.HasIndex(e => e.Token).IsUnique();
+            entity.HasIndex(e => new { e.TenantId, e.UserId, e.IsDeleted });
+        });
+
+        modelBuilder.Entity<FolderCreationDraft>(entity =>
+        {
+            entity.ToTable("FolderCreationDrafts", t => t.ExcludeFromMigrations());
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.CurrentStepKey).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.DraftJson).IsRequired();
+            entity.Property(e => e.CreatedAtUtc);
+            entity.Property(e => e.ModifiedAtUtc);
+            entity.Property(e => e.IsCompleted);
+            entity.Property(e => e.IsDeleted);
+            entity.HasIndex(e => new { e.TenantId, e.UserId, e.IsDeleted, e.IsCompleted });
+        });
+
+        modelBuilder.Entity<UserCreationDraft>(entity =>
+        {
+            entity.ToTable("UserCreationDrafts", t => t.ExcludeFromMigrations());
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.CurrentStepKey).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.DraftJson).IsRequired();
+            entity.Property(e => e.CreatedAtUtc);
+            entity.Property(e => e.ModifiedAtUtc);
+            entity.Property(e => e.IsCompleted);
+            entity.Property(e => e.IsDeleted);
+            entity.HasIndex(e => new { e.TenantId, e.UserId, e.IsDeleted, e.IsCompleted });
+        });
+
+        modelBuilder.Entity<ReportBuilderDraft>(entity =>
+        {
+            entity.ToTable("ReportBuilderDrafts", t => t.ExcludeFromMigrations());
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.CurrentStepKey).HasMaxLength(64).IsRequired();
+            entity.Property(e => e.DraftJson).IsRequired();
+            entity.Property(e => e.CreatedAtUtc);
+            entity.Property(e => e.ModifiedAtUtc);
+            entity.Property(e => e.IsCompleted);
+            entity.Property(e => e.IsDeleted);
+            entity.HasIndex(e => new { e.TenantId, e.UserId, e.IsDeleted, e.IsCompleted });
+        });
+
+        modelBuilder.Entity<DashboardSchemaSnapshot>(entity =>
+        {
+            // Created at runtime by DashboardSchemaService.EnsureSchemaAsync (Postgres IF NOT EXISTS).
+            entity.ToTable("DashboardSchemaSnapshots", t => t.ExcludeFromMigrations());
+            entity.HasKey(e => e.Id);
+            entity.Property(e => e.SchemaJson).IsRequired();
+            entity.Property(e => e.DashboardHtml);
+            entity.Property(e => e.HtmlModifiedAtUtc);
+            entity.Property(e => e.CreatedAtUtc);
+            entity.Property(e => e.ModifiedAtUtc);
+            entity.Property(e => e.IsDeleted);
+            entity.HasIndex(e => new { e.TenantId, e.RepositoryId, e.IsDeleted });
+            entity.HasIndex(e => new { e.TenantId, e.WorkflowId, e.IsDeleted });
         });
     }
 }
