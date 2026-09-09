@@ -59,6 +59,14 @@ builder.Services.AddMultiTenancy();
 builder.Services.AddCatalog(builder.Configuration);
 builder.Services.AddScoped<IPlaygroundApiKeyService, PlaygroundApiKeyService>();
 builder.Services.AddScoped<ITenantSignupService, TenantSignupService>();
+builder.Services.Configure<BrandingOptions>(builder.Configuration.GetSection(BrandingOptions.SectionName));
+builder.Services.AddSingleton<IBrandingCryptoService, BrandingCryptoService>();
+builder.Services.AddScoped<IBrandingService, BrandingService>();
+builder.Services.AddScoped<IPortalJsonService, PortalJsonService>();
+builder.Services.AddScoped<IFolderCreationDraftService, FolderCreationDraftService>();
+builder.Services.AddScoped<IUserCreationDraftService, UserCreationDraftService>();
+builder.Services.AddScoped<IReportBuilderDraftService, ReportBuilderDraftService>();
+builder.Services.AddScoped<IDashboardSchemaService, DashboardSchemaService>();
 builder.Services.Configure<TenantPilotUserOptions>(
     builder.Configuration.GetSection(TenantPilotUserOptions.SectionName));
 builder.Services.AddScoped<ITenantPilotUserProvisioningService, TenantPilotUserProvisioningService>();

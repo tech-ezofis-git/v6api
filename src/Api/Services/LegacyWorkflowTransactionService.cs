@@ -25,6 +25,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
     private readonly IWorkflowTableCreator _workflowTableCreator;
     private readonly IWorkflowRepository _workflowRepository;
     private readonly IWorkflowLegacyMailboxSyncService _mailboxSync;
+    private readonly IWorkflowTicketNumberService _ticketNumbers;
 
     public LegacyWorkflowTransactionService(
         IHttpClientFactory httpClientFactory,
@@ -34,6 +35,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
         IWorkflowTableCreator workflowTableCreator,
         IWorkflowRepository workflowRepository,
         IWorkflowLegacyMailboxSyncService mailboxSync,
+        IWorkflowTicketNumberService ticketNumbers,
         ILogger<LegacyWorkflowTransactionService> logger)
     {
         _httpClientFactory = httpClientFactory;
@@ -43,6 +45,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
         _workflowTableCreator = workflowTableCreator;
         _workflowRepository = workflowRepository;
         _mailboxSync = mailboxSync;
+        _ticketNumbers = ticketNumbers;
         _logger = logger;
     }
 
@@ -221,7 +224,7 @@ public sealed class LegacyWorkflowTransactionService : ILegacyWorkflowTransactio
                 ? rnEl.GetString()
                 : null;
             referenceNumber = string.IsNullOrWhiteSpace(referenceNumber)
-                ? $"REQ-{DateTime.UtcNow:yyyyMMddHHmmss}"
+                ? await _ticketNumbers.AllocateNextAsync(workflowId, cancellationToken).ConfigureAwait(false)
                 : referenceNumber.Trim();
 
             var newWorkflowInstanceId = Guid.NewGuid();

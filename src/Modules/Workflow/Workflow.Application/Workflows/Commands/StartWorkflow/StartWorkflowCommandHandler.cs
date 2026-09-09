@@ -16,6 +16,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly IWorkflowTableCreator _tableCreator;
     private readonly IWorkflowStartBootstrapService _startBootstrap;
+    private readonly IWorkflowTicketNumberService _ticketNumbers;
     private readonly IApAgentPythonJobClient _apAgentPythonJobClient;
     private readonly IApAgentPythonPipelineService _apAgentPythonPipeline;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
@@ -28,6 +29,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         ICurrentUserProvider currentUserProvider,
         IWorkflowTableCreator tableCreator,
         IWorkflowStartBootstrapService startBootstrap,
+        IWorkflowTicketNumberService ticketNumbers,
         IApAgentPythonJobClient apAgentPythonJobClient,
         IApAgentPythonPipelineService apAgentPythonPipeline,
         IApAgentJobProgressService apAgentJobProgress,
@@ -39,6 +41,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _currentUserProvider = currentUserProvider;
         _tableCreator = tableCreator;
         _startBootstrap = startBootstrap;
+        _ticketNumbers = ticketNumbers;
         _apAgentPythonJobClient = apAgentPythonJobClient;
         _apAgentPythonPipeline = apAgentPythonPipeline;
         _apAgentJobProgress = apAgentJobProgress;
@@ -63,6 +66,8 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         await _tableCreator.EnsureWorkflowTablesForStartAsync(workflow.Id, connectionString, cancellationToken);
         await _apAgentJobProgress.EnsureProgressTableAsync(cancellationToken);
 
+        var ticketNumber = await _ticketNumbers.AllocateNextAsync(workflow.Id, cancellationToken);
+
         var instance = WorkflowInstance.Create(
             tenantId,
             workflow.Id,
@@ -70,7 +75,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
             workflow.Version,
             userId,
             request.Context,
-            referenceNumber: $"REQ-{DateTime.UtcNow:yyyyMMddHHmmssfff}");
+            referenceNumber: ticketNumber);
         instance.Start();
 
         foreach (var step in workflow.Steps.OrderBy(s => s.Order))

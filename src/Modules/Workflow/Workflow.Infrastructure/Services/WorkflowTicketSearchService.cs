@@ -210,12 +210,19 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         }
 
         var ezfbWhereSql = string.Join(" AND ", ezfbWhereParts);
+        var hasArchived = await ColumnExistsAsync(
+            connection, "workflow", $"workflow_instances_{workflowSuffix}", "is_archived", cancellationToken);
+        var instanceAliveSql = hasArchived ? "AND wi.is_archived = false" : "";
+        // Only count live tickets. process_form can hold form_entry_ids whose workflow_instance_id
+        // was never created / already removed — those showed up as id=0, no reference_number.
         var matchedInstancesCte = filters.Count == 0
             ? $"""
                 matched AS (
                     SELECT DISTINCT pf.workflow_instance_id AS "WorkflowInstanceId"
                     FROM {processFormTable} pf
+                    INNER JOIN {instancesTable} wi ON wi.id = pf.workflow_instance_id
                     WHERE pf.is_deleted = false
+                      {instanceAliveSql}
                 )
                 """
             : $"""
@@ -223,7 +230,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                     SELECT DISTINCT pf.workflow_instance_id AS "WorkflowInstanceId"
                     FROM {processFormTable} pf
                     INNER JOIN dbo."{ezfbTable}" e ON e.item_id = pf.form_entry_id
+                    INNER JOIN {instancesTable} wi ON wi.id = pf.workflow_instance_id
                     WHERE pf.is_deleted = false
+                      {instanceAliveSql}
                       AND {ezfbWhereSql}
                 )
                 """;

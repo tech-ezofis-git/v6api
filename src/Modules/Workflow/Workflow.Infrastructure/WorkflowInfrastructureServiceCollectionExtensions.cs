@@ -67,6 +67,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IFormEntryService, FormEntryService>();
         services.AddScoped<IEzfbEntryIdMigrationService, EzfbEntryIdMigrationService>();
         services.AddScoped<IWorkflowTicketSearchService, WorkflowTicketSearchService>();
+        services.AddScoped<IWorkflowTicketNumberService, WorkflowTicketNumberService>();
         services.AddScoped<IFormMasterFileUploadService, FormMasterFileUploadService>();
         services.AddScoped<IConnectorService, ConnectorService>();
         services.Configure<ConnectorOAuthOptions>(configuration.GetSection(ConnectorOAuthOptions.SectionName));
