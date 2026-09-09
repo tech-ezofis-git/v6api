@@ -1,3 +1,4 @@
+using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using SaaSApp.MultiTenancy;
@@ -27,6 +28,7 @@ public sealed class RepositoryAssistantController : ControllerBase
 
     /// <summary>
     /// Proxies to <c>Agents:ChatUrl</c> with <c>intent=global_search</c>.
+    /// Response body is only the agents <c>global_search_result</c> object (not the full chat envelope).
     /// Example: <c>{"actionFrom":"Repository","query":"po","specificId":"...","tenantId":"..."}</c>
     /// </summary>
     [HttpPost("search")]
@@ -43,7 +45,7 @@ public sealed class RepositoryAssistantController : ControllerBase
         try
         {
             var result = await _client.SearchAsync(request, cancellationToken);
-            return ToActionResult(result);
+            return ToSearchActionResult(result);
         }
         catch (InvalidOperationException ex)
         {
@@ -112,6 +114,69 @@ public sealed class RepositoryAssistantController : ControllerBase
                 ? "application/json"
                 : (result.ContentType ?? "text/plain")
         };
+    }
+
+    /// <summary>
+    /// For search only: unwrap <c>global_search_result</c> from the agents chat envelope.
+    /// Falls back to the raw body when the property is missing or the payload is not JSON.
+    /// </summary>
+    private static IActionResult ToSearchActionResult(RepositoryPythonProxyResult result)
+    {
+        if (string.IsNullOrWhiteSpace(result.Body))
+            return new StatusCodeResult(result.StatusCode);
+
+        if (result.StatusCode is >= 200 and < 300
+            && TryExtractGlobalSearchResult(result.Body, out var extracted))
+        {
+            return new ContentResult
+            {
+                StatusCode = result.StatusCode,
+                Content = extracted,
+                ContentType = "application/json"
+            };
+        }
+
+        return ToActionResult(result);
+    }
+
+    private static bool TryExtractGlobalSearchResult(string body, out string extracted)
+    {
+        extracted = string.Empty;
+        try
+        {
+            using var doc = JsonDocument.Parse(body);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return false;
+
+            if (!TryGetPropertyIgnoreCase(doc.RootElement, "global_search_result", out var resultEl)
+                || resultEl.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                return false;
+
+            extracted = resultEl.GetRawText();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement obj, string name, out JsonElement value)
+    {
+        if (obj.TryGetProperty(name, out value))
+            return true;
+
+        foreach (var prop in obj.EnumerateObject())
+        {
+            if (string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+            {
+                value = prop.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
     }
 
     private static bool IsLikelyJson(string body)
