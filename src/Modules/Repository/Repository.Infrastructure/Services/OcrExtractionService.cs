@@ -63,7 +63,8 @@ public sealed class OcrExtractionService : IOcrExtractionService
             resolvedPageNo, filename, cancellationToken);
 
         var fieldList = OcrResultParser.TryParseFieldList(rawJson);
-        return new OcrExtractionResult(rawJson, fieldList);
+        var ocrText = OcrResultParser.TryParseOcrText(rawJson);
+        return new OcrExtractionResult(rawJson, fieldList, ocrText);
     }
 
     private async Task<string> PostMultipartAsync(

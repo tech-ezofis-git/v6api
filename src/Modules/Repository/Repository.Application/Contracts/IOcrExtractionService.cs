@@ -14,4 +14,7 @@ public interface IOcrExtractionService
         CancellationToken cancellationToken = default);
 }
 
-public sealed record OcrExtractionResult(string RawJson, IReadOnlyList<UploadIndexFieldDto>? OcrFieldList);
+public sealed record OcrExtractionResult(
+    string RawJson,
+    IReadOnlyList<UploadIndexFieldDto>? OcrFieldList,
+    string? OcrText = null);

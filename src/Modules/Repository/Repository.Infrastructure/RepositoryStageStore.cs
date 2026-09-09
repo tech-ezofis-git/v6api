@@ -22,6 +22,7 @@ internal sealed class RepositoryStageRow
     public Guid? ModifiedBy { get; init; }
     public bool IsDeleted { get; init; }
     public string? OcrJson { get; init; }
+    public string? OcrText { get; init; }
     public string? SummaryJson { get; init; }
     public Dictionary<string, string> FieldValues { get; init; } = new(StringComparer.OrdinalIgnoreCase);
 }
@@ -182,6 +183,7 @@ internal static class RepositoryStageStore
             ModifiedBy = GetNullableGuid(values, "modified_by"),
             IsDeleted = GetBool(values, "is_deleted"),
             OcrJson = GetString(values, "ocr_json"),
+            OcrText = GetString(values, "ocr_text"),
             SummaryJson = GetString(values, "summary_json"),
             FieldValues = fieldValues
         };
@@ -197,7 +199,8 @@ internal static class RepositoryStageStore
         string? stageStatus,
         string? ocrResult,
         Guid? userId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? ocrText = null)
     {
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.StageTableName);
         var tableColumns = await RepositoryItemTableColumns.LoadAsync(connection, repo.StageTableName, cancellationToken);
@@ -232,6 +235,8 @@ internal static class RepositoryStageStore
             updates.Add("stage_status = @StageStatus");
         if (!string.IsNullOrWhiteSpace(ocrResult) && RepositoryItemTableColumns.Has(tableColumns, "OcrJson"))
             updates.Add("ocr_json = @OcrJson");
+        if (!string.IsNullOrWhiteSpace(ocrText) && RepositoryItemTableColumns.Has(tableColumns, "OcrText"))
+            updates.Add("ocr_text = @OcrText");
 
         updates.Add("modified_at_utc = now()");
         if (RepositoryItemTableColumns.Has(tableColumns, "ModifiedBy"))
@@ -243,6 +248,8 @@ internal static class RepositoryStageStore
             parameters.Add(new NpgsqlParameter("@StageStatus", stageStatus));
         if (!string.IsNullOrWhiteSpace(ocrResult))
             parameters.Add(new NpgsqlParameter("@OcrJson", ocrResult));
+        if (!string.IsNullOrWhiteSpace(ocrText))
+            parameters.Add(new NpgsqlParameter("@OcrText", ocrText));
         parameters.Add(new NpgsqlParameter("@ModifiedBy", (object?)userId ?? DBNull.Value));
 
         var sql = $"""
