@@ -79,6 +79,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IConnectorProviderAdapter, TeamsConnectorAdapter>();
         services.AddScoped<IConnectorProviderAdapter, DropboxConnectorAdapter>();
         services.AddScoped<IConnectorProviderAdapter, QuickBooksConnectorAdapter>();
+        services.AddScoped<IConnectorProviderAdapter, SapConnectorAdapter>();
         services.AddScoped<IConnectorOAuthService, ConnectorOAuthService>();
         services.AddScoped<IEmailIngestService, EmailIngestService>();
         services.AddScoped<EmailIngestActorResolver>();

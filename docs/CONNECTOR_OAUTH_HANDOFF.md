@@ -13,7 +13,7 @@
 | **Catalog DB** `catalog.ConnectorProviders` | Global OAuth apps (ClientId, Secret, Auth/Token URLs, Scopes, RedirectUri) |
 | **Tenant DB** `dbo.connector` | Per-tenant connection + `accessToken` / `refreshToken` / expiry / status |
 
-Providers in Phase 1: `GCP`, `GMAIL`, `ONEDRIVE`, `TEAMS`, `DROPBOX`.  
+Providers: `GCP`, `GMAIL`, `OUTLOOK`, `ONEDRIVE`, `TEAMS`, `DROPBOX`, `QUICKBOOKS`, `SAP` (S/4HANA Cloud OAuth scaffold).  
 Adding more later = new Catalog row + adapter (same APIs).
 
 ---
@@ -117,15 +117,16 @@ Tokens auto-refresh on file/Gmail ops when expiry is within `RefreshSkewMinutes`
 
 ## Provider capability matrix
 
-| Code | Files | Mail | QuickBooks |
-|------|-------|------|------------|
-| GCP | Yes | No | No |
-| GMAIL | No | Yes | No |
-| OUTLOOK | No | Yes (Office 365) | No |
-| ONEDRIVE | Yes | No | No |
-| TEAMS | Yes (Graph drive) | No | No |
-| DROPBOX | Yes | No | No |
-| QUICKBOOKS | No | No | Masters + documents (+ PDF); realmId on callback |
+| Code | Files | Mail | QuickBooks | Notes |
+|------|-------|------|------------|-------|
+| GCP | Yes | No | No | |
+| GMAIL | No | Yes | No | |
+| OUTLOOK | No | Yes (Office 365) | No | |
+| ONEDRIVE | Yes | No | No | |
+| TEAMS | Yes (Graph drive) | No | No | |
+| DROPBOX | Yes | No | No | |
+| QUICKBOOKS | No | No | Masters + documents (+ PDF); realmId on callback | |
+| SAP | No | No | No | S/4HANA Cloud OAuth Phase 1 (connect/status/refresh). Fill catalog AuthUrl/TokenUrl/Client*/RedirectUri from Communication Arrangement `SAP_COM_0053`. Optional `configJson`: `{"apiBaseUrl":"https://my######-api.s4hana.cloud.sap"}`. PO lookup = later phase. |
 
 Mail list/download (GMAIL + OUTLOOK):
 
@@ -145,6 +146,13 @@ QuickBooks (provider code `QUICKBOOKS`):
 - `POST /api/connector/{id}/quickbooks/purchase-orders/lookup` — body `{ "poNumber": "1005" }` → full PO header + lines for AP Agent
 - `GET /api/connector/{id}/quickbooks/documents/{documentId}/pdf?documentType=Invoice`
 - Sandbox: set connector `configJson` to `{"environment":"sandbox"}`
+
+SAP S/4HANA Cloud (provider code `SAP`):
+
+1. Fill `catalog.ConnectorProviders` where `ProviderCode = 'SAP'` from S/4 **OAuth 2.0 Details** (AuthUrl, TokenUrl, Scopes, ClientId, ClientSecret, RedirectUri = `https://<host>/V6API/api/connector/oauth/callback`).
+2. UI flow is the same authorize/callback as other providers (`providerCode: "SAP"`).
+3. Phase 1: connect only. PO lookup / AP Agent endpoints are not wired yet.
+4. If S/4 requires PKCE, tell the API team — adapter may need an update before authorize works.
 
 ---
 
