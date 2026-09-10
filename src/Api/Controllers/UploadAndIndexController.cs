@@ -124,7 +124,8 @@ public sealed class UploadAndIndexController : ControllerBase
     }
 
     /// <summary>
-    /// Stage file to monitor storage, run OCR, persist extracted fields; return fileId for later workflow start.
+    /// Stage file to monitor storage using pre-extracted OCR metadata (from uploadForOcr). Does not call OCR.
+    /// Form: file, repositoryId, metadata (JSON), optional ocrJson / ocrText.
     /// </summary>
     [HttpPost("/api/uploadAndIndex/uploadWithOcr")]
     [DisableRequestSizeLimit]
@@ -134,10 +135,10 @@ public sealed class UploadAndIndexController : ControllerBase
         IFormFile? file,
         [FromForm] string? repositoryId,
         [FromForm] string? filename,
+        [FromForm] string? metadata,
         [FromForm] List<string>? fields,
-        [FromForm] string? pageNo,
-        [FromForm] string? ocrType,
-        [FromForm] string? validateType,
+        [FromForm] string? ocrJson,
+        [FromForm] string? ocrText,
         CancellationToken cancellationToken)
     {
         if (file == null || file.Length == 0)
@@ -148,6 +149,9 @@ public sealed class UploadAndIndexController : ControllerBase
 
         var tenantId = RequireTenantId();
         var uploadName = string.IsNullOrWhiteSpace(filename) ? file.FileName : filename;
+        var metadataJson = !string.IsNullOrWhiteSpace(metadata)
+            ? metadata
+            : ResolveFieldsFormInput(fields);
 
         try
         {
@@ -159,10 +163,9 @@ public sealed class UploadAndIndexController : ControllerBase
                 uploadName!,
                 file.ContentType,
                 file.Length,
-                ResolveFieldsFormInput(fields),
-                pageNo,
-                ocrType,
-                validateType,
+                metadataJson,
+                ocrJson,
+                ocrText,
                 GetUserId(),
                 cancellationToken);
 

@@ -40,6 +40,67 @@ internal static class OcrResultParser
         return null;
     }
 
+    public static string? TryParseOcrText(string? rawJson)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson))
+            return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(rawJson);
+            return TryParseOcrText(doc.RootElement);
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static string? TryParseOcrText(JsonElement root)
+    {
+        if (root.ValueKind == JsonValueKind.String)
+        {
+            var inner = root.GetString();
+            if (string.IsNullOrWhiteSpace(inner))
+                return null;
+
+            try
+            {
+                using var innerDoc = JsonDocument.Parse(inner);
+                return TryParseOcrText(innerDoc.RootElement);
+            }
+            catch (JsonException)
+            {
+                return null;
+            }
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+            return null;
+
+        if (TryGetOcrTextProperty(root, "ocrText", out var text)
+            || TryGetOcrTextProperty(root, "OcrText", out text)
+            || TryGetOcrTextProperty(root, "ocr_text", out text))
+        {
+            return text;
+        }
+
+        return null;
+    }
+
+    private static bool TryGetOcrTextProperty(JsonElement root, string propertyName, out string? text)
+    {
+        text = null;
+        if (!root.TryGetProperty(propertyName, out var prop))
+            return false;
+
+        if (prop.ValueKind != JsonValueKind.String)
+            return false;
+
+        text = prop.GetString();
+        return !string.IsNullOrWhiteSpace(text);
+    }
+
     private static IReadOnlyList<UploadIndexFieldDto>? ParseFieldArray(JsonElement element)
     {
         if (element.ValueKind == JsonValueKind.String)
