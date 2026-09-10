@@ -274,18 +274,45 @@ internal sealed class OutlookConnectorAdapter : ConnectorProviderAdapterBase
 
         foreach (var a in values.EnumerateArray())
         {
-            // Skip Outlook inline signature / embedded images.
-            if (a.TryGetProperty("isInline", out var inline) && inline.ValueKind == JsonValueKind.True)
-                continue;
-
             var id = a.GetProperty("id").GetString();
             if (string.IsNullOrEmpty(id))
                 continue;
+
             var name = a.TryGetProperty("name", out var n) ? n.GetString() : null;
             var mime = a.TryGetProperty("contentType", out var ct) ? ct.GetString() : null;
             long? size = a.TryGetProperty("size", out var s) ? s.GetInt64() : null;
+
+            // Skip Outlook inline signature / embedded images, but keep real PNG/JPEG/PDF scans.
+            if (a.TryGetProperty("isInline", out var inline)
+                && inline.ValueKind == JsonValueKind.True
+                && !IsDocumentLikeOutlookAttachment(name, mime, size))
+            {
+                continue;
+            }
+
             attachments.Add((id, name, mime, size));
         }
+    }
+
+    private static bool IsDocumentLikeOutlookAttachment(string? fileName, string? mimeType, long? sizeBytes)
+    {
+        if (string.IsNullOrWhiteSpace(mimeType))
+            return false;
+
+        var mime = mimeType.Trim().ToLowerInvariant();
+        var isDocMime = mime.Contains("pdf", StringComparison.Ordinal)
+            || mime.Contains("tiff", StringComparison.Ordinal)
+            || mime.Contains("image/png", StringComparison.Ordinal)
+            || mime.Contains("image/jpeg", StringComparison.Ordinal)
+            || mime.Contains("image/jpg", StringComparison.Ordinal);
+
+        if (!isDocMime)
+            return false;
+
+        if (!string.IsNullOrWhiteSpace(fileName))
+            return true;
+
+        return sizeBytes is null or >= 50_000;
     }
 
     private static void AddOutlookImmutableIdPrefer(HttpRequestMessage req) =>

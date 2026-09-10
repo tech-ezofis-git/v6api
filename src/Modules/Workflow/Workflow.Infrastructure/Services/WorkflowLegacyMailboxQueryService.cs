@@ -102,7 +102,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
                 continue;
             if (string.IsNullOrWhiteSpace(row.FormId) || string.IsNullOrWhiteSpace(row.FormEntryId))
                 continue;
-            if (!int.TryParse(row.FormEntryId, out var entryId) || entryId <= 0)
+            if (!Guid.TryParse(row.FormEntryId, out var entryId) || entryId == Guid.Empty)
                 continue;
 
             var loaded = await _formDataLoader.LoadFormDataJsonAsync(row.FormId, entryId, cancellationToken);

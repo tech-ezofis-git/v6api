@@ -179,7 +179,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         foreach (var control in controls)
         {
             var jsonId = control.JsonId;
-            if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, jsonId, ezfbColumns, out var col))
+            if (!EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, jsonId, ezfbColumns, out var col))
                 continue;
 
             var current = await GetEzfbColumnValueAsync(connection, ezfbTable, entryId, col, cancellationToken);
@@ -212,15 +213,15 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
     public async Task<int> ApplyFormDataToEzfbAsync(
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         IReadOnlyDictionary<string, string> fields,
         string? lineItemsJson = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(formId))
             throw new ArgumentException("formId is required.");
-        if (formEntryId <= 0)
-            throw new ArgumentException("formEntryId must be a positive integer.");
+        if (formEntryId == Guid.Empty)
+            throw new ArgumentException("formEntryId must be a valid GUID.");
         if (fields.Count == 0 && string.IsNullOrWhiteSpace(lineItemsJson))
             return 0;
 
@@ -255,7 +256,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
                 matchedControl = control;
-                if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var colFromControl))
+                if (!EzfbColumnNaming.TryResolveEzfbColumn(
+                        control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var colFromControl))
                 {
                     _logger.LogWarning(
                         "ezfb column not found for jsonId {JsonId} (control name {ControlName}).",
@@ -347,13 +349,13 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         Guid workflowId,
         Guid workflowInstanceId,
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         string? agentResponseJson = null,
         CancellationToken cancellationToken = default)
     {
         try
         {
-            if (string.IsNullOrWhiteSpace(formId) || formEntryId <= 0)
+            if (string.IsNullOrWhiteSpace(formId) || formEntryId == Guid.Empty)
                 return 0;
 
             // Prefer live AIAGENTResponse from move-next body (engine always sends po_row there).
@@ -548,7 +550,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
     private async Task<int> ApplyPoRowFieldsToEzfbAsync(
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         IReadOnlyDictionary<string, string> poRowFields,
         CancellationToken cancellationToken)
     {
@@ -600,7 +602,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 control.JsonId,
                 mutableColumns,
                 cancellationToken,
-                control.Name);
+                control.Name,
+                control.ColumnName);
             if (!columnOk)
             {
                 _logger.LogWarning(
@@ -687,7 +690,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     private async Task<int> TryApplyPoLineItemFromPoRowAsync(
         NpgsqlConnection connection,
         string ezfbTable,
-        int formEntryId,
+        Guid formEntryId,
         IReadOnlyDictionary<string, string> poRowFields,
         IReadOnlyList<FormControlRow> controls,
         HashSet<string> ezfbColumns,
@@ -729,7 +732,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             lineControl.JsonId,
             ezfbColumns,
             cancellationToken,
-            lineControl.Name);
+            lineControl.Name,
+            lineControl.ColumnName);
         if (!columnOk)
         {
             _logger.LogWarning(
@@ -958,9 +962,10 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         string jsonId,
         HashSet<string> ezfbColumns,
         CancellationToken cancellationToken,
-        string? name = null)
+        string? name = null,
+        string? columnName = null)
     {
-        if (EzfbColumnNaming.TryResolveEzfbColumn(name, jsonId, ezfbColumns, out var existing))
+        if (EzfbColumnNaming.TryResolveEzfbColumn(columnName, name, jsonId, ezfbColumns, out var existing))
             return (true, existing);
 
         if (!EzfbColumnNaming.TryToColumnName(jsonId, out var newColumn) || string.IsNullOrWhiteSpace(newColumn))
@@ -1135,8 +1140,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     {
         if (string.IsNullOrWhiteSpace(request.FormId))
             throw new ArgumentException("formId is required.");
-        if (request.FormEntryId <= 0)
-            throw new ArgumentException("formEntryId must be a positive integer.");
+        if (request.FormEntryId == Guid.Empty)
+            throw new ArgumentException("formEntryId must be a valid GUID.");
         if (request.Fields.Count == 0 && string.IsNullOrWhiteSpace(request.LineItemsJson))
             throw new ArgumentException("At least one field or lineItems is required.");
 
@@ -1197,7 +1202,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 if (!TryResolveControlForField(key, controls, out var control) || control is null)
                     continue;
 
-                if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var col))
+                if (!EzfbColumnNaming.TryResolveEzfbColumn(
+                        control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var col))
                 {
                     _logger.LogWarning(
                         "ezfb column not found for jsonId {JsonId} (control name {ControlName}).",
@@ -1343,7 +1349,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 return;
             }
 
-            if (!EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var column))
+            if (!EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var column))
             {
                 _logger.LogWarning(
                     "ezfb column not found for Matched Status jsonId {JsonId} on form {FormId}.",
@@ -1530,15 +1537,20 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         return Task.FromResult((object)formId);
     }
 
-    private sealed record FormControlRow(int Id, string JsonId, string? Name, string? Type, int ParentId);
+    private sealed record FormControlRow(int Id, string JsonId, string? Name, string? Type, int ParentId, string? ColumnName = null);
 
     private static async Task<List<FormControlRow>> LoadFormControlsAsync(
         NpgsqlConnection connection,
         object wFormIdValue,
         CancellationToken cancellationToken)
     {
+        await using (var alterCmd = new NpgsqlCommand(
+            """ALTER TABLE dbo."wFormControl" ADD COLUMN IF NOT EXISTS "columnName" varchar(200) NULL;""",
+            connection))
+            await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+
         const string sql = """
-            SELECT id, "jsonId", name, type, COALESCE("parentId", 0)
+            SELECT id, "jsonId", name, type, COALESCE("parentId", 0), "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId AND "isDeleted" = false AND "jsonId" IS NOT NULL AND TRIM("jsonId") <> ''
             """;
@@ -1553,7 +1565,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 reader.GetString(1),
                 reader.IsDBNull(2) ? null : reader.GetString(2),
                 reader.IsDBNull(3) ? null : reader.GetString(3),
-                reader.GetInt32(4)));
+                reader.GetInt32(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return list;
@@ -1774,7 +1787,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             if (!IsInvoiceExtractedLineItemControl(row))
                 continue;
 
-            if (EzfbColumnNaming.TryResolveEzfbColumn(row.Name, row.JsonId, ezfbColumns, out var col))
+            if (EzfbColumnNaming.TryResolveEzfbColumn(row.ColumnName, row.Name, row.JsonId, ezfbColumns, out var col))
                 return col;
         }
 
@@ -1793,7 +1806,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
         if (dynamicCount == 1
             && onlyDynamic is not null
-            && EzfbColumnNaming.TryResolveEzfbColumn(onlyDynamic.Name, onlyDynamic.JsonId, ezfbColumns, out var singleCol))
+            && EzfbColumnNaming.TryResolveEzfbColumn(
+                onlyDynamic.ColumnName, onlyDynamic.Name, onlyDynamic.JsonId, ezfbColumns, out var singleCol))
         {
             return singleCol;
         }
@@ -1874,7 +1888,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     private static async Task<string?> GetEzfbColumnValueAsync(
         NpgsqlConnection connection,
         string ezfbTable,
-        int itemId,
+        Guid itemId,
         string column,
         CancellationToken cancellationToken)
     {
@@ -1888,7 +1902,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     private async Task UpdateEzfbColumnAsync(
         NpgsqlConnection connection,
         string ezfbTable,
-        int itemId,
+        Guid itemId,
         string column,
         string value,
         CancellationToken cancellationToken)

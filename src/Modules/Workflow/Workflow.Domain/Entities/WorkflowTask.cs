@@ -10,7 +10,7 @@ public sealed class WorkflowTask : Entity<Guid>, ITenantEntity
     public Guid WorkflowInstanceId { get; private set; }
     public Guid? StepInstanceId { get; private set; }
     public int WFormId { get; private set; }
-    public int FormEntryId { get; private set; }
+    public Guid FormEntryId { get; private set; }
     public string? TaskName { get; private set; }
     public string? TaskDescription { get; private set; }
     public Guid? AssignedToUserId { get; private set; }
@@ -26,7 +26,7 @@ public sealed class WorkflowTask : Entity<Guid>, ITenantEntity
     private WorkflowTask() { } // EF
 
     /// <summary>Create a workflow task.</summary>
-    public static WorkflowTask Create(Guid tenantId, Guid workflowInstanceId, int wFormId, int formEntryId, Guid createdBy, Guid? stepInstanceId = null, string? taskName = null, string? taskDescription = null, Guid? assignedToUserId = null, DateTime? dueDate = null)
+    public static WorkflowTask Create(Guid tenantId, Guid workflowInstanceId, int wFormId, Guid formEntryId, Guid createdBy, Guid? stepInstanceId = null, string? taskName = null, string? taskDescription = null, Guid? assignedToUserId = null, DateTime? dueDate = null)
     {
         return new WorkflowTask
         {

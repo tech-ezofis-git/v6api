@@ -252,7 +252,7 @@ public sealed record RepositoryItemLineItemsSectionDto(
 
 /// <summary>
 /// Structured item detail for the document workspace UI (click filename).
-/// Side panels are in <see cref="DetailsRow"/> (document, supplier, AI, system).
+/// Side panels are in <see cref="DetailsRow"/> (document info, repository field details, AI, system).
 /// <see cref="LineItems"/> is a JSON array of invoice line objects (not wrapped in rows).
 /// </summary>
 public sealed record RepositoryItemWorkspaceDto(
@@ -264,7 +264,9 @@ public sealed record RepositoryItemWorkspaceDto(
     Guid StorageProviderId,
     string? StorageProviderCode,
     [property: JsonPropertyName("DetailsRow")] IReadOnlyList<RepositoryItemPanelSectionDto> DetailsRow,
-    [property: JsonPropertyName("lineItems")] JsonElement? LineItems = null);
+    [property: JsonPropertyName("lineItems")]
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    JsonElement? LineItems = null);
 
 public sealed record CreateRepositoryItemRequest(
     Guid? StorageProviderId,
@@ -301,7 +303,8 @@ public sealed record RepositoryUploadItemRequest(
     int? TransactionId = null,
     string? StorageProviderCode = null,
     long? FileSize = null,
-    string? Metadata = null);
+    string? Metadata = null,
+    bool AllowIncompleteFolderMetadata = false);
 
 public sealed record RepositoryUploadItemResult(
     Guid ItemId,
@@ -377,7 +380,8 @@ public sealed record FacetValueDto(string Value, int Count);
 
 /// <summary>
 /// Related documents across all tenant repositories for an open file.
-/// Match is chosen automatically from the source item metadata (FE only passes repoId + itemId).
+/// Match is chosen automatically from the source item metadata (FE only passes repoId + itemId),
+/// or narrowed with optional field/value query params on related-exact.
 /// </summary>
 public sealed record RepositoryRelatedDocumentsResultDto(
     Guid SourceRepositoryId,
@@ -406,6 +410,46 @@ public sealed record RepositoryRelatedDocumentDto(
     int MatchCount = 0,
     /// <summary>Which match keys matched (sqlColumnName).</summary>
     IReadOnlyList<string>? MatchedFields = null);
+
+/// <summary>One related file to persist against the open source item.</summary>
+public sealed record SaveRepositoryRelatedDocumentRef(
+    Guid RepositoryId,
+    Guid ItemId,
+    int? MatchScore = null);
+
+/// <summary>
+/// Replace-on-save body: previous related docs for this source item are removed,
+/// then <see cref="Items"/> become the current set.
+/// </summary>
+public sealed record SaveRepositoryRelatedDocumentsRequest(
+    IReadOnlyList<SaveRepositoryRelatedDocumentRef> Items,
+    string? MatchField = null,
+    string? MatchValue = null);
+
+public sealed record RepositorySavedRelatedDocumentDto(
+    Guid Id,
+    Guid RelatedRepositoryId,
+    string? RelatedRepositoryName,
+    Guid RelatedItemId,
+    string? FileName,
+    string? FileType,
+    int? FileSize,
+    string? DocumentType,
+    string? Supplier,
+    string? PoNumber,
+    string? InvoiceNumber,
+    int? MatchScore,
+    string? MatchField,
+    string? MatchValue,
+    DateTime CreatedAtUtc);
+
+public sealed record RepositorySavedRelatedDocumentsResultDto(
+    Guid SourceRepositoryId,
+    Guid SourceItemId,
+    string? MatchField,
+    string? MatchValue,
+    int TotalCount,
+    IReadOnlyList<RepositorySavedRelatedDocumentDto> Data);
 
 public sealed record PagedResult<T>(
     IReadOnlyList<T> Data,

@@ -1,4 +1,5 @@
 using MediatR;
+using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
 
@@ -11,7 +12,7 @@ public record MoveToNextStepCommand(
     Guid? ActivityUserId = null,
     MoveToNextStepApAgentPayload? ApAgent = null,
     string? FormId = null,
-    int? FormEntryId = null,
+    Guid? FormEntryId = null,
     IReadOnlyDictionary<string, string>? FormDataFields = null,
     string? FormLineItemsJson = null,
     string? SubmittedFormDataJson = null
@@ -27,5 +28,9 @@ public record MoveToNextStepCommandResult(
     Guid? LegacyWorkflowInstanceId = null,
     int? LegacyCompletedTransactionId = null,
     int? LegacyNextTransactionId = null,
-    Guid? LegacyNextTransactionGuid = null
+    Guid? LegacyNextTransactionGuid = null,
+    Guid? GeneratedPdfAttachmentId = null,
+    string? GeneratedPdfFileName = null,
+    /// <summary>Python PDF request input (formData / fileName / metadata / templateJson) for cross-check.</summary>
+    WorkflowPdfPythonRequestDto? GeneratedPdfInput = null
 );

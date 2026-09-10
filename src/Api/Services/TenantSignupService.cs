@@ -52,7 +52,7 @@ public sealed class TenantSignupService : ITenantSignupService
     private readonly IActivityLogSchemaService _activityLogSchema;
     private readonly ActivityLogOptions _activityLogOptions;
     private readonly EventLogOptions _eventLogOptions;
-    private readonly TenantPilotUserOptions _pilotUserOptions;
+    private readonly ITenantPilotUserProvisioningService _pilotUserProvisioning;
     private readonly TenantDefaultCreditOptions _defaultCreditOptions;
 
     public TenantSignupService(
@@ -65,7 +65,7 @@ public sealed class TenantSignupService : ITenantSignupService
         IActivityLogSchemaService activityLogSchema,
         IOptions<ActivityLogOptions> activityLogOptions,
         IOptions<EventLogOptions> eventLogOptions,
-        IOptions<TenantPilotUserOptions> pilotUserOptions,
+        ITenantPilotUserProvisioningService pilotUserProvisioning,
         IOptions<TenantDefaultCreditOptions> defaultCreditOptions)
     {
         _dbCreator = dbCreator;
@@ -77,7 +77,7 @@ public sealed class TenantSignupService : ITenantSignupService
         _activityLogSchema = activityLogSchema;
         _activityLogOptions = activityLogOptions.Value;
         _eventLogOptions = eventLogOptions.Value;
-        _pilotUserOptions = pilotUserOptions.Value;
+        _pilotUserProvisioning = pilotUserProvisioning;
         _defaultCreditOptions = defaultCreditOptions.Value;
     }
 
@@ -388,42 +388,10 @@ public sealed class TenantSignupService : ITenantSignupService
         string? adminEmail,
         CancellationToken cancellationToken)
     {
-        if (!_pilotUserOptions.Enabled)
-            return;
-
-        var pilotEmail = _pilotUserOptions.Email?.Trim();
-        if (string.IsNullOrWhiteSpace(pilotEmail))
-            return;
-
-        if (string.IsNullOrWhiteSpace(_pilotUserOptions.Password))
-            return;
-
-        if (string.Equals(pilotEmail, adminEmail, StringComparison.OrdinalIgnoreCase))
-            return;
-
-        var pilotUserId = await CreateTenantUserAsync(
+        await _pilotUserProvisioning.EnsurePilotUserAsync(
+            tenantId,
             tenantConnectionString,
-            tenantId,
-            pilotEmail,
-            string.IsNullOrWhiteSpace(_pilotUserOptions.DisplayName)
-                ? "AP Agent Pilot"
-                : _pilotUserOptions.DisplayName.Trim(),
-            _pilotUserOptions.Password,
-            string.IsNullOrWhiteSpace(_pilotUserOptions.Role)
-                ? User.RoleTenantUser
-                : _pilotUserOptions.Role.Trim(),
-            "EZOFIS",
-            firstName: "AP Agent",
-            lastName: "Pilot",
-            cancellationToken);
-
-        await _userTenantRegistry.AddOrUpdateAsync(
-            pilotEmail,
-            tenantId,
-            string.IsNullOrWhiteSpace(_pilotUserOptions.Role)
-                ? User.RoleTenantUser
-                : _pilotUserOptions.Role.Trim(),
-            pilotUserId,
+            skipIfSameEmailAs: adminEmail,
             cancellationToken);
     }
 

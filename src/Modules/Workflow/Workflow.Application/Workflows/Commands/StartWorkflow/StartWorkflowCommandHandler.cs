@@ -2,6 +2,7 @@ using System.Text.Json;
 using MediatR;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Domain.Entities;
 using SaaSApp.Workflow.Domain.Enums;
 
@@ -15,6 +16,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly IWorkflowTableCreator _tableCreator;
     private readonly IWorkflowStartBootstrapService _startBootstrap;
+    private readonly IWorkflowTicketNumberService _ticketNumbers;
     private readonly IApAgentPythonJobClient _apAgentPythonJobClient;
     private readonly IApAgentPythonPipelineService _apAgentPythonPipeline;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
@@ -27,6 +29,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         ICurrentUserProvider currentUserProvider,
         IWorkflowTableCreator tableCreator,
         IWorkflowStartBootstrapService startBootstrap,
+        IWorkflowTicketNumberService ticketNumbers,
         IApAgentPythonJobClient apAgentPythonJobClient,
         IApAgentPythonPipelineService apAgentPythonPipeline,
         IApAgentJobProgressService apAgentJobProgress,
@@ -38,6 +41,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _currentUserProvider = currentUserProvider;
         _tableCreator = tableCreator;
         _startBootstrap = startBootstrap;
+        _ticketNumbers = ticketNumbers;
         _apAgentPythonJobClient = apAgentPythonJobClient;
         _apAgentPythonPipeline = apAgentPythonPipeline;
         _apAgentJobProgress = apAgentJobProgress;
@@ -62,7 +66,16 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         await _tableCreator.EnsureWorkflowTablesForStartAsync(workflow.Id, connectionString, cancellationToken);
         await _apAgentJobProgress.EnsureProgressTableAsync(cancellationToken);
 
-        var instance = WorkflowInstance.Create(tenantId, workflow.Id, workflow.Name, workflow.Version, userId, request.Context);
+        var ticketNumber = await _ticketNumbers.AllocateNextAsync(workflow.Id, cancellationToken);
+
+        var instance = WorkflowInstance.Create(
+            tenantId,
+            workflow.Id,
+            workflow.Name,
+            workflow.Version,
+            userId,
+            request.Context,
+            referenceNumber: ticketNumber);
         instance.Start();
 
         foreach (var step in workflow.Steps.OrderBy(s => s.Order))
@@ -109,6 +122,9 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
 
         try
         {
+            var orderedSteps = workflow.Steps.OrderBy(s => s.Order).ToList();
+            var dedicatedApAgent = WorkflowStepTransitionHelper.TryResolveDedicatedApAgentStep(orderedSteps);
+
             var bootstrap = await _startBootstrap.RunAsync(
                 new WorkflowStartBootstrapRequest(
                     workflow,
@@ -118,7 +134,10 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                     request.EnvType,
                     attachmentStream,
                     request.Attachment?.FileName,
-                    request.Attachment?.ContentType),
+                    request.Attachment?.ContentType,
+                    request.FormDataFields,
+                    request.FormLineItemsJson,
+                    request.StagedFiles),
                 cancellationToken);
 
             _logger.LogInformation(
@@ -140,6 +159,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 skills);
 
             if (request.TriggerApAgentPythonJob
+                && dedicatedApAgent != null
                 && !string.IsNullOrWhiteSpace(formDataJson))
             {
                 var jobArgs = new ApAgentPythonJobArgs(

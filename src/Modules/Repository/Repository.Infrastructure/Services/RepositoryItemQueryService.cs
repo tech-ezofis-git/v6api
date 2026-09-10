@@ -62,8 +62,14 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         var page = Math.Max(1, query.Page);
         var pageSize = Math.Clamp(query.PageSize, 1, RepositoryItemCursorHelper.MaxPageSize);
         var sortCol = RepositoryItemFilterHelper.ResolveSortColumn(query.SortBy, allowedColumns, tableColumns);
-        if (!RepositoryItemTableColumns.Has(tableColumns, sortCol))
-            sortCol = RepositoryItemTableColumns.Has(tableColumns, "CreatedAtUtc") ? "CreatedAtUtc" : "FileName";
+        if (!RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, sortCol, out var sortPhysical))
+        {
+            sortPhysical = RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, "CreatedAtUtc", out var created)
+                ? created
+                : (RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, "FileName", out var fileName)
+                    ? fileName
+                    : "file_name");
+        }
 
         var sortAscending = string.Equals(query.SortOrder, "asc", StringComparison.OrdinalIgnoreCase);
         var sortDir = sortAscending ? "ASC" : "DESC";
@@ -89,7 +95,8 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         {
             var (cursorSortCol, cursorAscending, cursorValue, cursorId) =
                 RepositoryItemCursorHelper.Decode(query.Cursor!);
-            if (!string.Equals(cursorSortCol, sortCol, StringComparison.OrdinalIgnoreCase)
+            if ((!string.Equals(cursorSortCol, sortPhysical, StringComparison.OrdinalIgnoreCase)
+                    && !string.Equals(cursorSortCol, sortCol, StringComparison.OrdinalIgnoreCase))
                 || cursorAscending != sortAscending)
             {
                 throw new ArgumentException(
@@ -97,7 +104,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
             }
 
             RepositoryItemCursorHelper.ApplyKeysetFilter(
-                where, parameters, sortCol, sortAscending, cursorValue, cursorId);
+                where, parameters, sortPhysical, sortAscending, cursorValue, cursorId);
         }
 
         if (!string.IsNullOrWhiteSpace(query.Search))
@@ -107,15 +114,19 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         }
 
         var dateFilterCol = RepositoryItemListReader.ResolveDateFilterColumn(tableColumns, repo);
-        if (query.DateFrom.HasValue && dateFilterCol != null)
+        if (query.DateFrom.HasValue
+            && dateFilterCol != null
+            && RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, dateFilterCol, out var dateFromCol))
         {
-            where.Add($"i.{RepositorySqlHelper.ColumnRef(dateFilterCol)} >= @DateFrom");
+            where.Add($"i.{RepositorySqlHelper.PhysicalColumnRef(dateFromCol)} >= @DateFrom");
             parameters.Add(new NpgsqlParameter("@DateFrom", query.DateFrom.Value.Date));
         }
 
-        if (query.DateTo.HasValue && dateFilterCol != null)
+        if (query.DateTo.HasValue
+            && dateFilterCol != null
+            && RepositoryItemTableColumns.TryGetCanonicalName(tableColumns, dateFilterCol, out var dateToCol))
         {
-            where.Add($"i.{RepositorySqlHelper.ColumnRef(dateFilterCol)} <= @DateTo");
+            where.Add($"i.{RepositorySqlHelper.PhysicalColumnRef(dateToCol)} <= @DateTo");
             parameters.Add(new NpgsqlParameter("@DateTo", query.DateTo.Value.Date));
         }
 
@@ -140,7 +151,7 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
             FROM {table} i
             INNER JOIN repository."StorageProviders" sp ON sp."Id" = i.storage_provider_id
             WHERE {whereSql}
-            ORDER BY i.{RepositorySqlHelper.ColumnRef(sortCol)} {sortDir}, i.id {sortDir}
+            ORDER BY i.{RepositorySqlHelper.PhysicalColumnRef(sortPhysical)} {sortDir}, i.id {sortDir}
             {pagingSql};
             """;
 

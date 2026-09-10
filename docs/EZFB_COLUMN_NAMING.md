@@ -34,6 +34,18 @@ start with a digit gets an `F_` prefix (same convention as the legacy jsonId pat
 
 Two fields whose labels sanitize to the same column (or a label that happens to collide with a
 reserved system column: `item_id`, `created_at`, `modified_at`, `created_by`, `modified_by`,
+
+## Form entry primary key (item_id)
+
+New `dbo.ezfb_{formId}_items` tables use **`item_id uuid PRIMARY KEY DEFAULT gen_random_uuid()`**
+(aligned with repository `item_id` and workflow GUIDs). API `formEntryId` is a **GUID** everywhere
+(create with `00000000-0000-0000-0000-000000000000` on `POST /api/form/{id}/entry/{entryId}`).
+
+Existing tenants with integer `item_id` must run the one-time admin migration:
+
+`POST /api/admin/tenants/{tenantId}/migrate-ezfb-entry-ids`
+
+before relying on Guid form entry ids on live data.
 `is_deleted`, `today_task`, `is_marked`) get a numeric suffix: `_2`, `_3`, ...
 
 ## What the frontend can send

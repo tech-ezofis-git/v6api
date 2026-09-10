@@ -69,7 +69,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 continue;
 
             string column;
-            if (ezfbColumns.Count > 0 && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out var resolved))
+            if (ezfbColumns.Count > 0
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var resolved))
                 column = resolved;
             else if (!EzfbColumnNaming.TryToColumnName(control.JsonId, out column))
                 column = control.JsonId.Trim();
@@ -208,12 +210,19 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         }
 
         var ezfbWhereSql = string.Join(" AND ", ezfbWhereParts);
+        var hasArchived = await ColumnExistsAsync(
+            connection, "workflow", $"workflow_instances_{workflowSuffix}", "is_archived", cancellationToken);
+        var instanceAliveSql = hasArchived ? "AND wi.is_archived = false" : "";
+        // Only count live tickets. process_form can hold form_entry_ids whose workflow_instance_id
+        // was never created / already removed — those showed up as id=0, no reference_number.
         var matchedInstancesCte = filters.Count == 0
             ? $"""
                 matched AS (
                     SELECT DISTINCT pf.workflow_instance_id AS "WorkflowInstanceId"
                     FROM {processFormTable} pf
+                    INNER JOIN {instancesTable} wi ON wi.id = pf.workflow_instance_id
                     WHERE pf.is_deleted = false
+                      {instanceAliveSql}
                 )
                 """
             : $"""
@@ -221,7 +230,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                     SELECT DISTINCT pf.workflow_instance_id AS "WorkflowInstanceId"
                     FROM {processFormTable} pf
                     INNER JOIN dbo."{ezfbTable}" e ON e.item_id = pf.form_entry_id
+                    INNER JOIN {instancesTable} wi ON wi.id = pf.workflow_instance_id
                     WHERE pf.is_deleted = false
+                      {instanceAliveSql}
                       AND {ezfbWhereSql}
                 )
                 """;
@@ -372,7 +383,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 RepositoryId: repo.RepositoryId?.ToString("D") ?? form.RepositoryId,
                 ItemId: repo.ItemId?.ToString("D") ?? form.ItemId,
                 FormId: form.FormId,
-                FormEntryId: form.FormEntryId?.ToString(CultureInfo.InvariantCulture),
+                FormEntryId: form.FormEntryId?.ToString("D"),
                 FormData: form.FormDataJson,
                 MlPrediction: null,
                 MlCondition: null,
@@ -737,15 +748,20 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         return columns;
     }
 
-    private sealed record FormControlRow(string JsonId, string? Name, string? Type);
+    private sealed record FormControlRow(string JsonId, string? Name, string? Type, string? ColumnName = null);
 
     private static async Task<List<FormControlRow>> LoadFormControlsAsync(
         NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)
     {
+        await using (var alterCmd = new NpgsqlCommand(
+            """ALTER TABLE dbo."wFormControl" ADD COLUMN IF NOT EXISTS "columnName" varchar(200) NULL;""",
+            connection))
+            await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+
         const string sql = """
-            SELECT "jsonId", name, type
+            SELECT "jsonId", name, type, "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId
               AND "isDeleted" = false
@@ -761,7 +777,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             rows.Add(new FormControlRow(
                 reader.GetString(0),
                 reader.IsDBNull(1) ? null : reader.GetString(1),
-                reader.IsDBNull(2) ? null : reader.GetString(2)));
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
         }
 
         return rows;
@@ -782,7 +799,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         {
             if (!string.IsNullOrWhiteSpace(control.Name)
                 && string.Equals(control.Name.Trim(), key, StringComparison.OrdinalIgnoreCase)
-                && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out column))
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out column))
             {
                 return true;
             }
@@ -791,7 +809,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         foreach (var control in controls)
         {
             if (string.Equals(control.JsonId, key, StringComparison.OrdinalIgnoreCase)
-                && EzfbColumnNaming.TryResolveEzfbColumn(control.Name, control.JsonId, ezfbColumns, out column))
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out column))
             {
                 return true;
             }
@@ -979,7 +998,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
     private sealed record FormIdentityResult(
         string? FormId,
-        int? FormEntryId,
+        Guid? FormEntryId,
         string? FormDataJson,
         string? RepositoryId,
         string? ItemId);
@@ -1088,7 +1107,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
-        int? formEntryId = null;
+        Guid? formEntryId = null;
         string? formGuid = null;
 
         // Prefer process_form (same FormEntryId path as ezfb filter join).
@@ -1107,19 +1126,14 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             if (await reader.ReadAsync(cancellationToken))
             {
                 formGuid = reader.IsDBNull(0) ? null : Convert.ToString(reader.GetValue(0))?.Trim();
-                if (!reader.IsDBNull(1))
-                {
-                    var entryId = reader.GetInt32(1);
-                    if (entryId > 0)
-                        formEntryId = entryId;
-                }
+                formEntryId = EzfbEntryIdReader.ReadOrNull(reader, 1);
             }
         }
         catch (PostgresException)
         {
         }
 
-        if (formEntryId is not > 0)
+        if (formEntryId is null)
         {
             try
             {
@@ -1133,12 +1147,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 await using var cmd = new NpgsqlCommand(formsSql, connection);
                 cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
                 await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-                if (await reader.ReadAsync(cancellationToken) && !reader.IsDBNull(0))
-                {
-                    var entryId = reader.GetInt32(0);
-                    if (entryId > 0)
-                        formEntryId = entryId;
-                }
+                if (await reader.ReadAsync(cancellationToken))
+                    formEntryId = EzfbEntryIdReader.ReadOrNull(reader, 0);
             }
             catch (PostgresException)
             {
@@ -1171,7 +1181,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
         // Always load live field values from ezfb_{formSuffix}_items on the current tenant connection.
         string? fieldsJson = null;
-        if (formEntryId is > 0 && !string.IsNullOrWhiteSpace(formGuid))
+        if (formEntryId is not null && !string.IsNullOrWhiteSpace(formGuid))
         {
             fieldsJson = await WorkflowEzfbFormDataLoader.LoadFormDataJsonAsync(
                 connection,

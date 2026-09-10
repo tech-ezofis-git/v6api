@@ -58,11 +58,24 @@ Alternative (when you only have the Hangfire job id):
 
 ### Headers
 
+Use `pilotAccessToken` from the `/chat` payload when present (recommended). Otherwise login per tenant (see below).
+
 ```http
-Authorization: Bearer <jwt>
+Authorization: Bearer <pilotAccessToken-or-login-jwt>
 X-Tenant-Id: <tenant-guid-from-startPayload.tenantId>
 Content-Type: application/json
 ```
+
+**Per-tenant login fallback** (when token is not in payload):
+
+```http
+POST /api/auth/ezofis/login
+X-Tenant-Id: {tenantId}
+
+{ "email": "pilot@ezofis.com", "password": "<TenantPilotUser.Password>" }
+```
+
+Cache JWT per `tenantId` in Python; do not reuse one token across tenants.
 
 ### Request body
 

@@ -27,7 +27,7 @@ internal static class RepositoryFilePathHelper
 
     /// <summary>
     /// Tenant container (ezts{tenantId}) + blob path:
-    /// archive/{repositoryName}/{folder fields}/{archiveFileName}.ext — archive file name from the highest metadata level above folder levels (e.g. PoNumber).
+    /// archive/{repositoryName}/{folder fields}/{archiveFileName}.ext — file stem from naming field (level above folders, or max folder field).
     /// </summary>
     public static string BuildArchiveRelativePath(
         string repositoryName,

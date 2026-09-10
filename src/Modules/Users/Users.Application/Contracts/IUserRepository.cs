@@ -32,6 +32,15 @@ public interface IUserRepository
         string newRoleName,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Removes <paramref name="roleName"/> from comma-separated Users.Role values (case-insensitive).
+    /// Leaves remaining roles joined by comma; sets empty string when none remain.
+    /// Returns email + resulting Role for each updated user.
+    /// </summary>
+    Task<IReadOnlyList<(string Email, string Role)>> RemoveRoleNameFromUsersAsync(
+        string roleName,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Mark user as modified for persistence.</summary>
     void Update(User user);
 

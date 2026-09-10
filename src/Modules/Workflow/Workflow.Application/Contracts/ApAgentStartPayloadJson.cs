@@ -105,6 +105,46 @@ public static class ApAgentStartPayloadJson
     }
 
     /// <summary>
+    /// Adds pilot service-account auth fields for Python AP Agent callbacks (Bearer + X-Tenant-Id).
+    /// </summary>
+    public static string EnrichWithPilotAuth(string innerFlatJson, ApAgentPilotAuth auth)
+    {
+        if (string.IsNullOrWhiteSpace(innerFlatJson))
+            return innerFlatJson;
+
+        using var doc = JsonDocument.Parse(innerFlatJson);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            return innerFlatJson;
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                if (prop.NameEquals("pilotAccessToken")
+                    || prop.NameEquals("pilotUserId")
+                    || prop.NameEquals("pilotEmail")
+                    || prop.NameEquals("pilotTokenExpiresIn"))
+                {
+                    continue;
+                }
+
+                prop.WriteTo(writer);
+            }
+
+            writer.WriteString("pilotAccessToken", auth.AccessToken);
+            writer.WriteString("pilotUserId", auth.UserId.ToString("D"));
+            writer.WriteString("pilotEmail", auth.Email);
+            writer.WriteNumber("pilotTokenExpiresIn", auth.ExpiresInSeconds);
+
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>
     /// Builds POST body for agents <c>/chat</c> matching start-workflow AP inputs:
     /// <c>{ "session_id", "intent": "ap", "payload": { tenant_id, formid, item_id, filepath, workflowId, skills?, ... } }</c>.
     /// When <paramref name="skills"/> is null/empty, <c>skills</c> is omitted so agents run the full default plan.
@@ -168,6 +208,9 @@ public static class ApAgentStartPayloadJson
             WriteMappedString(writer, "apAgentJobId", inner, "apAgentJobId");
             WriteMappedString(writer, "apAgentJobStatusUrl", inner, "apAgentJobStatusUrl");
             WriteMappedString(writer, "apAgentProgressUrl", inner, "apAgentProgressUrl");
+            WriteMappedString(writer, "pilotAccessToken", inner, "pilotAccessToken");
+            WriteMappedString(writer, "pilotUserId", inner, "pilotUserId");
+            WriteMappedString(writer, "pilotEmail", inner, "pilotEmail");
 
             writer.WriteEndObject();
             writer.WriteEndObject();

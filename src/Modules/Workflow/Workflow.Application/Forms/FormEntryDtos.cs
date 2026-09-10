@@ -61,7 +61,9 @@ public sealed record FormControlItem(
     string? ActivityBy,
     string? ActivityOn,
     int? ActivityId,
-    string? ValidationJson);
+    string? ValidationJson,
+    /// <summary>Exact dbo.ezfb_*_items physical column (e.g. Address, Address_2). Null on older rows.</summary>
+    string? ColumnName = null);
 
 public sealed record FormControlsResult(
     string FormId,

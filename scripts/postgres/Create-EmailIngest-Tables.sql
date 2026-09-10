@@ -15,7 +15,7 @@ CREATE TABLE IF NOT EXISTS dbo."EmailIngestMailbox" (
     "MasterSource" varchar(32) NOT NULL DEFAULT 'InternalForm',
     "MasterFormId" varchar(128) NULL,
     "MasterConnectorId" uuid NULL,
-    "AttachmentExtensions" varchar(256) NOT NULL DEFAULT '.pdf,.tif,.tiff',
+    "AttachmentExtensions" varchar(256) NOT NULL DEFAULT '.pdf,.tif,.tiff,.png,.jpg,.jpeg',
     "LastPolledAtUtc" timestamptz NULL,
     "LastError" varchar(2000) NULL,
     "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),

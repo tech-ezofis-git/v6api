@@ -93,6 +93,42 @@ public sealed class UserRepository : IUserRepository
         return users.Select(u => u.Email).ToList();
     }
 
+    public async Task<IReadOnlyList<(string Email, string Role)>> RemoveRoleNameFromUsersAsync(
+        string roleName,
+        CancellationToken cancellationToken = default)
+    {
+        var trimmed = roleName.Trim();
+        if (trimmed.Length == 0)
+            return [];
+
+        // Broad filter; exact token match is applied in memory for comma-separated Role values.
+        var candidates = await _context.Users
+            .Where(u => u.Role == trimmed || u.Role.Contains(trimmed))
+            .ToListAsync(cancellationToken);
+
+        var updated = new List<(string Email, string Role)>();
+        foreach (var user in candidates)
+        {
+            var remaining = user.Role
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Where(part => !string.Equals(part, trimmed, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var originalParts = user.Role
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .ToList();
+
+            if (remaining.Count == originalParts.Count)
+                continue;
+
+            var newRole = remaining.Count == 0 ? string.Empty : string.Join(",", remaining);
+            user.Update(role: newRole);
+            updated.Add((user.Email, newRole));
+        }
+
+        return updated;
+    }
+
     public void Update(User user)
     {
         _context.Users.Update(user);

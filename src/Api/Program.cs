@@ -5,6 +5,7 @@ using MediatR;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.Identity.Web;
 using SaaSApp.Api.Middleware;
+using SaaSApp.Api.Configuration;
 using SaaSApp.Api.Options;
 using SaaSApp.Api.Services;
 using SaaSApp.Api.Services.Jira;
@@ -25,6 +26,7 @@ using SaaSApp.Workflow.Infrastructure.Jobs;
 using SaaSApp.Dms.Infrastructure;
 using Serilog;
 using System.Reflection;
+using System.Text;
 using SaaSApp.BlobStorage;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Infrastructure;
@@ -36,7 +38,9 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration
     .AddJsonFile("appsettings.ActivityLog.json", optional: true, reloadOnChange: true)
-    .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true);
+    .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true)
+    // Loaded last so committed production secrets (EzofisAuth, TenantPilotUser) win over blank .env.azure overrides.
+    .AddJsonFile("appsettings.Production.json", optional: true, reloadOnChange: true);
 
 
 // Serilog + Application Insights (clear default providers to avoid duplicate log lines)
@@ -55,8 +59,18 @@ builder.Services.AddMultiTenancy();
 builder.Services.AddCatalog(builder.Configuration);
 builder.Services.AddScoped<IPlaygroundApiKeyService, PlaygroundApiKeyService>();
 builder.Services.AddScoped<ITenantSignupService, TenantSignupService>();
+builder.Services.Configure<BrandingOptions>(builder.Configuration.GetSection(BrandingOptions.SectionName));
+builder.Services.AddSingleton<IBrandingCryptoService, BrandingCryptoService>();
+builder.Services.AddScoped<IBrandingService, BrandingService>();
+builder.Services.AddScoped<IPortalJsonService, PortalJsonService>();
+builder.Services.AddScoped<IFolderCreationDraftService, FolderCreationDraftService>();
+builder.Services.AddScoped<IUserCreationDraftService, UserCreationDraftService>();
+builder.Services.AddScoped<IReportBuilderDraftService, ReportBuilderDraftService>();
+builder.Services.AddScoped<IDashboardSchemaService, DashboardSchemaService>();
 builder.Services.Configure<TenantPilotUserOptions>(
     builder.Configuration.GetSection(TenantPilotUserOptions.SectionName));
+builder.Services.AddScoped<ITenantPilotUserProvisioningService, TenantPilotUserProvisioningService>();
+builder.Services.AddScoped<SaaSApp.Workflow.Application.Contracts.IApAgentPilotAuthProvider, TenantPilotTokenService>();
 builder.Services.Configure<TenantDefaultCreditOptions>(
     builder.Configuration.GetSection(TenantDefaultCreditOptions.SectionName));
 builder.Services.Configure<JiraOptions>(
@@ -94,10 +108,20 @@ builder.Services.AddScoped<SaaSApp.Users.Application.Contracts.IUserTenantRoleSy
 // JWT Bearer: Microsoft Entra ID (Azure AD), Auth0, and Ezofis
 var azureAdClientId = builder.Configuration["AzureAd:ClientId"];
 var auth0Domain = builder.Configuration["Auth0:Domain"];
-var ezofisKey = builder.Configuration["EzofisAuth:SigningKey"];
+var ezofisKey = EzofisAuthConfiguration.ResolveSigningKey(builder.Configuration);
 var hasAzureAd = !string.IsNullOrWhiteSpace(azureAdClientId);
 var hasAuth0 = !string.IsNullOrEmpty(auth0Domain);
 var hasEzofis = !string.IsNullOrEmpty(ezofisKey);
+
+if (string.IsNullOrEmpty(ezofisKey))
+{
+    Log.Warning(
+        "EzofisAuth:SigningKey is not configured. Email/password login will fail when issuing JWT (pilot user, Ezofis login).");
+}
+else if (Encoding.UTF8.GetBytes(ezofisKey).Length < 32)
+{
+    Log.Warning("EzofisAuth:SigningKey is shorter than 32 bytes. Email/password login will fail when issuing JWT.");
+}
 
 var authenticationSchemes = new List<string>();
 string? defaultScheme = null;
@@ -155,9 +179,9 @@ if (hasEzofis)
         options.TokenValidationParameters = new Microsoft.IdentityModel.Tokens.TokenValidationParameters
         {
             ValidateIssuer = true,
-            ValidIssuer = builder.Configuration["EzofisAuth:Issuer"] ?? "Ezofis",
+            ValidIssuer = EzofisAuthConfiguration.ResolveIssuer(builder.Configuration),
             ValidateAudience = true,
-            ValidAudience = builder.Configuration["EzofisAuth:Audience"] ?? "Ezofis",
+            ValidAudience = EzofisAuthConfiguration.ResolveAudience(builder.Configuration),
             ValidateLifetime = true,
             IssuerSigningKey = new Microsoft.IdentityModel.Tokens.SymmetricSecurityKey(System.Text.Encoding.UTF8.GetBytes(ezofisKey!)),
             ValidateIssuerSigningKey = true,
@@ -293,9 +317,9 @@ if (!string.IsNullOrWhiteSpace(pathBase))
     app.UsePathBase(pathBase);
 }
 
-// HTTPS redirection (configurable; keep off when hosting IIS on HTTP-only localhost)
-var httpsRedirectionEnabled = builder.Configuration.GetValue<bool?>("HttpsRedirection:Enabled")
-    ?? !app.Environment.IsDevelopment();
+// HTTPS redirection (off by default: Azure/nginx terminate TLS and proxy HTTP :5000.
+// Enabling this without forwarded headers 307-loops /swagger and /hangfire.)
+var httpsRedirectionEnabled = builder.Configuration.GetValue<bool?>("HttpsRedirection:Enabled") ?? false;
 if (httpsRedirectionEnabled)
 {
     app.UseHttpsRedirection();
@@ -310,7 +334,7 @@ app.UseMiddleware<RequestPerformanceLoggingMiddleware>();
 
 app.UseCors();
 
-var swaggerEnabled = app.Environment.IsDevelopment() || (builder.Configuration.GetValue<bool?>("Swagger:Enabled") ?? false);
+var swaggerEnabled = app.Environment.IsDevelopment() || (builder.Configuration.GetValue<bool?>("Swagger:Enabled") ?? true);
 if (swaggerEnabled)
 {
     app.UseSwagger(options =>
@@ -365,8 +389,8 @@ if (hangfireEnabled)
     var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
     if (emailIngestHangfire)
     {
-        var cron = app.Configuration.GetValue("EmailIngest:HangfireCron", "*/5 * * * *")
-                   ?? "*/5 * * * *";
+        var cron = app.Configuration.GetValue("EmailIngest:HangfireCron", "*/30 * * * * *")
+                   ?? "*/30 * * * * *";
         RecurringJob.AddOrUpdate<RunEmailIngestPollJob>(
             "email-ingest-poll",
             job => job.Execute(null),

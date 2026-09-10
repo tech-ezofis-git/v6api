@@ -10,4 +10,4 @@ public sealed record MoveToNextStepApAgentPayload(
     Guid? RepositoryItemId,
     Guid? RepositoryId,
     string? FormId,
-    int? FormEntryId);
+    Guid? FormEntryId);

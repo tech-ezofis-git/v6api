@@ -5,6 +5,6 @@ public interface IWorkflowEzfbFormDataLoader
 {
     Task<string?> LoadFormDataJsonAsync(
         string formId,
-        int formEntryId,
+        Guid formEntryId,
         CancellationToken cancellationToken = default);
 }
