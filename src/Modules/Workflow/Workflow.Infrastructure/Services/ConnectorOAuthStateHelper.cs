@@ -24,9 +24,25 @@ internal static class ConnectorOAuthStateHelper
     public static string Create(ConnectorOAuthStatePayload payload, string signingKey)
     {
         var json = JsonSerializer.Serialize(payload, JsonOptions);
-        var body = Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
+        var body = ToBase64Url(Encoding.UTF8.GetBytes(json));
         var sig = Sign(body, signingKey);
         return $"{body}.{sig}";
+    }
+
+    public static bool TryParse(string? state, string signingKey, out ConnectorOAuthStatePayload? payload, out string? error)
+    {
+        payload = null;
+        error = null;
+        try
+        {
+            payload = Parse(state ?? string.Empty, signingKey);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+            return false;
+        }
     }
 
     public static ConnectorOAuthStatePayload Parse(string state, string signingKey)
@@ -34,17 +50,20 @@ internal static class ConnectorOAuthStateHelper
         if (string.IsNullOrWhiteSpace(state))
             throw new InvalidOperationException("OAuth state is missing.");
 
+        // Providers sometimes turn '+' into space when echoing state; normalize before verify.
+        state = state.Trim().Replace(' ', '+');
+
         var parts = state.Split('.', 2);
         if (parts.Length != 2)
             throw new InvalidOperationException("OAuth state is invalid.");
 
-        var expected = Sign(parts[0], signingKey);
-        if (!CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(expected),
-                Encoding.UTF8.GetBytes(parts[1])))
+        var body = parts[0];
+        var sig = parts[1];
+        var expected = Sign(body, signingKey);
+        if (!FixedEquals(expected, sig))
             throw new InvalidOperationException("OAuth state signature is invalid.");
 
-        var json = Encoding.UTF8.GetString(Convert.FromBase64String(parts[0]));
+        var json = Encoding.UTF8.GetString(FromBase64Url(body));
         var payload = JsonSerializer.Deserialize<ConnectorOAuthStatePayload>(json, JsonOptions)
             ?? throw new InvalidOperationException("OAuth state payload is invalid.");
 
@@ -61,6 +80,29 @@ internal static class ConnectorOAuthStateHelper
 
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(signingKey));
         var hash = hmac.ComputeHash(Encoding.UTF8.GetBytes(body));
-        return Convert.ToBase64String(hash);
+        return ToBase64Url(hash);
+    }
+
+    private static bool FixedEquals(string a, string b)
+    {
+        var ba = Encoding.UTF8.GetBytes(a);
+        var bb = Encoding.UTF8.GetBytes(b);
+        if (ba.Length != bb.Length)
+            return false;
+        return CryptographicOperations.FixedTimeEquals(ba, bb);
+    }
+
+    private static string ToBase64Url(byte[] bytes) =>
+        Convert.ToBase64String(bytes).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+
+    private static byte[] FromBase64Url(string value)
+    {
+        var s = value.Replace('-', '+').Replace('_', '/');
+        switch (s.Length % 4)
+        {
+            case 2: s += "=="; break;
+            case 3: s += "="; break;
+        }
+        return Convert.FromBase64String(s);
     }
 }

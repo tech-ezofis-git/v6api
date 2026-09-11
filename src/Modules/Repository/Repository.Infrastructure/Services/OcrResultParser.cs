@@ -132,8 +132,19 @@ internal static class OcrResultParser
         return list.Count > 0 ? list : null;
     }
 
-    private static string? GetString(JsonElement obj, string propertyName) =>
-        obj.TryGetProperty(propertyName, out var prop) && prop.ValueKind == JsonValueKind.String
-            ? prop.GetString()
-            : null;
+    private static string? GetString(JsonElement obj, string propertyName)
+    {
+        if (!obj.TryGetProperty(propertyName, out var prop))
+            return null;
+
+        return prop.ValueKind switch
+        {
+            JsonValueKind.String => prop.GetString(),
+            JsonValueKind.Number => prop.ToString(),
+            JsonValueKind.True => "true",
+            JsonValueKind.False => "false",
+            JsonValueKind.Null => null,
+            _ => null
+        };
+    }
 }

@@ -688,9 +688,18 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
                     if (root.TryGetProperty("ocrFieldList", out var listEl)
                         || root.TryGetProperty("OcrFieldList", out listEl))
                     {
-                        fieldList = JsonSerializer.Deserialize<List<UploadIndexFieldDto>>(
-                            listEl.GetRawText(), JsonOptions);
+                        fieldList = ParseFieldsList(listEl.GetRawText());
                         fieldValues = ParseFieldsToDictionary(fieldList);
+                    }
+                    else
+                    {
+                        // Full OCR payload pasted as metadata: { "ocrResult":[...], "ocr_text":"..." }
+                        var fromOcr = OcrResultParser.TryParseFieldList(trimmed);
+                        if (fromOcr is { Count: > 0 })
+                        {
+                            fieldList = fromOcr.ToList();
+                            fieldValues = ParseFieldsToDictionary(fieldList);
+                        }
                     }
 
                     if (TryReadJsonPropertyAsString(root, "ocrJson", out var embeddedOcrJson)
@@ -712,7 +721,10 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
                         if (prop.NameEquals("ocrJson") || prop.NameEquals("OcrJson")
                             || prop.NameEquals("ocrText") || prop.NameEquals("OcrText")
                             || prop.NameEquals("ocr_text")
-                            || prop.NameEquals("ocrFieldList") || prop.NameEquals("OcrFieldList"))
+                            || prop.NameEquals("ocrFieldList") || prop.NameEquals("OcrFieldList")
+                            || prop.NameEquals("ocrResult") || prop.NameEquals("OcrResult")
+                            || prop.NameEquals("tableResult") || prop.NameEquals("TableResult")
+                            || prop.NameEquals("source_reference") || prop.NameEquals("ocr_status"))
                             continue;
 
                         if (prop.Value.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
@@ -738,6 +750,22 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             {
                 fieldValues = ParseFieldsToDictionary(trimmed);
                 fieldList = fieldValues.Select(kv => new UploadIndexFieldDto(kv.Key, kv.Value)).ToList();
+            }
+        }
+
+        // Enrich from separate ocrJson form field (uploadForOcr response body).
+        if (!string.IsNullOrWhiteSpace(ocrJson))
+        {
+            var fromOcrJson = OcrResultParser.TryParseFieldList(ocrJson);
+            if (fromOcrJson is { Count: > 0 })
+            {
+                fieldList ??= fromOcrJson.ToList();
+                foreach (var field in fromOcrJson)
+                {
+                    if (string.IsNullOrWhiteSpace(field.Name))
+                        continue;
+                    fieldValues.TryAdd(field.Name, field.Value ?? string.Empty);
+                }
             }
         }
 
@@ -779,10 +807,19 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             return null;
 
         var trimmed = fieldsJson.Trim();
+
+        // Prefer OCR-aware manual parse — STJ record deserialization often fails on
+        // [{ "name", "value", "type" }] payloads from Swagger / uploadForOcr.
+        var fromOcr = OcrResultParser.TryParseFieldList(trimmed);
+        if (fromOcr is { Count: > 0 })
+            return fromOcr.ToList();
+
         if (trimmed.StartsWith('{'))
         {
             var dict = RepositoryMetadataParser.Parse(trimmed);
-            return dict.Select(kv => new UploadIndexFieldDto(kv.Key, kv.Value)).ToList();
+            return dict.Count == 0
+                ? null
+                : dict.Select(kv => new UploadIndexFieldDto(kv.Key, kv.Value)).ToList();
         }
 
         if (!trimmed.StartsWith('['))

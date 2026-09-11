@@ -28,6 +28,9 @@ public interface IConnectorProviderAdapter
 
     bool SupportsQuickBooks { get; }
 
+    /// <summary>SAP S/4 purchase-order OData lookup using XSUAA access token.</summary>
+    bool SupportsSap { get; }
+
     string BuildAuthorizeUrl(ConnectorProviderConfig config, string state);
 
     Task<ConnectorOAuthTokenResult> ExchangeCodeAsync(
@@ -117,6 +120,20 @@ public interface IConnectorProviderAdapter
         string accessToken,
         string realmId,
         string poNumber,
+        string? extraConfigJson,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Return raw SAP OData Purchase Order JSON for PO number, or null if not found.</summary>
+    Task<string?> GetSapPurchaseOrderRawByNumberAsync(
+        string accessToken,
+        string poNumber,
+        string? extraConfigJson,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Return raw SAP OData list JSON for a small sample of purchase orders ($top).</summary>
+    Task<string> ListSapPurchaseOrdersRawAsync(
+        string accessToken,
+        int top,
         string? extraConfigJson,
         CancellationToken cancellationToken = default);
 }
