@@ -10,13 +10,13 @@ public sealed class SapGapClosureTests
           "provider": "SAP",
           "mode": "sample",
           "sampleVendors": [
-            { "id": "V-ACME", "displayName": "ACME Supplies", "email": "ap@acme.example" }
+            { "id": "V-APEX", "displayName": "APEX INDUSTRIAL COMPONENTS LTD", "email": "ap@apex-industrial.example" }
           ],
           "samplePurchaseOrders": [
             {
               "po_number": "PO-60001",
-              "vendor": "ACME Supplies",
-              "total": 1500.00,
+              "vendor": "APEX INDUSTRIAL COMPONENTS LTD",
+              "total": 5203.65,
               "currency": "USD",
               "lines": []
             },
@@ -35,7 +35,7 @@ public sealed class SapGapClosureTests
     public void VendorResolver_ReturnsSampleVendorsAndDerivedPoVendors()
     {
         var items = SapSampleVendorResolver.Resolve(SampleConfig, "Vendor", null, 50);
-        Assert.Contains(items, i => i.DisplayName == "ACME Supplies");
+        Assert.Contains(items, i => i.DisplayName == "APEX INDUSTRIAL COMPONENTS LTD");
         Assert.Contains(items, i => i.DisplayName == "Contoso Trading");
         Assert.All(items, i => Assert.Equal(SapSampleVendorResolver.SampleSource, i.Source));
     }

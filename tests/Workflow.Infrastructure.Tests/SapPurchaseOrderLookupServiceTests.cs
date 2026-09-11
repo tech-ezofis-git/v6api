@@ -13,12 +13,13 @@ public sealed class SapPurchaseOrderLookupServiceTests
           "samplePurchaseOrders": [
             {
               "po_number": "PO-60001",
-              "vendor": "ACME Supplies",
-              "total": 1500.00,
-              "currency": "USD",
+              "vendor": "APEX INDUSTRIAL COMPONENTS LTD",
+              "total": 5203.65,
+              "currency": "CAD",
               "lines": [
-                { "description": "Widget A", "qty": 10, "unit_price": 100, "amount": 1000 },
-                { "description": "Widget B", "qty": 5, "unit_price": 100, "amount": 500 }
+                { "description": "Bearing assembly kit", "qty": 5, "unit_price": 650.00, "amount": 3250.00 },
+                { "description": "Seal pack", "qty": 10, "unit_price": 125.00, "amount": 1250.00 },
+                { "description": "Freight", "qty": 1, "unit_price": 703.65, "amount": 703.65 }
               ]
             },
             {
@@ -49,11 +50,11 @@ public sealed class SapPurchaseOrderLookupServiceTests
         Assert.Equal(SapSamplePurchaseOrderResolver.SampleSource, result.Source);
         Assert.NotNull(result.PurchaseOrder);
         Assert.Equal("PO-60001", result.PurchaseOrder!.PoNumber);
-        Assert.Equal("ACME Supplies", result.PurchaseOrder.Vendor);
-        Assert.Equal(1500.00m, result.PurchaseOrder.Total);
-        Assert.Equal("USD", result.PurchaseOrder.Currency);
-        Assert.Equal(2, result.PurchaseOrder.Lines.Count);
-        Assert.Equal("Widget A", result.PurchaseOrder.Lines[0].Description);
+        Assert.Equal("APEX INDUSTRIAL COMPONENTS LTD", result.PurchaseOrder.Vendor);
+        Assert.Equal(5203.65m, result.PurchaseOrder.Total);
+        Assert.Equal("CAD", result.PurchaseOrder.Currency);
+        Assert.Equal(3, result.PurchaseOrder.Lines.Count);
+        Assert.Equal("Bearing assembly kit", result.PurchaseOrder.Lines[0].Description);
     }
 
     [Fact]

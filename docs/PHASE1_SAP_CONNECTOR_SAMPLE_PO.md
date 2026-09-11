@@ -46,7 +46,7 @@ SAP catalog row uses empty Auth/Token/Scopes for now (`ConfigJson.mode=sample` d
 
 | po_number | vendor | total |
 |-----------|--------|------:|
-| `PO-60001` | ACME Supplies | 1500.00 |
+| `PO-60001` | APEX INDUSTRIAL COMPONENTS LTD | 5203.65 CAD |
 | `PO-SAP-1001` | Contoso Trading | 2500.00 |
 | `PO-SAP-1002` | Fabrikam Ltd | 875.50 |
 
