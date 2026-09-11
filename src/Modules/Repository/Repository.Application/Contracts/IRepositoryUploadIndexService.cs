@@ -43,6 +43,14 @@ public interface IRepositoryUploadIndexService
         Guid? userId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Promote a staged monitor file into repository archive (items table + blob).</summary>
+    Task<UploadIndexPromoteResult?> PromoteStageAsync(
+        Guid stageId,
+        Guid repositoryId,
+        Guid tenantId,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
     Task<UploadIndexLoadResult?> LoadAsync(
         Guid stageId,
         Guid tenantId,
