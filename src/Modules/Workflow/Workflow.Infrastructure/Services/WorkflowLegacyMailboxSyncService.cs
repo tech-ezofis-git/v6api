@@ -79,10 +79,7 @@ public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyn
         CancellationToken cancellationToken = default,
         int? inboxAction = null)
     {
-        var connectionString = _tenantContext.ConnectionString;
-        if (!string.IsNullOrWhiteSpace(connectionString))
-            await _tableCreator.EnsureLegacyMailboxTablesAsync(workflowId, connectionString, cancellationToken);
-
+        await EnsureMailboxTablesOnOpenConnectionAsync(workflowId, connection, cancellationToken);
         await SyncTransactionRowCoreAsync(workflowId, transactionRowId, connection, formOverride, cancellationToken, inboxAction);
     }
 
@@ -93,9 +90,7 @@ public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyn
         MailboxFormSnapshot? formOverride = null,
         CancellationToken cancellationToken = default)
     {
-        var connectionString = _tenantContext.ConnectionString;
-        if (!string.IsNullOrWhiteSpace(connectionString))
-            await _tableCreator.EnsureLegacyMailboxTablesAsync(workflowId, connectionString, cancellationToken);
+        await EnsureMailboxTablesOnOpenConnectionAsync(workflowId, connection, cancellationToken);
 
         var suffix = workflowId.ToString("N")[..8];
         var transactionTable = $"workflow.transaction_{suffix}";
@@ -152,7 +147,8 @@ SELECT
     t.action_status,
     t.is_deleted,
     t.activity_user_id,
-    t.modified_by
+    t.modified_by,
+    t.created_by
 FROM {transactionTable} t
 WHERE t.id = @TransactionRowId;";
 
@@ -164,6 +160,7 @@ WHERE t.id = @TransactionRowId;";
         bool isDeleted;
         Guid? activityUserId;
         Guid? modifiedByUserId;
+        Guid? createdByUserId;
 
         await using (var stateCmd = new NpgsqlCommand(stateSql, connection))
         {
@@ -180,6 +177,7 @@ WHERE t.id = @TransactionRowId;";
             isDeleted = reader.GetBoolean(5);
             activityUserId = reader.IsDBNull(6) ? null : reader.GetGuid(6);
             modifiedByUserId = reader.IsDBNull(7) ? null : reader.GetGuid(7);
+            createdByUserId = reader.IsDBNull(8) ? null : reader.GetGuid(8);
         }
 
         var workflowInstanceIdStr = workflowInstanceId.ToString("D");
@@ -315,6 +313,25 @@ INSERT INTO {targetTable}
             ccCmd.Parameters.AddWithValue("@FormData", (object?)extras.FormData ?? DBNull.Value);
             await ccCmd.ExecuteNonQueryAsync(cancellationToken);
         }
+
+        // Submitter/initiator is not the next assignee: they stay in sent, not inbox.
+        if (targetTable == inboxTable
+            && createdByUserId is Guid submitterId
+            && submitterId != Guid.Empty
+            && activityUserId is Guid openUserId
+            && openUserId != Guid.Empty
+            && submitterId != openUserId)
+        {
+            await DeleteMailboxRowsForInstanceAndUserAsync(
+                connection,
+                workflowIdValue,
+                workflowIdCompact,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                inboxTable,
+                submitterId,
+                cancellationToken);
+        }
     }
 
     private static string BuildMailboxSourceSelect(string transactionTable, string instancesTable)
@@ -444,6 +461,27 @@ DELETE FROM {completedTable} WHERE {keyPredicate};";
         Guid assigneeUserId,
         CancellationToken cancellationToken)
     {
+        await DeleteMailboxRowsForInstanceAndUserAsync(
+            connection,
+            workflowIdValue,
+            workflowTableKey,
+            workflowInstanceId,
+            workflowInstanceIdStr,
+            sentTable,
+            assigneeUserId,
+            cancellationToken);
+    }
+
+    private static async Task DeleteMailboxRowsForInstanceAndUserAsync(
+        NpgsqlConnection connection,
+        string workflowIdValue,
+        string workflowTableKey,
+        Guid workflowInstanceId,
+        string workflowInstanceIdStr,
+        string tableFull,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
         var predicate = $"""
             (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
             AND (
@@ -456,14 +494,14 @@ DELETE FROM {completedTable} WHERE {keyPredicate};";
             )
             """;
 
-        var sql = $"DELETE FROM {sentTable} WHERE {predicate};";
+        var sql = $"DELETE FROM {tableFull} WHERE {predicate};";
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
         cmd.Parameters.AddWithValue("@WorkflowTableKey", workflowTableKey);
         cmd.Parameters.AddWithValue("@WorkflowInstanceIdStr", workflowInstanceIdStr);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
-        cmd.Parameters.AddWithValue("@AssigneeUserId", assigneeUserId.ToString("D"));
-        cmd.Parameters.AddWithValue("@AssigneeUserGuid", assigneeUserId);
+        cmd.Parameters.AddWithValue("@AssigneeUserId", userId.ToString("D"));
+        cmd.Parameters.AddWithValue("@AssigneeUserGuid", userId);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
@@ -588,6 +626,22 @@ WHERE "Id" = @WorkflowId AND "IsDeleted" = false;
         cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
         var value = await cmd.ExecuteScalarAsync(cancellationToken);
         return value == null || value == DBNull.Value ? null : Convert.ToString(value)?.Trim();
+    }
+
+    private async Task EnsureMailboxTablesOnOpenConnectionAsync(
+        Guid workflowId,
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        if (_tableCreator is WorkflowTableCreator creator)
+        {
+            await creator.EnsureLegacyMailboxTablesAsync(workflowId, connection, cancellationToken);
+            return;
+        }
+
+        var connectionString = _tenantContext.ConnectionString;
+        if (!string.IsNullOrWhiteSpace(connectionString))
+            await _tableCreator.EnsureLegacyMailboxTablesAsync(workflowId, connectionString, cancellationToken);
     }
 
     public async Task PropagateInstanceFormDataAsync(

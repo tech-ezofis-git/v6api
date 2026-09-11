@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Http;
+using SaaSApp.Catalog;
 using SaaSApp.MultiTenancy;
 
 namespace SaaSApp.Api.Middleware;
@@ -56,7 +57,7 @@ public sealed class TenantConnectionMiddleware
             return;
         }
 
-        connectionProvider.SetConnectionString(connectionString);
+        connectionProvider.SetConnectionString(TenantConnectionPool.Apply(connectionString));
         await _next(context);
     }
 }

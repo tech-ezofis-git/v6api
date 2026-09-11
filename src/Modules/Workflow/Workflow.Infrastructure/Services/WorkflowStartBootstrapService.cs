@@ -190,15 +190,19 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             userId,
             cancellationToken);
 
-        if (request.FormDataFields is { Count: > 0 } || !string.IsNullOrWhiteSpace(request.FormLineItemsJson))
-        {
-            await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
-                workflow.FormId!,
-                formEntryItemId,
-                request.FormDataFields ?? new Dictionary<string, string>(),
-                request.FormLineItemsJson,
-                cancellationToken);
-        }
+        await ApplyStartFormDataAsync(workflow.FormId, formEntryItemId, request, cancellationToken);
+
+        var (stagedItemId, stagedBlobPath) = await ArchiveStagedFilesAsync(
+            request,
+            workflow,
+            instance,
+            userId,
+            currentTransactionId,
+            connectionString,
+            formEntryItemId,
+            cancellationToken);
+        repositoryItemId ??= stagedItemId;
+        blobPath ??= stagedBlobPath;
 
         var transactionGuid = reviewSync.NextTransactionGuid
             ?? await ResolveTransactionGuidAsync(
@@ -254,15 +258,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
 
         var payloadDict = payload.ToDictionary(kv => kv.Key, kv => (object?)kv.Value);
 
-        // Start flow inserts repository/form linkage after the first transaction sync.
-        // Re-sync current transaction so Inbox/Sent receives repositoryId/itemId/formId/formEntryId/formData.
-        if (currentTransactionId is > 0)
-        {
-            await _legacyMailboxSync.SyncTransactionRowAsync(
-                workflow.Id,
-                currentTransactionId.Value,
-                cancellationToken);
-        }
+        // After initiate + move-next: initiator/submitter is sent, next user is inbox.
+        await SyncAdvanceMailboxAsync(workflow.Id, reviewSync, cancellationToken);
 
         _logger.LogInformation(
             "Start bootstrap completed for instance {InstanceId}: transaction {TransactionId}, form entry {FormEntryId}",
@@ -306,15 +303,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             userId,
             cancellationToken);
 
-        if (request.FormDataFields is { Count: > 0 } || !string.IsNullOrWhiteSpace(request.FormLineItemsJson))
-        {
-            await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
-                workflow.FormId!,
-                formEntryItemId,
-                request.FormDataFields ?? new Dictionary<string, string>(),
-                request.FormLineItemsJson,
-                cancellationToken);
-        }
+        await ApplyStartFormDataAsync(workflow.FormId, formEntryItemId, request, cancellationToken);
 
         var mailboxForm = await BuildMailboxFormSnapshotAsync(workflow.FormId, formEntryItemId, cancellationToken);
 
@@ -363,55 +352,15 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             ?? reviewSync.CurrentTransactionId
             ?? request.StartTransactionId;
 
-        Guid? repositoryItemId = null;
-        string? blobPath = null;
-        var archivedStagedFiles = new List<(StartWorkflowStagedFileRef Staged, Guid ItemId)>();
-
-        if (_attachmentArchive != null && request.StagedFiles is { Count: > 0 })
-        {
-            foreach (var staged in request.StagedFiles.Where(s => s.RepositoryId != Guid.Empty && s.FileId != Guid.Empty))
-            {
-                var archived = await _attachmentArchive.PromoteFromStageAsync(
-                    instance.TenantId,
-                    workflow.Id,
-                    instance.Id,
-                    staged.RepositoryId,
-                    staged.FileId,
-                    currentTransactionId,
-                    userId,
-                    cancellationToken,
-                    allowIncompleteFolderMetadata: true);
-                if (archived != null)
-                {
-                    archivedStagedFiles.Add((staged, archived.ItemId));
-                    repositoryItemId ??= archived.ItemId;
-                    blobPath ??= archived.FilePath;
-                }
-            }
-        }
-
-        if (archivedStagedFiles.Count > 0)
-        {
-            await _stagedFileEzfbBinder.BindAsync(
-                connectionString,
-                workflow.FormId,
-                formEntryItemId,
-                archivedStagedFiles,
-                cancellationToken);
-
-            var refreshedMailboxForm = await BuildMailboxFormSnapshotAsync(
-                workflow.FormId,
-                formEntryItemId,
-                cancellationToken);
-            if (refreshedMailboxForm != null)
-            {
-                await _legacyMailboxSync.PropagateInstanceFormDataAsync(
-                    workflow.Id,
-                    instance.Id,
-                    refreshedMailboxForm,
-                    cancellationToken);
-            }
-        }
+        var (repositoryItemId, blobPath) = await ArchiveStagedFilesAsync(
+            request,
+            workflow,
+            instance,
+            userId,
+            currentTransactionId,
+            connectionString,
+            formEntryItemId,
+            cancellationToken);
 
         if (request.AttachmentStream != null
             && !string.IsNullOrWhiteSpace(request.AttachmentFileName)
@@ -490,21 +439,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             formDataJson,
             cancellationToken);
 
-        if (reviewSync.CurrentTransactionId is > 0)
-        {
-            await _legacyMailboxSync.SyncTransactionRowAsync(
-                workflow.Id,
-                reviewSync.CurrentTransactionId.Value,
-                cancellationToken);
-        }
-
-        if (reviewSync.NextTransactionId is > 0)
-        {
-            await _legacyMailboxSync.SyncTransactionRowAsync(
-                workflow.Id,
-                reviewSync.NextTransactionId.Value,
-                cancellationToken);
-        }
+        // After initiate + move-next: initiator/submitter is sent, next user is inbox.
+        await SyncAdvanceMailboxAsync(workflow.Id, reviewSync, cancellationToken);
 
         _logger.LogInformation(
             "Normal start bootstrap completed for instance {InstanceId}: transaction {TransactionId}, form entry {FormEntryId}, next step {NextStep}",
@@ -523,6 +459,33 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             payload.ToDictionary(kv => kv.Key, kv => (object?)kv.Value));
     }
 
+    /// <summary>
+    /// Start/submit already called move-next. Sync the completed row to sent first, then the open
+    /// next row to inbox so the initiator is not left in inbox when the next user is someone else.
+    /// </summary>
+    private async Task SyncAdvanceMailboxAsync(
+        Guid workflowId,
+        WorkflowLegacyTransactionSyncResult reviewSync,
+        CancellationToken cancellationToken)
+    {
+        if (reviewSync.CurrentTransactionId is > 0)
+        {
+            await _legacyMailboxSync.SyncTransactionRowAsync(
+                workflowId,
+                reviewSync.CurrentTransactionId.Value,
+                cancellationToken);
+        }
+
+        if (reviewSync.NextTransactionId is > 0
+            && reviewSync.NextTransactionId != reviewSync.CurrentTransactionId)
+        {
+            await _legacyMailboxSync.SyncTransactionRowAsync(
+                workflowId,
+                reviewSync.NextTransactionId.Value,
+                cancellationToken);
+        }
+    }
+
     private async Task<MailboxFormSnapshot?> BuildMailboxFormSnapshotAsync(
         string? formId,
         Guid formEntryItemId,
@@ -539,6 +502,135 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         return string.IsNullOrWhiteSpace(formDataJson)
             ? null
             : new MailboxFormSnapshot(formId, formEntryItemId, formDataJson);
+    }
+
+    private async Task ApplyStartFormDataAsync(
+        string? formId,
+        Guid formEntryItemId,
+        WorkflowStartBootstrapRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(formId))
+            return;
+        if (request.FormDataFields is not { Count: > 0 } && string.IsNullOrWhiteSpace(request.FormLineItemsJson))
+            return;
+
+        try
+        {
+            await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
+                formId,
+                formEntryItemId,
+                request.FormDataFields ?? new Dictionary<string, string>(),
+                request.FormLineItemsJson,
+                cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Form-data update is the only start difference from the SQL API. A field write must not
+            // abort ticket create, attachment link, or processAddon.
+            _logger.LogWarning(
+                ex,
+                "Start formData update failed for form {FormId}, entry {FormEntryId}; continuing start.",
+                formId,
+                formEntryItemId);
+        }
+    }
+
+    /// <summary>
+    /// Promote staged fileIds, or link an already-archived itemId, then write WorkflowAttachments + processAddon.
+    /// A missing stage row must not fail ticket create.
+    /// </summary>
+    private async Task<(Guid? RepositoryItemId, string? BlobPath)> ArchiveStagedFilesAsync(
+        WorkflowStartBootstrapRequest request,
+        Domain.Entities.Workflow workflow,
+        WorkflowInstance instance,
+        Guid userId,
+        int? currentTransactionId,
+        string connectionString,
+        Guid formEntryItemId,
+        CancellationToken cancellationToken)
+    {
+        Guid? repositoryItemId = null;
+        string? blobPath = null;
+        if (_attachmentArchive == null || request.StagedFiles is not { Count: > 0 })
+            return (repositoryItemId, blobPath);
+
+        var archivedStagedFiles = new List<(StartWorkflowStagedFileRef Staged, Guid ItemId)>();
+        foreach (var staged in request.StagedFiles)
+        {
+            if (staged.RepositoryId == Guid.Empty || staged.FileId == Guid.Empty)
+                continue;
+
+            // fileId is the stage row. Archive it from stage data, then link the new itemId.
+            var archived = await _attachmentArchive.PromoteFromStageAsync(
+                instance.TenantId,
+                workflow.Id,
+                instance.Id,
+                staged.RepositoryId,
+                staged.FileId,
+                currentTransactionId,
+                userId,
+                cancellationToken,
+                allowIncompleteFolderMetadata: true,
+                formJsonId: staged.ResolveFormJsonId());
+
+            if (archived == null)
+            {
+                _logger.LogWarning(
+                    "Stage file {FileId} was not archived on workflow {WorkflowId}: stage row not found.",
+                    staged.FileId,
+                    workflow.Id);
+                continue;
+            }
+
+            _logger.LogInformation(
+                "Archived stage file {FileId} to item {ItemId} for workflow {WorkflowId}. Attachment {AttachmentId}, processAddon {ProcessAddonId}, form field {FieldId}.",
+                staged.FileId,
+                archived.ItemId,
+                workflow.Id,
+                archived.AttachmentId,
+                archived.ProcessAddonId,
+                staged.ResolveFormJsonId());
+
+            archivedStagedFiles.Add((staged, archived.ItemId));
+            repositoryItemId ??= archived.ItemId;
+            blobPath ??= archived.FilePath;
+        }
+
+        if (archivedStagedFiles.Count == 0)
+            return (repositoryItemId, blobPath);
+
+        try
+        {
+            await _stagedFileEzfbBinder.BindAsync(
+                connectionString,
+                workflow.FormId,
+                formEntryItemId,
+                archivedStagedFiles,
+                cancellationToken);
+
+            var refreshedMailboxForm = await BuildMailboxFormSnapshotAsync(
+                workflow.FormId,
+                formEntryItemId,
+                cancellationToken);
+            if (refreshedMailboxForm != null)
+            {
+                await _legacyMailboxSync.PropagateInstanceFormDataAsync(
+                    workflow.Id,
+                    instance.Id,
+                    refreshedMailboxForm,
+                    cancellationToken);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Staged file form bind failed for instance {InstanceId}; attachment and processAddon were still written.",
+                instance.Id);
+        }
+
+        return (repositoryItemId, blobPath);
     }
 
     /// <summary>Blob / WorkflowForms FormData JSON (GUID strings for ids).</summary>

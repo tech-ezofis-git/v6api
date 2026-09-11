@@ -42,10 +42,14 @@ internal static class RepositoryItemInsertHelper
             if (!RepositoryItemTableColumns.Has(tableColumns, column))
                 return;
 
+            // Track the physical name (file_name), not the logical name (FileName). Stage
+            // metadata often repeats reserved columns under either spelling.
+            if (!usedColumns.Add(RepositorySqlHelper.ToPhysicalName(column)))
+                return;
+
             columns.Add(RepositorySqlHelper.ColumnRef(column));
             values.Add(param);
             parameters.Add(new NpgsqlParameter(param, value ?? DBNull.Value));
-            usedColumns.Add(column);
         }
 
         AddIfExists("Id", "@Id", itemId);
@@ -72,7 +76,8 @@ internal static class RepositoryItemInsertHelper
                 ? canonicalCol
                 : col;
 
-            if (!RepositoryItemTableColumns.Has(tableColumns, column) || !usedColumns.Add(column))
+            if (!RepositoryItemTableColumns.Has(tableColumns, column)
+                || !usedColumns.Add(RepositorySqlHelper.ToPhysicalName(column)))
                 continue;
 
             var param = $"@F{extraIndex++}";

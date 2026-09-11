@@ -21,7 +21,7 @@ public sealed class TenantConnectionStringResolver : ITenantConnectionStringReso
     public async Task<string?> GetConnectionStringAsync(Guid tenantId, CancellationToken cancellationToken = default)
     {
         if (TenantConnectionStringCache.TryGet(_cache, tenantId, out var cached))
-            return cached;
+            return string.IsNullOrWhiteSpace(cached) ? cached : TenantConnectionPool.Apply(cached);
 
         await using var context = await _catalogFactory.CreateDbContextAsync(cancellationToken);
         var tenant = await context.Tenants
@@ -31,7 +31,10 @@ public sealed class TenantConnectionStringResolver : ITenantConnectionStringReso
             .FirstOrDefaultAsync(cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(tenant))
+        {
+            tenant = TenantConnectionPool.Apply(tenant);
             TenantConnectionStringCache.Set(_cache, tenantId, tenant);
+        }
 
         return tenant;
     }

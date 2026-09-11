@@ -33,13 +33,6 @@ public sealed class StagedFileEzfbBinder
         await connection.OpenAsync(cancellationToken);
 
         var fileControlJsonIds = await LoadFileControlJsonIdsAsync(connection, normalizedFormId, cancellationToken);
-        if (fileControlJsonIds.Count == 0)
-        {
-            _logger.LogWarning(
-                "StagedFileEzfbBinder: no FILE controls on form {FormId}; archived itemIds not written to ezfb.",
-                normalizedFormId);
-            return 0;
-        }
 
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var explicitIndex = 0;

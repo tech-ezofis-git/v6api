@@ -23,7 +23,9 @@ internal static class RepositoryNamingFieldMetadataInjector
         if (string.IsNullOrWhiteSpace(archiveFileName))
             return;
 
-        if (HasNamingValue(metadata, namingField))
+        // Filename column must keep the uploaded file name, not a placeholder such as "string".
+        if (HasNamingValue(metadata, namingField)
+            && !RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
             return;
 
         // Prefer a single key so stage UPDATE SET does not list the same column twice

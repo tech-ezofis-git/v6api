@@ -13,16 +13,31 @@ public interface IWorkflowStartBootstrapService
         CancellationToken cancellationToken = default);
 }
 
-/// <summary>Stage row to promote on workflow start. Optional <see cref="FormJsonId"/> / <see cref="JsonId"/> targets the FILE control column after archive.</summary>
-public sealed record StartWorkflowStagedFileRef(Guid RepositoryId, Guid FileId, string? FormJsonId = null)
+/// <summary>Stage row to archive on workflow start. <see cref="FileId"/> is the stage id. <see cref="FieldId"/> is the form column that receives the archived itemId.</summary>
+public sealed record StartWorkflowStagedFileRef(
+    Guid RepositoryId,
+    Guid FileId,
+    string? FormJsonId = null,
+    Guid? ItemId = null,
+    string? FileName = null,
+    string? FieldId = null)
 {
     [System.Text.Json.Serialization.JsonPropertyName("jsonId")]
     public string? JsonId { get; init; }
 
     public string? ResolveFormJsonId() =>
-        !string.IsNullOrWhiteSpace(FormJsonId) ? FormJsonId.Trim()
-        : !string.IsNullOrWhiteSpace(JsonId) ? JsonId.Trim()
-        : null;
+        FirstNonEmpty(FieldId, FormJsonId, JsonId);
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return null;
+    }
 }
 
 public sealed record WorkflowStartBootstrapRequest(
