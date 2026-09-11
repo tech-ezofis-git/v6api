@@ -133,12 +133,20 @@ public sealed class ConnectorController : ControllerBase
         [FromQuery] string? code,
         [FromQuery] string? state,
         [FromQuery] string? error,
+        [FromQuery] string? error_description,
         [FromQuery] string? realmId,
         CancellationToken cancellationToken)
     {
         try
         {
-            var redirectUrl = await _oauthService.CompleteCallbackAsync(code, state, error, realmId, cancellationToken);
+            // Prefer provider error detail when present (e.g. invalid_scope from XSUAA).
+            var effectiveError = string.IsNullOrWhiteSpace(error)
+                ? null
+                : string.IsNullOrWhiteSpace(error_description)
+                    ? error
+                    : $"{error}: {error_description}";
+
+            var redirectUrl = await _oauthService.CompleteCallbackAsync(code, state, effectiveError, realmId, cancellationToken);
             return Redirect(redirectUrl);
         }
         catch (InvalidOperationException ex)
@@ -505,6 +513,72 @@ public sealed class ConnectorController : ControllerBase
                 return BadRequest(new { error = "poNumber is required." });
 
             var result = await _oauthService.LookupQuickBooksPurchaseOrderAsync(id, request.PoNumber, cancellationToken);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (NotSupportedException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Look up an SAP S/4 Purchase Order by PO number using the connected XSUAA connector token.
+    /// Requires connector ConfigJson.apiBaseUrl (or pass apiBaseUrl in body once to save it).
+    /// Distinct from sample/AP lookup on <c>sap/purchase-orders/lookup</c>.
+    /// </summary>
+    [HttpPost("{id:guid}/sap/purchase-orders/live-lookup")]
+    [ProducesResponseType(typeof(ConnectorSapXsuaaPoLookupResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> LookupSapPurchaseOrderLive(
+        Guid id,
+        [FromBody] ConnectorSapXsuaaPoLookupRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (request is null || string.IsNullOrWhiteSpace(request.PoNumber))
+                return BadRequest(new { error = "poNumber is required." });
+
+            var result = await _oauthService.LookupSapPurchaseOrderAsync(id, request, cancellationToken);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (NotSupportedException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Fetch only 1–2 (max 10) SAP purchase orders for connectivity testing — uses OData $top, not full 69k dump.
+    /// </summary>
+    [HttpPost("{id:guid}/sap/purchase-orders/sample")]
+    [ProducesResponseType(typeof(ConnectorSapPoSampleResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> SampleSapPurchaseOrders(
+        Guid id,
+        [FromBody] ConnectorSapPoSampleRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            var result = await _oauthService.SampleSapPurchaseOrdersAsync(
+                id,
+                request ?? new ConnectorSapPoSampleRequest(Top: 2),
+                cancellationToken);
             return Ok(result);
         }
         catch (ArgumentException ex)

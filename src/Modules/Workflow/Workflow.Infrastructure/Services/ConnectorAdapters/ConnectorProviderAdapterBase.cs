@@ -22,6 +22,7 @@ internal abstract class ConnectorProviderAdapterBase : IConnectorProviderAdapter
     public abstract bool SupportsFiles { get; }
     public abstract bool SupportsGmail { get; }
     public virtual bool SupportsQuickBooks => false;
+    public virtual bool SupportsSap => false;
 
     public virtual string BuildAuthorizeUrl(ConnectorProviderConfig config, string state)
     {
@@ -119,6 +120,14 @@ internal abstract class ConnectorProviderAdapterBase : IConnectorProviderAdapter
     public virtual Task<string?> GetQuickBooksPurchaseOrderRawByDocNumberAsync(
         string accessToken, string realmId, string poNumber, string? extraConfigJson, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException($"{ProviderCode} does not support QuickBooks purchase order lookup.");
+
+    public virtual Task<string?> GetSapPurchaseOrderRawByNumberAsync(
+        string accessToken, string poNumber, string? extraConfigJson, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException($"{ProviderCode} does not support SAP purchase order lookup.");
+
+    public virtual Task<string> ListSapPurchaseOrdersRawAsync(
+        string accessToken, int top, string? extraConfigJson, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException($"{ProviderCode} does not support SAP purchase order list.");
 
     protected HttpClient CreateClient() => _httpClientFactory.CreateClient(nameof(IConnectorProviderAdapter));
 

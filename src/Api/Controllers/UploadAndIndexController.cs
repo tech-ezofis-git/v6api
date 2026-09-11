@@ -149,9 +149,11 @@ public sealed class UploadAndIndexController : ControllerBase
 
         var tenantId = RequireTenantId();
         var uploadName = string.IsNullOrWhiteSpace(filename) ? file.FileName : filename;
+        // Prefer flat metadata object; otherwise merge Swagger/FE "fields" array JSON.
         var metadataJson = !string.IsNullOrWhiteSpace(metadata)
             ? metadata
             : ResolveFieldsFormInput(fields);
+        // When both are sent, keep metadata as the stage values; fields still flow via ocrJson/parser.
 
         try
         {

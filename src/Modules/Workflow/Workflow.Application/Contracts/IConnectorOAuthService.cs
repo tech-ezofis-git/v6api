@@ -96,4 +96,16 @@ public interface IConnectorOAuthService
         Guid connectorId,
         string poNumber,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Look up SAP S/4 Purchase Order by PO number using connected XSUAA token.</summary>
+    Task<ConnectorSapXsuaaPoLookupResponse> LookupSapPurchaseOrderAsync(
+        Guid connectorId,
+        ConnectorSapXsuaaPoLookupRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Fetch a small sample of SAP purchase orders ($top, max 10) for connectivity checks.</summary>
+    Task<ConnectorSapPoSampleResponse> SampleSapPurchaseOrdersAsync(
+        Guid connectorId,
+        ConnectorSapPoSampleRequest request,
+        CancellationToken cancellationToken = default);
 }

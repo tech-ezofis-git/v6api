@@ -2,6 +2,7 @@ using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using System.Text.Json;
 using SaaSApp.Catalog;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.MultiTenancy;
@@ -129,8 +130,24 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
         string? realmId = null,
         CancellationToken cancellationToken = default)
     {
-        var payload = ConnectorOAuthStateHelper.Parse(state ?? string.Empty, ResolveSigningKey());
-        var redirectBase = string.IsNullOrWhiteSpace(payload.SuccessRedirectUrl)
+        // If SAP/provider rejected authorize (e.g. invalid_scope), surface that even when state is bad.
+        if (!ConnectorOAuthStateHelper.TryParse(state, ResolveSigningKey(), out var payload, out var stateError))
+        {
+            if (!string.IsNullOrWhiteSpace(error))
+            {
+                var fallback = _options.DefaultSuccessRedirectUrl ?? "https://cloud.ezofis.com/";
+                return AppendQuery(fallback, new Dictionary<string, string>
+                {
+                    ["connectorOAuth"] = "error",
+                    ["error"] = error,
+                    ["error_description"] = "Provider rejected authorize (check scopes / redirect URI)."
+                });
+            }
+
+            throw new InvalidOperationException(stateError ?? "OAuth state is invalid.");
+        }
+
+        var redirectBase = string.IsNullOrWhiteSpace(payload!.SuccessRedirectUrl)
             ? (_options.DefaultSuccessRedirectUrl ?? "/")
             : payload.SuccessRedirectUrl!;
 
@@ -407,8 +424,66 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
             QuickBooksPurchaseOrderMapper.FromRawJson(raw));
     }
 
+    public async Task<ConnectorSapXsuaaPoLookupResponse> LookupSapPurchaseOrderAsync(
+        Guid connectorId,
+        ConnectorSapXsuaaPoLookupRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.PoNumber))
+            throw new InvalidOperationException("poNumber is required.");
+
+        var normalized = request.PoNumber.Trim();
+        var (adapter, accessToken, configJson) = await PrepareSapAsync(connectorId, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(request.ApiBaseUrl)
+            || !string.IsNullOrWhiteSpace(request.OdataService)
+            || !string.IsNullOrWhiteSpace(request.SapClient))
+        {
+            configJson = MergeSapConfigJson(configJson, request.ApiBaseUrl, request.OdataService, request.SapClient);
+            await PersistConnectorConfigJsonAsync(connectorId, configJson, cancellationToken);
+        }
+
+        var raw = await adapter.GetSapPurchaseOrderRawByNumberAsync(
+            accessToken, normalized, configJson, cancellationToken);
+
+        if (string.IsNullOrWhiteSpace(raw))
+            return new ConnectorSapXsuaaPoLookupResponse(false, normalized, null);
+
+        return new ConnectorSapXsuaaPoLookupResponse(
+            true,
+            normalized,
+            SapPurchaseOrderMapper.FromRawJson(raw));
+    }
+
+    public async Task<ConnectorSapPoSampleResponse> SampleSapPurchaseOrdersAsync(
+        Guid connectorId,
+        ConnectorSapPoSampleRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        request ??= new ConnectorSapPoSampleRequest();
+        var top = request.Top <= 0 ? 2 : request.Top;
+
+        var (adapter, accessToken, configJson) = await PrepareSapAsync(connectorId, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(request.ApiBaseUrl)
+            || !string.IsNullOrWhiteSpace(request.OdataService)
+            || !string.IsNullOrWhiteSpace(request.SapClient))
+        {
+            configJson = MergeSapConfigJson(configJson, request.ApiBaseUrl, request.OdataService, request.SapClient);
+            await PersistConnectorConfigJsonAsync(connectorId, configJson, cancellationToken);
+        }
+
+        var raw = await adapter.ListSapPurchaseOrdersRawAsync(accessToken, top, configJson, cancellationToken);
+        var items = SapPurchaseOrderMapper.FromListRawJson(raw);
+        return new ConnectorSapPoSampleResponse(items.Count, items);
+    }
+
     private async Task<(IConnectorProviderAdapter Adapter, string AccessToken, string? ConfigJson)> PrepareOpsAsync(
         Guid connectorId, bool files, bool gmail, bool quickBooks, CancellationToken cancellationToken)
+        => await PrepareOpsAsync(connectorId, files, gmail, quickBooks, sap: false, cancellationToken);
+
+    private async Task<(IConnectorProviderAdapter Adapter, string AccessToken, string? ConfigJson)> PrepareOpsAsync(
+        Guid connectorId, bool files, bool gmail, bool quickBooks, bool sap, CancellationToken cancellationToken)
     {
         await EnsureValidAccessTokenAsync(connectorId, cancellationToken);
         var row = await LoadTokenRowAsync(connectorId, cancellationToken)
@@ -420,7 +495,15 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
             throw new InvalidOperationException($"{adapter.ProviderCode} does not support mail operations.");
         if (quickBooks && !adapter.SupportsQuickBooks)
             throw new InvalidOperationException($"{adapter.ProviderCode} does not support QuickBooks operations.");
+        if (sap && !adapter.SupportsSap)
+            throw new InvalidOperationException($"{adapter.ProviderCode} does not support SAP operations.");
         return (adapter, row.AccessToken!, row.ConfigJson);
+    }
+
+    private async Task<(IConnectorProviderAdapter Adapter, string AccessToken, string? ConfigJson)> PrepareSapAsync(
+        Guid connectorId, CancellationToken cancellationToken)
+    {
+        return await PrepareOpsAsync(connectorId, files: false, gmail: false, quickBooks: false, sap: true, cancellationToken);
     }
 
     private async Task<(IConnectorProviderAdapter Adapter, string AccessToken, string? ConfigJson, string RealmId)> PrepareQuickBooksAsync(
@@ -432,6 +515,64 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
         if (string.IsNullOrWhiteSpace(row.ExternalAccountId))
             throw new InvalidOperationException("QuickBooks realmId is missing. Disconnect and re-authorize the connector.");
         return (adapter, accessToken, configJson, row.ExternalAccountId!);
+    }
+
+    private async Task PersistConnectorConfigJsonAsync(
+        Guid connectorId,
+        string? configJson,
+        CancellationToken cancellationToken)
+    {
+        await using var connection = await OpenTenantConnectionAsync(cancellationToken);
+        await EnsureOAuthColumnsAsync(connection, cancellationToken);
+        const string sql = """
+            UPDATE dbo."connector"
+            SET "ConfigJson" = @ConfigJson,
+                "ModifiedAtUtc" = @Now
+            WHERE "Id" = @Id AND "IsDeleted" = false;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", connectorId);
+        cmd.Parameters.AddWithValue("@ConfigJson", (object?)configJson ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@Now", DateTime.UtcNow);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static string MergeSapConfigJson(
+        string? existingJson,
+        string? apiBaseUrl,
+        string? odataService,
+        string? sapClient)
+    {
+        var map = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(existingJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(existingJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var p in doc.RootElement.EnumerateObject())
+                    {
+                        map[p.Name] = p.Value.ValueKind == JsonValueKind.String
+                            ? p.Value.GetString()
+                            : p.Value.GetRawText();
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // ignore broken existing config
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(apiBaseUrl))
+            map["apiBaseUrl"] = apiBaseUrl.Trim().TrimEnd('/');
+        if (!string.IsNullOrWhiteSpace(odataService))
+            map["odataService"] = odataService.Trim();
+        if (!string.IsNullOrWhiteSpace(sapClient))
+            map["sapClient"] = sapClient.Trim();
+
+        return JsonSerializer.Serialize(map);
     }
 
     private async Task SaveTokensAsync(

@@ -159,3 +159,47 @@ public sealed record ConnectorQuickBooksPoLookupResponse(
     string PoNumber,
     ConnectorQuickBooksPurchaseOrderDto? PurchaseOrder);
 
+public sealed record ConnectorSapXsuaaPoLookupRequest(
+    string PoNumber,
+    /// <summary>Optional S/4 / API host, e.g. https://myXXXXX-api.s4hana.cloud.sap — saved onto connector ConfigJson when provided.</summary>
+    string? ApiBaseUrl = null,
+    string? OdataService = null,
+    string? SapClient = null);
+
+public sealed record ConnectorSapXsuaaPoLineDto(
+    string? Item,
+    string? Material,
+    string? Description,
+    decimal? Quantity,
+    string? Uom,
+    decimal? NetPrice,
+    decimal? NetAmount);
+
+public sealed record ConnectorSapXsuaaPurchaseOrderDto(
+    string? PoNumber,
+    string? VendorName,
+    string? Vendor,
+    string? PoDate,
+    decimal? PoAmount,
+    string? Currency,
+    string? CompanyCode,
+    string? PurchasingOrganization,
+    string? Status,
+    IReadOnlyList<ConnectorSapXsuaaPoLineDto> Items,
+    string? RawJson);
+
+public sealed record ConnectorSapXsuaaPoLookupResponse(
+    bool Found,
+    string PoNumber,
+    ConnectorSapXsuaaPurchaseOrderDto? PurchaseOrder);
+
+public sealed record ConnectorSapPoSampleRequest(
+    int Top = 2,
+    string? ApiBaseUrl = null,
+    string? OdataService = null,
+    string? SapClient = null);
+
+public sealed record ConnectorSapPoSampleResponse(
+    int Count,
+    IReadOnlyList<ConnectorSapXsuaaPurchaseOrderDto> Items);
+
