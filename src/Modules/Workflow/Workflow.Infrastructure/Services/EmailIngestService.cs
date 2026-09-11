@@ -601,8 +601,18 @@ public sealed class EmailIngestService : IEmailIngestService
             if (!string.Equals(masterConn.ProviderCode, "QUICKBOOKS", StringComparison.OrdinalIgnoreCase))
                 throw new InvalidOperationException("masterConnectorId must be a QUICKBOOKS connector.");
         }
+        else if (string.Equals(source, EmailIngestMasterSources.Sap, StringComparison.OrdinalIgnoreCase)
+                 || string.Equals(source, "Sap", StringComparison.OrdinalIgnoreCase))
+        {
+            if (request.MasterConnectorId is not { } masterConnectorId || masterConnectorId == Guid.Empty)
+                throw new InvalidOperationException("masterConnectorId is required when masterSource is SAP.");
+            var masterConn = await _connectorService.GetByIdAsync(masterConnectorId, cancellationToken)
+                ?? throw new InvalidOperationException("Master SAP connector not found.");
+            if (!SapConnectorProviderCodes.IsSap(masterConn.ProviderCode))
+                throw new InvalidOperationException("masterConnectorId must be an SAP connector (SAP / SAP_XSUAA / SAP_*).");
+        }
         else
-            throw new InvalidOperationException("masterSource must be InternalForm or QuickBooks.");
+            throw new InvalidOperationException("masterSource must be InternalForm, QuickBooks, or SAP.");
 
         if (request.PollIntervalMinutes < 0 || request.PollIntervalMinutes > 1440)
             throw new InvalidOperationException("pollIntervalMinutes must be between 0 and 1440 (0 = use EmailIngest:MinimumPollIntervalSeconds).");

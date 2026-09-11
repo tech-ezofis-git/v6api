@@ -60,7 +60,12 @@ VALUES
      'https://www.dropbox.com/oauth2/authorize', 'https://api.dropboxapi.com/oauth2/token', '', '', true, now()),
     (gen_random_uuid(), 'QUICKBOOKS', 'QuickBooks', '', '',
      'https://appcenter.intuit.com/connect/oauth2', 'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-     'com.intuit.quickbooks.accounting openid profile email', '', true, now())
+     'com.intuit.quickbooks.accounting openid profile email', '', true, now()),
+    -- SAP: catalog listing for dbo.connector ProviderCode=SAP (sample/live PO master).
+    -- Auth/Token unused while ConfigJson.mode=sample; fill later for live SAP OAuth/API.
+    (gen_random_uuid(), 'SAP', 'SAP', '', '',
+     '', '',
+     '', '', true, now())
 ON CONFLICT ("ProviderCode") DO UPDATE SET
     "Scopes" = CASE WHEN EXCLUDED."ProviderCode" IN ('GMAIL', 'OUTLOOK') THEN EXCLUDED."Scopes" ELSE catalog."ConnectorProviders"."Scopes" END,
     "ModifiedAtUtc" = CASE WHEN EXCLUDED."ProviderCode" IN ('GMAIL', 'OUTLOOK') THEN now() ELSE catalog."ConnectorProviders"."ModifiedAtUtc" END;
