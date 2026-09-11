@@ -19,7 +19,7 @@ public sealed class MasterResolveController : ControllerBase
     }
 
     /// <summary>
-    /// Resolve Vendor/Customer/Item from InternalForm (tenant DB) or QuickBooks connector.
+    /// Resolve Vendor/Customer/Item from InternalForm, QuickBooks, or SAP (sample ConfigJson) master.
     /// Pass mailboxId to use that mailbox's master binding, or source+formId/connectorId explicitly.
     /// </summary>
     [HttpGet("resolve")]

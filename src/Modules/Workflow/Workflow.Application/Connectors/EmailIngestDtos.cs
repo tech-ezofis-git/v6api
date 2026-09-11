@@ -4,6 +4,8 @@ public static class EmailIngestMasterSources
 {
     public const string InternalForm = "InternalForm";
     public const string QuickBooks = "QuickBooks";
+    /// <summary>PO Master = SAP connector (sample or live). Payload resource becomes SAP.</summary>
+    public const string Sap = "SAP";
 }
 
 public sealed record EmailIngestMailboxDto(

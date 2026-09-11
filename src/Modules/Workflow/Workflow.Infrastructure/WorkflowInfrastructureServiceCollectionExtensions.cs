@@ -70,6 +70,8 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IWorkflowTicketNumberService, WorkflowTicketNumberService>();
         services.AddScoped<IFormMasterFileUploadService, FormMasterFileUploadService>();
         services.AddScoped<IConnectorService, ConnectorService>();
+        services.AddScoped<ISapPurchaseOrderLookupService, SapPurchaseOrderLookupService>();
+        services.AddHttpClient(nameof(SapPurchaseOrderLookupService));
         services.Configure<ConnectorOAuthOptions>(configuration.GetSection(ConnectorOAuthOptions.SectionName));
         services.AddHttpClient(nameof(IConnectorProviderAdapter));
         services.AddScoped<IConnectorProviderAdapter, GcpConnectorAdapter>();

@@ -89,10 +89,16 @@ VALUES
      'https://appcenter.intuit.com/connect/oauth2',
      'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
      'com.intuit.quickbooks.accounting openid profile email',
+     '', true, now()),
+    (gen_random_uuid(), 'SAP', 'SAP',
+     '', '',
+     '',
+     '',
+     '',
      '', true, now())
 ON CONFLICT ("ProviderCode") DO NOTHING;
 
--- '✓ ConnectorProviders seed ensured (GCP, GMAIL, OUTLOOK, ONEDRIVE, TEAMS, DROPBOX, QUICKBOOKS)'
+-- '✓ ConnectorProviders seed ensured (GCP, GMAIL, OUTLOOK, ONEDRIVE, TEAMS, DROPBOX, QUICKBOOKS, SAP)'
 -- Set ClientId / ClientSecret / RedirectUri, e.g.:
 -- UPDATE catalog."ConnectorProviders" SET "ClientId"='...', "ClientSecret"='...', "RedirectUri"='https://host/V6API/api/connector/oauth/callback' WHERE "ProviderCode"='GCP';
 --

@@ -95,10 +95,9 @@ public sealed class EmailIngestNormalWorkflowStarter : IEmailIngestNormalWorkflo
             fileName,
             contentType,
             attachmentBytes.Length,
-            fieldsJson: null,
-            pageNo: null,
-            ocrType: null,
-            validateType: null,
+            metadataJson: null,
+            ocrJson: ocrResult.OcrJson,
+            ocrText: ocrResult.OcrText,
             actorUserId,
             cancellationToken);
 
