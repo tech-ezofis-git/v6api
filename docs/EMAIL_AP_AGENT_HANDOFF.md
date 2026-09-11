@@ -6,7 +6,7 @@
 
 | Piece | Role |
 |-------|------|
-| `catalog.ConnectorProviders` | Global OAuth apps (GMAIL, OUTLOOK, QUICKBOOKS, …) |
+| `catalog.ConnectorProviders` | Global OAuth apps (GMAIL, OUTLOOK, QUICKBOOKS, SAP, …) |
 | `dbo.connector` | Per-tenant OAuth tokens |
 | `dbo.EmailIngestMailbox` | Which mailbox → which AP workflow + master source |
 | `dbo.EmailIngestProcessed` | Dedup (message + attachment already started) |
@@ -16,7 +16,7 @@
 ## UI setup
 
 1. Connect Gmail and/or Outlook: `POST /api/connector/oauth/authorize` (`providerCode`: `GMAIL` / `OUTLOOK`).
-2. Optionally connect QuickBooks for masters.
+2. Optionally connect QuickBooks or SAP for PO masters.
 3. **Preferred:** create/update an EMAIL workflow with `emailConnectorId` (auto-creates `EmailIngestMailbox`):
 
 ```http
@@ -75,7 +75,8 @@ POST /api/email-ingest/mailboxes
 }
 ```
 
-For QuickBooks masters use `"masterSource": "QuickBooks"` + `"masterConnectorId": "<qbo-connector-guid>"`.
+For QuickBooks masters use `"masterSource": "QuickBooks"` + `"masterConnectorId": "<qbo-connector-guid>"`.  
+For SAP PO master use `"masterSource": "SAP"` + `"masterConnectorId": "<sap-connector-guid>"` (see [PHASE4_SAP_PO_MASTER_START_PAYLOAD.md](./PHASE4_SAP_PO_MASTER_START_PAYLOAD.md)).
 
 5. Manual test: `POST /api/email-ingest/mailboxes/{id}/poll`
 6. List/status: `GET /api/email-ingest/mailboxes`

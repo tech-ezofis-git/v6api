@@ -13,11 +13,16 @@ public sealed class ConnectorController : ControllerBase
 {
     private readonly IConnectorService _connectorService;
     private readonly IConnectorOAuthService _oauthService;
+    private readonly ISapPurchaseOrderLookupService _sapPurchaseOrderLookup;
 
-    public ConnectorController(IConnectorService connectorService, IConnectorOAuthService oauthService)
+    public ConnectorController(
+        IConnectorService connectorService,
+        IConnectorOAuthService oauthService,
+        ISapPurchaseOrderLookupService sapPurchaseOrderLookup)
     {
         _connectorService = connectorService;
         _oauthService = oauthService;
+        _sapPurchaseOrderLookup = sapPurchaseOrderLookup;
     }
 
     /// <summary>Create a new connector (v5 POST /api/connector).</summary>
@@ -445,6 +450,40 @@ public sealed class ConnectorController : ControllerBase
         }
         catch (NotSupportedException ex)
         {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Look up an SAP Purchase Order by PO number for AP Agent invoice matching.
+    /// Sample mode reads ConfigJson.samplePurchaseOrders (source=sap_sample).
+    /// </summary>
+    [HttpPost("{id:guid}/sap/purchase-orders/lookup")]
+    [ProducesResponseType(typeof(ConnectorSapPoLookupResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> LookupSapPurchaseOrder(
+        Guid id,
+        [FromBody] ConnectorSapPoLookupRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        try
+        {
+            if (request is null || string.IsNullOrWhiteSpace(request.PoNumber))
+                return BadRequest(new { error = "poNumber is required." });
+
+            var result = await _sapPurchaseOrderLookup.LookupAsync(id, request.PoNumber, cancellationToken);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            // Missing connector vs wrong provider — 404 for missing, 400 for non-SAP.
+            if (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+                return NotFound(new { error = ex.Message });
             return BadRequest(new { error = ex.Message });
         }
     }

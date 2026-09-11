@@ -29,6 +29,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
     private readonly IWorkflowApAgentMoveNextService _apAgentMoveNext;
     private readonly IWorkflowEzfbFormDataLoader _ezfbFormDataLoader;
     private readonly IWorkflowAttachmentArchiveService? _attachmentArchive;
+    private readonly IEmailIngestService _emailIngest;
+    private readonly IWorkflowJsonStorageService _workflowJsonStorage;
     private readonly IConfiguration _configuration;
     private readonly ILogger<WorkflowStartBootstrapService> _logger;
 
@@ -40,6 +42,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         IUnitOfWork unitOfWork,
         IWorkflowApAgentMoveNextService apAgentMoveNext,
         IWorkflowEzfbFormDataLoader ezfbFormDataLoader,
+        IEmailIngestService emailIngest,
+        IWorkflowJsonStorageService workflowJsonStorage,
         IConfiguration configuration,
         ILogger<WorkflowStartBootstrapService> logger,
         IWorkflowStartAttachmentUploader? attachmentUploader = null,
@@ -52,6 +56,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         _unitOfWork = unitOfWork;
         _apAgentMoveNext = apAgentMoveNext;
         _ezfbFormDataLoader = ezfbFormDataLoader;
+        _emailIngest = emailIngest;
+        _workflowJsonStorage = workflowJsonStorage;
         _configuration = configuration;
         _logger = logger;
         _attachmentUploader = attachmentUploader;
@@ -203,6 +209,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             transactionGuid,
             formEntryItemId,
             workflow.FormId);
+
+        await EnrichStartPayloadForPoMasterAsync(payload, instance, workflow.Id, cancellationToken);
 
         await InsertProcessFormRowAsync(
             connectionString,
@@ -422,6 +430,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             formEntryItemId,
             workflow.FormId);
 
+        await EnrichStartPayloadForPoMasterAsync(payload, instance, workflow.Id, cancellationToken);
+
         var formDataJson = JsonSerializer.Serialize(payload, PayloadJsonOptions);
         var wFormId = ResolveWFormIdInt(connectionString, workflow.FormId);
 
@@ -519,6 +529,71 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             ["formentryId"] = formEntryItemId,
             ["formId"] = formTemplateId ?? string.Empty
         };
+
+    /// <summary>
+    /// When mailbox/context PO Master is QuickBooks or SAP, inject resource, connector_id,
+    /// and skills (po_lookup_* before po_match) for the Python AP Agent.
+    /// </summary>
+    private async Task EnrichStartPayloadForPoMasterAsync(
+        Dictionary<string, object?> payload,
+        WorkflowInstance instance,
+        Guid workflowId,
+        CancellationToken cancellationToken)
+    {
+        ApAgentPoMasterStartPayloadEnricher.TryReadMasterFromContext(
+            instance.Context,
+            out var masterSource,
+            out var masterConnectorId);
+
+        try
+        {
+            var mailbox = await _emailIngest.GetMailboxByWorkflowIdAsync(workflowId, cancellationToken);
+            if (mailbox != null)
+            {
+                if (string.IsNullOrWhiteSpace(masterSource))
+                    masterSource = mailbox.MasterSource;
+                masterConnectorId ??= mailbox.MasterConnectorId;
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "PO master mailbox lookup failed for workflow {WorkflowId}; trying workflow JSON.",
+                workflowId);
+        }
+
+        if (string.IsNullOrWhiteSpace(masterSource) || masterConnectorId is null)
+        {
+            try
+            {
+                var workflowJson = await _workflowJsonStorage.GetWorkflowJsonAsync(workflowId, cancellationToken);
+                if (WorkflowPoMasterJson.TryRead(workflowJson, out var jsonSource, out var jsonConnectorId, out _))
+                {
+                    if (string.IsNullOrWhiteSpace(masterSource))
+                        masterSource = jsonSource;
+                    masterConnectorId ??= jsonConnectorId;
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "PO master workflow JSON lookup failed for workflow {WorkflowId}.",
+                    workflowId);
+            }
+        }
+
+        ApAgentPoMasterStartPayloadEnricher.Enrich(payload, masterSource, masterConnectorId);
+
+        if (payload.TryGetValue("resource", out var resource) && resource is not null)
+        {
+            _logger.LogInformation(
+                "AP start payload enriched for PO master: resource={Resource}, connector_id={ConnectorId}",
+                resource,
+                payload.TryGetValue("connector_id", out var cid) ? cid : null);
+        }
+    }
 
     private async Task<int> InsertFormEntryAsync(
         string connectionString,

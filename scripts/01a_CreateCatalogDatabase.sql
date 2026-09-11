@@ -90,7 +90,11 @@ USING (VALUES
     (N'QUICKBOOKS', N'QuickBooks',
      N'https://appcenter.intuit.com/connect/oauth2',
      N'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-     N'com.intuit.quickbooks.accounting openid profile email')
+     N'com.intuit.quickbooks.accounting openid profile email'),
+    (N'SAP', N'SAP',
+     N'',
+     N'',
+     N'')
 ) AS s ([ProviderCode], [DisplayName], [AuthUrl], [TokenUrl], [Scopes])
 ON t.[ProviderCode] = s.[ProviderCode]
 WHEN NOT MATCHED THEN
@@ -98,7 +102,7 @@ WHEN NOT MATCHED THEN
     VALUES (NEWID(), s.[ProviderCode], s.[DisplayName], N'', N'', s.[AuthUrl], s.[TokenUrl], s.[Scopes], N'', 1, SYSUTCDATETIME());
 GO
 
-PRINT '✓ ConnectorProviders seed ensured (GCP, GMAIL, OUTLOOK, ONEDRIVE, TEAMS, DROPBOX, QUICKBOOKS)';
+PRINT '✓ ConnectorProviders seed ensured (GCP, GMAIL, OUTLOOK, ONEDRIVE, TEAMS, DROPBOX, QUICKBOOKS, SAP)';
 PRINT '  Set ClientId / ClientSecret / RedirectUri, e.g.:';
 PRINT '  UPDATE catalog.ConnectorProviders SET ClientId=N''...'', ClientSecret=N''...'', RedirectUri=N''https://host/V6API/api/connector/oauth/callback'' WHERE ProviderCode=N''GCP'';';
 PRINT '';

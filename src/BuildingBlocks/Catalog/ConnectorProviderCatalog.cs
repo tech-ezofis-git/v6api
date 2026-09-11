@@ -88,6 +88,11 @@ public sealed class ConnectorProviderCatalog : IConnectorProviderCatalog
                      'https://appcenter.intuit.com/connect/oauth2',
                      'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
                      'com.intuit.quickbooks.accounting openid profile email',
+                     '', '', '', true, now()),
+                    (gen_random_uuid(), 'SAP', 'SAP',
+                     '',
+                     '',
+                     '',
                      '', '', '', true, now())
                 ON CONFLICT ("ProviderCode") DO UPDATE SET
                     "Scopes" = CASE WHEN EXCLUDED."ProviderCode" IN ('GMAIL', 'OUTLOOK')

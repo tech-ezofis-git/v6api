@@ -20,7 +20,16 @@ public record WorkflowJsonDto(
 
 public record WorkflowSettingsDto(
     WorkflowGeneralDto? General = null,
-    WorkflowPublishDto? Publish = null
+    WorkflowPublishDto? Publish = null,
+    /// <summary>PO Master for AP Agent (works for DOCUMENT / DOCUMENT_FORM without email mailbox).</summary>
+    WorkflowPoMasterDto? PoMaster = null
+);
+
+/// <summary>PO / vendor master binding mirrored from mailbox masterSource fields.</summary>
+public record WorkflowPoMasterDto(
+    string? MasterSource = null,
+    string? MasterConnectorId = null,
+    string? MasterFormId = null
 );
 
 public record WorkflowGeneralDto(

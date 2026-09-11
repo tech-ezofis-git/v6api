@@ -23,15 +23,18 @@ public sealed class MasterResolveService : IMasterResolveService
     private readonly IEmailIngestService _emailIngest;
     private readonly IFormEntryService _formEntryService;
     private readonly IConnectorOAuthService _oauthService;
+    private readonly IConnectorService _connectorService;
 
     public MasterResolveService(
         IEmailIngestService emailIngest,
         IFormEntryService formEntryService,
-        IConnectorOAuthService oauthService)
+        IConnectorOAuthService oauthService,
+        IConnectorService connectorService)
     {
         _emailIngest = emailIngest;
         _formEntryService = formEntryService;
         _oauthService = oauthService;
+        _connectorService = connectorService;
     }
 
     public async Task<MasterResolveResponse> ResolveAsync(
@@ -76,6 +79,14 @@ public sealed class MasterResolveService : IMasterResolveService
             return await ResolveQuickBooksAsync(normalizedType, q, maxResults, qbConnectorId, cancellationToken);
         }
 
+        if (string.Equals(resolvedSource, EmailIngestMasterSources.Sap, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(resolvedSource, "Sap", StringComparison.OrdinalIgnoreCase))
+        {
+            if (resolvedConnectorId is not { } sapConnectorId || sapConnectorId == Guid.Empty)
+                throw new InvalidOperationException("connectorId (SAP) is required.");
+            return await ResolveSapAsync(normalizedType, q, maxResults, sapConnectorId, cancellationToken);
+        }
+
         if (string.Equals(resolvedSource, EmailIngestMasterSources.InternalForm, StringComparison.OrdinalIgnoreCase))
         {
             if (string.IsNullOrWhiteSpace(resolvedFormId))
@@ -83,7 +94,19 @@ public sealed class MasterResolveService : IMasterResolveService
             return await ResolveFormAsync(normalizedType, q, maxResults, resolvedFormId!, cancellationToken);
         }
 
-        throw new InvalidOperationException("source must be InternalForm or QuickBooks.");
+        throw new InvalidOperationException("source must be InternalForm, QuickBooks, or SAP.");
+    }
+
+    private async Task<MasterResolveResponse> ResolveSapAsync(
+        string type, string? q, int maxResults, Guid connectorId, CancellationToken cancellationToken)
+    {
+        var connector = await _connectorService.GetByIdAsync(connectorId, cancellationToken)
+            ?? throw new InvalidOperationException("SAP connector not found.");
+        if (!SapConnectorProviderCodes.IsSap(connector.ProviderCode))
+            throw new InvalidOperationException("connectorId must be an SAP connector (SAP / SAP_XSUAA / SAP_*).");
+
+        var items = SapSampleVendorResolver.Resolve(connector.ConfigJson, type, q, maxResults);
+        return new MasterResolveResponse(type, EmailIngestMasterSources.Sap, items);
     }
 
     private async Task<MasterResolveResponse> ResolveQuickBooksAsync(

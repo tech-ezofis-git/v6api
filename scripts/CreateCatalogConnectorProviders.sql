@@ -60,7 +60,11 @@ USING (VALUES
     (N'QUICKBOOKS', N'QuickBooks',
      N'https://appcenter.intuit.com/connect/oauth2',
      N'https://oauth.platform.intuit.com/oauth2/v1/tokens/bearer',
-     N'com.intuit.quickbooks.accounting openid profile email')
+     N'com.intuit.quickbooks.accounting openid profile email'),
+    (N'SAP', N'SAP',
+     N'',
+     N'',
+     N'')
 ) AS s ([ProviderCode], [DisplayName], [AuthUrl], [TokenUrl], [Scopes])
 ON t.[ProviderCode] = s.[ProviderCode]
 WHEN MATCHED AND t.[ProviderCode] IN (N'GMAIL', N'OUTLOOK') THEN
