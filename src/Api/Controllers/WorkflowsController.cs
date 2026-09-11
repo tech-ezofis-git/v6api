@@ -1196,7 +1196,20 @@ public sealed class WorkflowsController : ControllerBase
                         ?? ReadOptionalString(item, "FormJsonId")
                         ?? ReadOptionalString(item, "jsonId")
                         ?? ReadOptionalString(item, "JsonId");
-                    list.Add(new StartWorkflowStagedFileRef(repoId, fileId, formJsonId));
+                    var fieldId = ReadOptionalString(item, "fieldId")
+                        ?? ReadOptionalString(item, "FieldId");
+                    TryReadGuid(item, "itemId", out var itemId);
+                    if (itemId == Guid.Empty)
+                        TryReadGuid(item, "ItemId", out itemId);
+                    var fileName = ReadOptionalString(item, "fileName")
+                        ?? ReadOptionalString(item, "FileName");
+                    list.Add(new StartWorkflowStagedFileRef(
+                        repoId,
+                        fileId,
+                        formJsonId,
+                        itemId == Guid.Empty ? null : itemId,
+                        fileName,
+                        fieldId));
                 }
             }
         }

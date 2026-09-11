@@ -123,6 +123,8 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        ApplyOriginalFileNameToFilenameField(repo.Fields, fieldValues, request.FileName);
+
         var archiveBaseFileName = RepositoryArchiveFileNameResolver.ResolveArchiveBaseFileName(
             repo.Fields,
             fieldValues,
@@ -221,6 +223,30 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
             request.WorkflowId,
             request.ProcessId,
             request.InstanceId);
+    }
+
+    private static void ApplyOriginalFileNameToFilenameField(
+        IReadOnlyList<RepositoryFieldDto> fields,
+        Dictionary<string, string> fieldValues,
+        string? originalFileName)
+    {
+        if (string.IsNullOrWhiteSpace(originalFileName))
+            return;
+
+        var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
+            fields.Where(f => f.IncludeInFolderStructure));
+        var namingField = RepositoryArchiveFileNameResolver.ResolveNamingField(allFields: fields, folderFields);
+        if (namingField == null || !RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
+            return;
+
+        var fileName = Path.GetFileName(originalFileName.Trim());
+        if (string.IsNullOrWhiteSpace(fileName))
+            return;
+
+        if (!string.IsNullOrWhiteSpace(namingField.SqlColumnName))
+            fieldValues[namingField.SqlColumnName.Trim()] = fileName;
+        else
+            fieldValues[namingField.Name.Trim()] = fileName;
     }
 
     private static void ValidateWorkflowArgs(RepositoryUploadItemRequest request)

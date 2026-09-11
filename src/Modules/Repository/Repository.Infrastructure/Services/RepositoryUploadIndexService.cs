@@ -318,22 +318,35 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         Guid repositoryId,
         Guid tenantId,
         Guid? userId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool allowIncompleteFolderMetadata = false)
     {
-        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
-            ?? throw new InvalidOperationException("Repository not found.");
-
-        await _provisioner.EnsureRepositoryTablesAsync(repositoryId, tenantId, cancellationToken);
-
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+        RepositoryStageRow? row = null;
+        if (repo != null)
+        {
+            await _provisioner.EnsureRepositoryTablesAsync(repositoryId, tenantId, cancellationToken);
+            row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+        }
+
         if (row == null)
-            return null;
+        {
+            repo = await ResolveRepositoryForStageAsync(connection, tenantId, stageId, cancellationToken);
+            if (repo == null)
+                return null;
+
+            row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+            if (row == null)
+                return null;
+
+            repositoryId = repo.Id;
+        }
 
         if (row.PromotedItemId is Guid alreadyPromoted && alreadyPromoted != Guid.Empty)
         {
@@ -363,13 +376,31 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         await source.CopyToAsync(promoteBuffer, cancellationToken);
         promoteBuffer.Position = 0;
 
-        var metadataJson = JsonSerializer.Serialize(row.FieldValues);
+        // Archive from stage row: field columns + OCR text become archive metadata.
+        var fieldValues = new Dictionary<string, string>(row.FieldValues, StringComparer.OrdinalIgnoreCase);
+        foreach (var (key, value) in RepositoryOcrJsonMetadataExtractor.Extract(row.OcrJson, row.SummaryJson))
+        {
+            if (string.IsNullOrWhiteSpace(key) || string.IsNullOrWhiteSpace(value))
+                continue;
+            fieldValues.TryAdd(key, value);
+        }
+
+        RepositoryNamingFieldMetadataInjector.InjectFromOriginalFileName(
+            repo!.Fields,
+            fieldValues,
+            row.FileName,
+            row.FileType);
+
+        fieldValues = CollapseFieldValuesToSqlColumns(fieldValues, repo.Fields);
+
+        var metadataJson = JsonSerializer.Serialize(fieldValues);
         var uploadRequest = new RepositoryUploadItemRequest(
             promoteBuffer,
             row.FileName,
             row.FileType,
             FileSize: row.FileSize,
-            Metadata: metadataJson);
+            Metadata: metadataJson,
+            AllowIncompleteFolderMetadata: allowIncompleteFolderMetadata);
 
         var result = await _archiveUpload.UploadItemAsync(
             repositoryId,
@@ -831,15 +862,22 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         }
         catch (JsonException)
         {
-            // "fields" may carry OCR parameter lines (["Supplier,SHORT_TEXT"]) instead of name/value objects.
+            // Swagger sends each field JSON object as its own "fields" value, then we wrap those strings.
             try
             {
                 var lines = JsonSerializer.Deserialize<List<string>>(trimmed, JsonOptions);
-                return lines == null
-                    ? null
-                    : lines
-                        .SelectMany(line => ParseFieldNamesFromPlainText(line) ?? new List<UploadIndexFieldDto>())
-                        .ToList();
+                if (lines == null)
+                    return ParseFieldNamesFromPlainText(trimmed);
+
+                var fromObjects = lines
+                    .SelectMany(line => OcrResultParser.TryParseFieldList(line) ?? Array.Empty<UploadIndexFieldDto>())
+                    .ToList();
+                if (fromObjects.Count > 0)
+                    return fromObjects;
+
+                return lines
+                    .SelectMany(line => ParseFieldNamesFromPlainText(line) ?? new List<UploadIndexFieldDto>())
+                    .ToList();
             }
             catch (JsonException)
             {

@@ -130,11 +130,21 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
 
             if (!string.IsNullOrWhiteSpace(existingRow.Review))
             {
+                var openNextId = await FindOpenNextTransactionIdAsync(
+                    connection, transactionTable, workflowInstanceId, existingRow.Id, cancellationToken);
+                if (openNextId is > 0)
+                {
+                    await _mailboxSync.SyncTransactionRowAsync(
+                        workflowId, existingRow.Id, connection, mailboxForm, cancellationToken);
+                    await _mailboxSync.SyncTransactionRowAsync(
+                        workflowId, openNextId.Value, connection, mailboxForm, cancellationToken);
+                }
+
                 return new WorkflowLegacyTransactionSyncResult(
                     LegacyTransactionSyncStatus.ReviewAlreadyUpdated,
                     workflowInstanceId,
                     existingRow.Id,
-                    null,
+                    openNextId,
                     null,
                     WorkflowCompleted: false);
             }
@@ -257,6 +267,14 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                         nextActivityUserId,
                         nextCreatedByUserId);
                 }
+
+                // Next step already exists (retry / second sync). Still return it so start/submit
+                // re-syncs sent for the actor and inbox for the receiver.
+                nextTransactionId = nextExists.Id;
+                nextTransactionGuid = await ResolveTransactionGuidAsync(
+                    connection, transactionTable, nextExists.Id, cancellationToken);
+                await _mailboxSync.SyncTransactionRowAsync(
+                    workflowId, nextExists.Id, connection, mailboxForm, cancellationToken);
             }
             else
             {
@@ -466,8 +484,9 @@ WHERE id = @WorkflowInstanceId;";
         Guid currentUserId,
         CancellationToken cancellationToken)
     {
-        if (nextStep.AssignedToUserId is Guid stepAssignee && stepAssignee != Guid.Empty)
-            return (stepAssignee, currentUserId);
+        var approvers = nextStep.GetApproverIds();
+        if (approvers.Count > 0)
+            return (approvers[0], currentUserId);
 
         try
         {
@@ -531,5 +550,42 @@ RETURNING id;";
         var guidResult = await guidCmd.ExecuteScalarAsync(cancellationToken);
         var guid = guidResult == null || guidResult == DBNull.Value ? Guid.Empty : (Guid)guidResult;
         return (id, guid);
+    }
+
+    private static async Task<int?> FindOpenNextTransactionIdAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        Guid workflowInstanceId,
+        int completedTransactionId,
+        CancellationToken cancellationToken)
+    {
+        var sql = $@"
+SELECT id
+FROM {transactionTable}
+WHERE is_deleted = false
+  AND workflow_instance_id = @WorkflowInstanceId
+  AND id <> @CompletedId
+  AND action_status = 0
+  AND UPPER(TRIM(COALESCE(stage_type, ''))) <> 'END'
+ORDER BY id DESC
+LIMIT 1;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        cmd.Parameters.AddWithValue("@CompletedId", completedTransactionId);
+        var result = await cmd.ExecuteScalarAsync(cancellationToken);
+        return result == null || result == DBNull.Value ? null : Convert.ToInt32(result);
+    }
+
+    private static async Task<Guid?> ResolveTransactionGuidAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        int transactionId,
+        CancellationToken cancellationToken)
+    {
+        var sql = $"SELECT transaction_guid FROM {transactionTable} WHERE id = @Id AND is_deleted = false";
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", transactionId);
+        var result = await cmd.ExecuteScalarAsync(cancellationToken);
+        return result == null || result == DBNull.Value ? null : (Guid)result;
     }
 }

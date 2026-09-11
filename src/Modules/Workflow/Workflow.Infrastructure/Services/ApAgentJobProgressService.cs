@@ -357,14 +357,8 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         if (string.IsNullOrWhiteSpace(connectionString))
             throw new InvalidOperationException("Tenant connection string not resolved.");
 
-        // Cap client pool so Hangfire + API + EF do not exhaust Azure Postgres max_connections.
-        var builder = new NpgsqlConnectionStringBuilder(connectionString);
-        if (builder.MaxPoolSize <= 0 || builder.MaxPoolSize > 20)
-            builder.MaxPoolSize = 20;
-        if (builder.MinPoolSize < 0)
-            builder.MinPoolSize = 0;
-
-        var connection = new NpgsqlConnection(builder.ConnectionString);
+        // Use the tenant string as-is so this does not open a second pool (that exhausts Azure slots).
+        var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         return connection;
     }

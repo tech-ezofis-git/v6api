@@ -61,11 +61,31 @@ internal static class RepositoryArchiveFileNameResolver
         return RepositoryFolderMetadataResolver.ResolveSegmentName(metadata, namingField);
     }
 
+    /// <summary>Last naming column is Filename — archive file must be the uploaded file name, not metadata like "string".</summary>
+    public static bool IsOriginalFileNameField(RepositoryFieldDto field)
+    {
+        static string Compact(string? value) =>
+            string.IsNullOrWhiteSpace(value) ? string.Empty : value.Replace(" ", "").Replace("_", "");
+
+        return Compact(field.Name).Equals("Filename", StringComparison.OrdinalIgnoreCase)
+            || Compact(field.SqlColumnName).Equals("Filename", StringComparison.OrdinalIgnoreCase);
+    }
+
     public static string ResolveArchiveBaseFileName(
         IReadOnlyList<RepositoryFieldDto> allFields,
         IReadOnlyDictionary<string, string> metadata,
         string originalFileName)
     {
+        var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
+            allFields.Where(f => f.IncludeInFolderStructure));
+        var namingField = ResolveNamingField(allFields, folderFields);
+        if (namingField != null && IsOriginalFileNameField(namingField))
+        {
+            return RepositoryFilePathHelper.EnsureFileNameHasExtension(
+                RepositoryFilePathHelper.GetBaseFileName(originalFileName),
+                filePath: originalFileName);
+        }
+
         var stem = ResolveArchiveFileStem(allFields, metadata);
         var ext = Path.GetExtension(originalFileName);
         if (string.IsNullOrEmpty(ext) || ext == ".")

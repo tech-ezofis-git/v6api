@@ -136,6 +136,9 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
         CancellationToken cancellationToken = default)
     {
         var suffix = workflowId.ToString("N")[..8];
+        if (LegacyTransactionSchemaEnsured.ContainsKey(suffix))
+            return;
+
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await EnsureLegacyTransactionTableAsync(connection, suffix, cancellationToken);
@@ -147,8 +150,24 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
         CancellationToken cancellationToken = default)
     {
         var suffix = workflowId.ToString("N")[..8];
+        if (LegacyMailboxSchemaEnsured.ContainsKey(suffix))
+            return;
+
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        await EnsureLegacyMailboxTablesAsync(connection, suffix, cancellationToken);
+    }
+
+    /// <summary>Same as the connection-string overload, but does not open another slot while one is already held.</summary>
+    public async Task EnsureLegacyMailboxTablesAsync(
+        Guid workflowId,
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken = default)
+    {
+        var suffix = workflowId.ToString("N")[..8];
+        if (LegacyMailboxSchemaEnsured.ContainsKey(suffix))
+            return;
+
         await EnsureLegacyMailboxTablesAsync(connection, suffix, cancellationToken);
     }
 
@@ -341,11 +360,11 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
 
             await EnsureLegacyMailboxIndexesAsync(connection, workflowKey, cancellationToken);
             await EnsureLegacyTransactionMailboxIndexesAsync(connection, workflowKey, cancellationToken);
-            LegacyMailboxSchemaEnsured.TryAdd(workflowKey, 0);
         }
 
-        // Always run idempotent column migrates (e.g. action) so existing DBs pick up new columns.
+        // Idempotent column migrates. After the first success this process does not open another connection for them.
         await MigrateLegacyMailboxInstanceColumnsAsync(connection, workflowKey, cancellationToken);
+        LegacyMailboxSchemaEnsured.TryAdd(workflowKey, 0);
     }
 
     private static async Task EnsureLegacyTransactionMailboxIndexesAsync(

@@ -31,7 +31,8 @@ public sealed class RepositoryWorkflowAttachService
         string? contentType,
         Guid? userId,
         Guid? stepInstanceId = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? formJsonId = null)
     {
         _ = transactionId;
 
@@ -64,7 +65,9 @@ public sealed class RepositoryWorkflowAttachService
                 throw new InvalidOperationException($"Workflow instance {workflowInstanceId} not found for workflow {workflowId}.");
         }
 
-        var formJsonId = itemId.ToString("N");
+        var resolvedFormJsonId = !string.IsNullOrWhiteSpace(formJsonId)
+            ? formJsonId.Trim()
+            : itemId.ToString("N");
         var attachmentId = Guid.NewGuid();
 
         var insertSql = $"""
@@ -83,7 +86,7 @@ public sealed class RepositoryWorkflowAttachService
         insertCmd.Parameters.AddWithValue("@StepInstanceId", (object?)stepInstanceId ?? DBNull.Value);
         insertCmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         insertCmd.Parameters.AddWithValue("@ItemId", itemId);
-        insertCmd.Parameters.AddWithValue("@FormJsonId", formJsonId);
+        insertCmd.Parameters.AddWithValue("@FormJsonId", resolvedFormJsonId);
         insertCmd.Parameters.AddWithValue("@FileName", fileName.Trim());
         insertCmd.Parameters.AddWithValue("@FilePath", filePath.Trim());
         insertCmd.Parameters.AddWithValue("@FileSize", (object?)fileSize ?? DBNull.Value);
