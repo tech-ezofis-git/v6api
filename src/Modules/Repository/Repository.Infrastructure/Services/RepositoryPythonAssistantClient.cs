@@ -11,7 +11,7 @@ namespace SaaSApp.Repository.Infrastructure.Services;
 
 /// <summary>
 /// Proxies repository assistant search/chatbot to agents <c>/chat</c>
-/// (<c>intent=global_search</c>) via <see cref="AgentsChatOptions.ChatUrl"/>.
+/// (search: <c>intent=global_search</c>, chatbot: <c>intent=chatbot</c>) via <see cref="AgentsChatOptions.ChatUrl"/>.
 /// </summary>
 public sealed class RepositoryPythonAssistantClient : IRepositoryPythonAssistantClient
 {
@@ -44,13 +44,18 @@ public sealed class RepositoryPythonAssistantClient : IRepositoryPythonAssistant
         CancellationToken cancellationToken = default)
     {
         var query = request.Query?.Trim() ?? string.Empty;
-        var body = BuildGlobalSearchBody(
+        var intent = string.IsNullOrWhiteSpace(_options.SearchIntent)
+            ? "global_search"
+            : _options.SearchIntent.Trim();
+        var body = BuildChatBody(
+            intent: intent,
             message: query,
             query: query,
             tenantId: request.TenantId,
             specificId: request.SpecificId,
             actionFrom: request.ActionFrom,
-            token: null);
+            token: null,
+            sessionId: null);
         return PostChatAsync(body, "search", cancellationToken);
     }
 
@@ -59,13 +64,18 @@ public sealed class RepositoryPythonAssistantClient : IRepositoryPythonAssistant
         CancellationToken cancellationToken = default)
     {
         var message = request.Message?.Trim() ?? string.Empty;
-        var body = BuildGlobalSearchBody(
+        var intent = string.IsNullOrWhiteSpace(_options.ChatbotIntent)
+            ? "chatbot"
+            : _options.ChatbotIntent.Trim();
+        var body = BuildChatBody(
+            intent: intent,
             message: message,
             query: message,
             tenantId: request.TenantId,
             specificId: request.SpecificId,
             actionFrom: request.ActionFrom,
-            token: request.Token);
+            token: request.Token,
+            sessionId: request.SessionId);
         return PostChatAsync(body, "chatbot", cancellationToken);
     }
 
@@ -127,18 +137,16 @@ public sealed class RepositoryPythonAssistantClient : IRepositoryPythonAssistant
         return null;
     }
 
-    private object BuildGlobalSearchBody(
+    private object BuildChatBody(
+        string intent,
         string message,
         string query,
         Guid? tenantId,
         Guid? specificId,
         string? actionFrom,
-        string? token)
+        string? token,
+        string? sessionId)
     {
-        var intent = string.IsNullOrWhiteSpace(_options.SearchIntent)
-            ? "global_search"
-            : _options.SearchIntent.Trim();
-
         var payload = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase)
         {
             ["query"] = query,
@@ -152,9 +160,13 @@ public sealed class RepositoryPythonAssistantClient : IRepositoryPythonAssistant
         if (!string.IsNullOrWhiteSpace(token))
             payload["token"] = token.Trim();
 
+        var resolvedSessionId = string.IsNullOrWhiteSpace(sessionId)
+            ? $"repo-assistant-{Guid.NewGuid():N}"
+            : sessionId.Trim();
+
         return new
         {
-            session_id = $"repo-assistant-{Guid.NewGuid():N}",
+            session_id = resolvedSessionId,
             intent,
             message,
             payload

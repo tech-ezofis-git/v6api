@@ -11,8 +11,11 @@ public sealed class RepositoryPythonAssistantOptions
     /// </summary>
     public string ChatUrl { get; set; } = string.Empty;
 
-    /// <summary>Agents intent for search and chatbot (default <c>global_search</c>).</summary>
+    /// <summary>Agents intent for search (default <c>global_search</c>).</summary>
     public string SearchIntent { get; set; } = "global_search";
+
+    /// <summary>Agents intent for chatbot (default <c>chatbot</c>).</summary>
+    public string ChatbotIntent { get; set; } = "chatbot";
 
     public int TimeoutSeconds { get; set; } = 120;
 
