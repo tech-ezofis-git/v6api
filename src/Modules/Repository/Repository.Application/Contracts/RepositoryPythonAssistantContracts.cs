@@ -14,6 +14,8 @@ public sealed class RepositoryAssistantChatbotRequest
     public string Message { get; set; } = string.Empty;
     public Guid? SpecificId { get; set; }
     public Guid? TenantId { get; set; }
+    /// <summary>Optional agents session id; when omitted a new <c>repo-assistant-*</c> id is generated.</summary>
+    public string? SessionId { get; set; }
     /// <summary>Optional. Prefer Authorization header; if set, forwarded in body to Python.</summary>
     public string? Token { get; set; }
 }
