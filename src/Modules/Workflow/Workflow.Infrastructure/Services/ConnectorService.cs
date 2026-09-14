@@ -311,7 +311,8 @@ public sealed class ConnectorService : IConnectorService
                     "ModifiedAtUtc" timestamptz NULL,
                     "CreatedBy" uuid NOT NULL,
                     "ModifiedBy" uuid NULL,
-                    "IsDeleted" boolean NOT NULL DEFAULT false
+                    "IsDeleted" boolean NOT NULL DEFAULT false,
+                    "HanaDatabaseJson" text NULL
                 );
                 CREATE INDEX IF NOT EXISTS "IX_connector_IsDeleted" ON dbo."connector" ("IsDeleted");
                 CREATE INDEX IF NOT EXISTS "IX_connector_ProviderCode" ON dbo."connector" ("ProviderCode") WHERE "IsDeleted" = false;
@@ -322,10 +323,25 @@ public sealed class ConnectorService : IConnectorService
         }
 
         if (await HasColumnAsync(connection, "connector", "ProviderCode", cancellationToken))
+        {
+            await EnsureHanaDatabaseJsonColumnAsync(connection, cancellationToken);
             return;
+        }
 
         throw new InvalidOperationException(
             "dbo.\"connector\" is on a legacy schema. Run scripts/postgres/Create-Connector-Table.sql on the tenant database to migrate.");
+    }
+
+    private static async Task EnsureHanaDatabaseJsonColumnAsync(
+        NpgsqlConnection connection,
+        CancellationToken cancellationToken)
+    {
+        if (await HasColumnAsync(connection, "connector", "HanaDatabaseJson", cancellationToken))
+            return;
+
+        const string sql = """ALTER TABLE dbo."connector" ADD COLUMN IF NOT EXISTS "HanaDatabaseJson" text NULL;""";
+        await using var cmd = new NpgsqlCommand(sql, connection) { CommandTimeout = 60 };
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task<bool> TableExistsAsync(NpgsqlConnection connection, string tableName, CancellationToken cancellationToken)

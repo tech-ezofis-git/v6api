@@ -14,15 +14,18 @@ public sealed class ConnectorController : ControllerBase
     private readonly IConnectorService _connectorService;
     private readonly IConnectorOAuthService _oauthService;
     private readonly ISapPurchaseOrderLookupService _sapPurchaseOrderLookup;
+    private readonly IHanaCloudPurchaseOrderService _hanaPurchaseOrders;
 
     public ConnectorController(
         IConnectorService connectorService,
         IConnectorOAuthService oauthService,
-        ISapPurchaseOrderLookupService sapPurchaseOrderLookup)
+        ISapPurchaseOrderLookupService sapPurchaseOrderLookup,
+        IHanaCloudPurchaseOrderService hanaPurchaseOrders)
     {
         _connectorService = connectorService;
         _oauthService = oauthService;
         _sapPurchaseOrderLookup = sapPurchaseOrderLookup;
+        _hanaPurchaseOrders = hanaPurchaseOrders;
     }
 
     /// <summary>Create a new connector (v5 POST /api/connector).</summary>
@@ -457,6 +460,90 @@ public sealed class ConnectorController : ControllerBase
             return BadRequest(new { error = ex.Message });
         }
         catch (NotSupportedException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Fetch purchase orders from the HANA Cloud database saved on this connector.
+    /// Omit poNumber to return every row in PURCHASE_ORDERS.
+    /// </summary>
+    [HttpGet("{id:guid}/hana/purchase-orders")]
+    [ProducesResponseType(typeof(ConnectorHanaPoLookupResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public Task<IActionResult> ListHanaPurchaseOrders(
+        Guid id,
+        [FromQuery] string? poNumber,
+        CancellationToken cancellationToken = default) =>
+        FetchHanaPurchaseOrdersAsync(id, poNumber, cancellationToken);
+
+    /// <summary>
+    /// Same as GET /hana/purchase-orders. Body poNumber is optional.
+    /// </summary>
+    [HttpPost("{id:guid}/hana/purchase-orders")]
+    [ProducesResponseType(typeof(ConnectorHanaPoLookupResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public Task<IActionResult> ListHanaPurchaseOrdersPost(
+        Guid id,
+        [FromBody] ConnectorHanaPoLookupRequest? request,
+        CancellationToken cancellationToken = default) =>
+        FetchHanaPurchaseOrdersAsync(id, request?.PoNumber, cancellationToken);
+
+    /// <summary>
+    /// Save one invoice match for a PO. The same PO can have many instance ids in PO_INVOICE_MATCH.
+    /// Call again with the same instanceId and a new status to update that row only.
+    /// </summary>
+    [HttpPost("{id:guid}/hana/purchase-orders/match")]
+    [ProducesResponseType(typeof(ConnectorHanaPoMatchResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> MatchHanaPurchaseOrder(
+        Guid id,
+        [FromBody] ConnectorHanaPoMatchRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        if (request is null || string.IsNullOrWhiteSpace(request.PoNumber))
+            return BadRequest(new { error = "poNumber is required." });
+        if (string.IsNullOrWhiteSpace(request.InstanceId))
+            return BadRequest(new { error = "instanceId is required. One PO can match many instances." });
+
+        try
+        {
+            var result = await _hanaPurchaseOrders.MatchAsync(id, request, cancellationToken);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private async Task<IActionResult> FetchHanaPurchaseOrdersAsync(
+        Guid id,
+        string? poNumber,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _hanaPurchaseOrders.ListAsync(id, poNumber, cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
         }

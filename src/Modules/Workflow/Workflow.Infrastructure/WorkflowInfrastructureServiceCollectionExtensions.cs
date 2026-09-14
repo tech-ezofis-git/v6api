@@ -71,6 +71,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IFormMasterFileUploadService, FormMasterFileUploadService>();
         services.AddScoped<IConnectorService, ConnectorService>();
         services.AddScoped<ISapPurchaseOrderLookupService, SapPurchaseOrderLookupService>();
+        services.AddScoped<IHanaCloudPurchaseOrderService, HanaCloudPurchaseOrderService>();
         services.AddHttpClient(nameof(SapPurchaseOrderLookupService));
         services.Configure<ConnectorOAuthOptions>(configuration.GetSection(ConnectorOAuthOptions.SectionName));
         services.AddHttpClient(nameof(IConnectorProviderAdapter));
