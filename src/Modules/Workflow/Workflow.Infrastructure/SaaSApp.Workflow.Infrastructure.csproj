@@ -10,6 +10,7 @@
   <ItemGroup>
     <!-- Postgres (new) -->
     <PackageReference Include="Npgsql" Version="8.0.9" />
+    <PackageReference Include="Sap.Data.Hana.Net.v8.0" Version="2.29.25" />
     <PackageReference Include="Npgsql.EntityFrameworkCore.PostgreSQL" Version="8.0.11" />
     <!-- Direct reference now that Microsoft.Data.SqlClient (Phase 9 removal) no longer pulls this
          in transitively; CurrentUserProvider.cs uses System.IdentityModel.Tokens.Jwt directly.
@@ -25,6 +26,10 @@
       <PrivateAssets>all</PrivateAssets>
       <IncludeAssets>runtime; build; native; contentfiles; analyzers; buildtransitive</IncludeAssets>
     </PackageReference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="SaaSApp.Workflow.Infrastructure.Tests" />
   </ItemGroup>
 
   <ItemGroup>

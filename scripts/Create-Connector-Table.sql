@@ -108,3 +108,11 @@ BEGIN
     PRINT 'dbo.connector already on modern schema.';
 END
 GO
+
+IF OBJECT_ID(N'[dbo].[connector]', N'U') IS NOT NULL
+   AND COL_LENGTH('dbo.connector', 'HanaDatabaseJson') IS NULL
+BEGIN
+    ALTER TABLE [dbo].[connector] ADD [HanaDatabaseJson] NVARCHAR(MAX) NULL;
+    PRINT 'dbo.connector.HanaDatabaseJson added.';
+END
+GO

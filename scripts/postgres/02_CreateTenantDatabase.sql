@@ -401,10 +401,12 @@ CREATE TABLE IF NOT EXISTS dbo."connector" (
     "ModifiedAtUtc" timestamptz NULL,
     "CreatedBy" uuid NOT NULL,
     "ModifiedBy" uuid NULL,
-    "IsDeleted" boolean NOT NULL DEFAULT false
+    "IsDeleted" boolean NOT NULL DEFAULT false,
+    "HanaDatabaseJson" text NULL
 );
 CREATE INDEX IF NOT EXISTS "IX_connector_IsDeleted" ON dbo."connector" ("IsDeleted");
 CREATE INDEX IF NOT EXISTS "IX_connector_ProviderCode" ON dbo."connector" ("ProviderCode") WHERE "IsDeleted" = false;
+ALTER TABLE dbo."connector" ADD COLUMN IF NOT EXISTS "HanaDatabaseJson" text NULL;
 
 -- =============================================
 -- PART 6: WORKFLOW EF MIGRATIONS HISTORY -- DROPPED, NOT PORTED

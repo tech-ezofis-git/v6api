@@ -387,22 +387,29 @@ if (hangfireEnabled)
     });
 
     var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
-    if (emailIngestHangfire)
+    try
     {
-        var cron = app.Configuration.GetValue("EmailIngest:HangfireCron", "*/30 * * * * *")
-                   ?? "*/30 * * * * *";
-        RecurringJob.AddOrUpdate<RunEmailIngestPollJob>(
-            "email-ingest-poll",
-            job => job.Execute(null),
-            cron);
-        Log.Information(
-            "Registered Hangfire email-ingest-poll cron={Cron} (only tenants with enabled mailboxes)",
-            cron);
+        if (emailIngestHangfire)
+        {
+            var cron = app.Configuration.GetValue("EmailIngest:HangfireCron", "*/30 * * * * *")
+                       ?? "*/30 * * * * *";
+            RecurringJob.AddOrUpdate<RunEmailIngestPollJob>(
+                "email-ingest-poll",
+                job => job.Execute(null),
+                cron);
+            Log.Information(
+                "Registered Hangfire email-ingest-poll cron={Cron} (only tenants with enabled mailboxes)",
+                cron);
+        }
+        else
+        {
+            RecurringJob.RemoveIfExists("email-ingest-poll");
+            Log.Information("Email ingest Hangfire job disabled (EmailIngest:HangfireEnabled=false)");
+        }
     }
-    else
+    catch (Exception ex)
     {
-        RecurringJob.RemoveIfExists("email-ingest-poll");
-        Log.Information("Email ingest Hangfire job disabled (EmailIngest:HangfireEnabled=false)");
+        Log.Warning(ex, "Hangfire storage could not be reached. API will start without the email-ingest recurring job.");
     }
 }
 
