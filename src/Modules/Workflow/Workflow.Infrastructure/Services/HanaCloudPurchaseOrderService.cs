@@ -102,41 +102,15 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
     }
 
     public async Task<bool> TryMarkPaidByInstanceIdAsync(
+        Guid connectorId,
         Guid instanceId,
         CancellationToken cancellationToken = default)
     {
-        if (instanceId == Guid.Empty)
+        if (connectorId == Guid.Empty || instanceId == Guid.Empty)
             return false;
 
-        var connectorId = await FindHanaConnectorIdAsync(cancellationToken);
-        if (connectorId is null)
-            return false;
-
-        var settings = await LoadSettingsAsync(connectorId.Value, cancellationToken);
+        var settings = await LoadSettingsAsync(connectorId, cancellationToken);
         return MarkPaidByInstanceId(settings, instanceId.ToString("D"));
-    }
-
-    private async Task<Guid?> FindHanaConnectorIdAsync(CancellationToken cancellationToken)
-    {
-        var connectionString = _tenantContext.ConnectionString
-            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
-
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
-        await EnsureColumnAsync(connection, cancellationToken);
-
-        const string sql = """
-            SELECT "Id"
-            FROM dbo."connector"
-            WHERE "IsDeleted" = false
-              AND "HanaDatabaseJson" IS NOT NULL
-              AND BTRIM("HanaDatabaseJson") <> ''
-            ORDER BY "IsDefault" DESC, "ModifiedAtUtc" DESC NULLS LAST, "CreatedAtUtc" DESC
-            LIMIT 1;
-            """;
-        await using var cmd = new NpgsqlCommand(sql, connection);
-        var raw = await cmd.ExecuteScalarAsync(cancellationToken);
-        return raw is Guid id ? id : null;
     }
 
     private static bool MarkPaidByInstanceId(HanaDatabaseSettings settings, string instanceId)
