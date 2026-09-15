@@ -27,6 +27,7 @@ The connector row must already have `dbo.connector.HanaDatabaseJson` (host, port
 | `MATCH_STATUS` | Match status, for example `Matched` or `Approved` |
 | `INVOICE_STATUS` | Invoice status |
 | `ITEMS` | Invoice line items as a JSON array |
+| `PAYMENT_DATE` | Set to UTC date when the invoice is marked Paid |
 | `CREATED_AT` / `UPDATED_AT` | Row timestamps |
 
 ---
@@ -269,7 +270,8 @@ When Accounts Payable moves into a step whose name contains `Paid`, the API:
 1. Reads `Blocks[].Settings.apAgent.connectorId` from the workflow JSON
 2. Uses that connector’s `HanaDatabaseJson` to update `PO_INVOICE_MATCH` by `INSTANCE_ID`
 
-- Row found → set `MATCH_STATUS` and `INVOICE_STATUS` to `Paid`
+- Row found → set `INVOICE_STATUS` to `Paid` and `PAYMENT_DATE` to today’s UTC date (`MATCH_STATUS` is left unchanged)
+- Triggered when move-next `review` contains `Paid`, or when the next/completed step name contains `Paid`
 - No connector id / no row → leave HANA unchanged (non-HANA invoices)
 
 No extra client call is required for that case.

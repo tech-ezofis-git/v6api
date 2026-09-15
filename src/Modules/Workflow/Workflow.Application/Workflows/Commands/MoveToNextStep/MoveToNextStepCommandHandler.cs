@@ -397,16 +397,18 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             currentTransactionId: legacySync.CurrentTransactionId,
             nextTransactionId: isCompleted ? null : legacySync.NextTransactionId);
 
-        // HANA invoices only: use apAgent.connectorId from workflow JSON → PO_INVOICE_MATCH Paid.
-        // Non-HANA / missing connector / no match row → no change. Failures must not block the move.
-        if (IsPaidStep(notifyNextStep) || (isCompleted && IsPaidStep(targetDefinitionStep)))
+        // HANA invoices only: Paid when review is Paid, or when moving to / completing a Paid-named step.
+        // Uses apAgent.connectorId (or PoMaster.masterConnectorId) → PO_INVOICE_MATCH.
+        if (IsPaidReview(request.Review)
+            || IsPaidStep(nextDefinitionStep)
+            || (isCompleted && IsPaidStep(targetDefinitionStep)))
         {
             try
             {
                 var workflowJson = await _workflowJsonStorage.GetWorkflowJsonAsync(
                     instance.WorkflowId,
                     cancellationToken);
-                if (WorkflowApAgentJson.TryReadConnectorId(workflowJson, out var hanaConnectorId))
+                if (TryResolveHanaConnectorId(workflowJson, out var hanaConnectorId))
                 {
                     await _hanaPurchaseOrders.TryMarkPaidByInstanceIdAsync(
                         hanaConnectorId,
@@ -477,6 +479,27 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private static bool IsPaidStep(WorkflowStep? step) =>
         !string.IsNullOrWhiteSpace(step?.Name)
         && step!.Name.Contains("paid", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsPaidReview(string? review) =>
+        !string.IsNullOrWhiteSpace(review)
+        && review.Trim().Contains("paid", StringComparison.OrdinalIgnoreCase);
+
+    private static bool TryResolveHanaConnectorId(string? workflowJson, out Guid connectorId)
+    {
+        if (WorkflowApAgentJson.TryReadConnectorId(workflowJson, out connectorId))
+            return true;
+
+        if (WorkflowPoMasterJson.TryRead(workflowJson, out _, out var masterConnectorId, out _)
+            && masterConnectorId is { } mid
+            && mid != Guid.Empty)
+        {
+            connectorId = mid;
+            return true;
+        }
+
+        connectorId = Guid.Empty;
+        return false;
+    }
 
     private static bool HasUserFormData(MoveToNextStepCommand request) =>
         !string.IsNullOrWhiteSpace(request.SubmittedFormDataJson)
