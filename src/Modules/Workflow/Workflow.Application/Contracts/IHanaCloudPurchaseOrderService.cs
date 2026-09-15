@@ -21,4 +21,12 @@ public interface IHanaCloudPurchaseOrderService
         Guid connectorId,
         ConnectorHanaPoMatchRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// If a PO_INVOICE_MATCH row exists for this workflow instance, set MATCH_STATUS and INVOICE_STATUS to Paid.
+    /// No-op when no HANA connector or no match row. Returns true only when a row was updated.
+    /// </summary>
+    Task<bool> TryMarkPaidByInstanceIdAsync(
+        Guid instanceId,
+        CancellationToken cancellationToken = default);
 }
