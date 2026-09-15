@@ -50,6 +50,29 @@ internal static class HanaCloudPurchaseOrderMapper
         return any ? total : null;
     }
 
+    public static string? SerializeItems(IReadOnlyList<ConnectorHanaPoLineDto>? lines)
+    {
+        if (lines is null || lines.Count == 0)
+            return null;
+
+        var payload = lines.Select(line => new Dictionary<string, object?>
+        {
+            ["item_number"] = line.ItemNumber,
+            ["item_category"] = line.ItemCategory,
+            ["material_id"] = line.MaterialId,
+            ["material_description"] = line.MaterialDescription,
+            ["material_group"] = line.MaterialGroup,
+            ["plant"] = line.Plant,
+            ["order_quantity"] = line.OrderQuantity,
+            ["unit_of_measure"] = line.UnitOfMeasure,
+            ["net_price"] = line.NetPrice,
+            ["price_unit"] = line.PriceUnit,
+            ["net_value"] = line.NetValue
+        });
+
+        return JsonSerializer.Serialize(payload);
+    }
+
     private static string? ReadString(JsonElement item, string name) =>
         item.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String
             ? value.GetString()

@@ -51,14 +51,40 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         var poNumber = request.PoNumber.Trim();
         var instanceId = Clean(request.InstanceId, 128, "instanceId");
         var invoiceNumber = Clean(request.InvoiceNumber, 64, "invoiceNumber");
+        var supplierName = Clean(request.SupplierName, 256, "supplierName");
+        var invoiceDate = ParseInvoiceDate(request.InvoiceDate);
+        var currency = Clean(request.Currency, 16, "currency");
         var status = Clean(request.Status, 64, "status");
+        var invoiceStatus = Clean(request.InvoiceStatus, 64, "invoiceStatus");
+        var itemsJson = HanaCloudPurchaseOrderMapper.SerializeItems(request.Items);
         if (instanceId is null)
             throw new ArgumentException("instanceId is required. One PO can match many instances.");
-        if (invoiceNumber is null && status is null)
-            throw new ArgumentException("invoiceNumber or status is required.");
+        if (invoiceNumber is null
+            && supplierName is null
+            && invoiceDate is null
+            && currency is null
+            && request.TotalAmount is null
+            && status is null
+            && invoiceStatus is null
+            && itemsJson is null)
+        {
+            throw new ArgumentException(
+                "invoiceNumber, supplierName, invoiceDate, currency, totalAmount, status, invoiceStatus, or items is required.");
+        }
 
         var settings = await LoadSettingsAsync(connectorId, cancellationToken);
-        var saved = SaveMatch(settings, poNumber, instanceId, invoiceNumber, status);
+        var saved = SaveMatch(
+            settings,
+            poNumber,
+            instanceId,
+            invoiceNumber,
+            supplierName,
+            invoiceDate,
+            currency,
+            request.TotalAmount,
+            status,
+            invoiceStatus,
+            itemsJson);
         return new ConnectorHanaPoMatchResponse(
             true,
             saved.Created,
@@ -66,7 +92,80 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
             saved.PoNumber,
             saved.InstanceId,
             saved.InvoiceNumber,
-            saved.Status);
+            saved.SupplierName,
+            saved.InvoiceDate,
+            saved.Currency,
+            saved.TotalAmount,
+            saved.Status,
+            saved.InvoiceStatus,
+            HanaCloudPurchaseOrderMapper.ParseItems(saved.ItemsJson));
+    }
+
+    public async Task<bool> TryMarkPaidByInstanceIdAsync(
+        Guid instanceId,
+        CancellationToken cancellationToken = default)
+    {
+        if (instanceId == Guid.Empty)
+            return false;
+
+        var connectorId = await FindHanaConnectorIdAsync(cancellationToken);
+        if (connectorId is null)
+            return false;
+
+        var settings = await LoadSettingsAsync(connectorId.Value, cancellationToken);
+        return MarkPaidByInstanceId(settings, instanceId.ToString("D"));
+    }
+
+    private async Task<Guid?> FindHanaConnectorIdAsync(CancellationToken cancellationToken)
+    {
+        var connectionString = _tenantContext.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await EnsureColumnAsync(connection, cancellationToken);
+
+        const string sql = """
+            SELECT "Id"
+            FROM dbo."connector"
+            WHERE "IsDeleted" = false
+              AND "HanaDatabaseJson" IS NOT NULL
+              AND BTRIM("HanaDatabaseJson") <> ''
+            ORDER BY "IsDefault" DESC, "ModifiedAtUtc" DESC NULLS LAST, "CreatedAtUtc" DESC
+            LIMIT 1;
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        var raw = await cmd.ExecuteScalarAsync(cancellationToken);
+        return raw is Guid id ? id : null;
+    }
+
+    private static bool MarkPaidByInstanceId(HanaDatabaseSettings settings, string instanceId)
+    {
+        var matchTable = $"{QuoteIdent(settings.Schema)}.{QuoteIdent(MatchTable)}";
+        try
+        {
+            using var conn = OpenConnection(settings);
+            EnsureMatchTable(conn, settings);
+            using var update = new HanaCommand(
+                $"""
+                UPDATE {matchTable}
+                SET "MATCH_STATUS" = ?, "INVOICE_STATUS" = ?, "UPDATED_AT" = ?
+                WHERE "INSTANCE_ID" = ?
+                """,
+                conn);
+            update.CommandTimeout = 30;
+            var now = DateTime.UtcNow;
+            update.Parameters.Add(new HanaParameter { Value = "Paid" });
+            update.Parameters.Add(new HanaParameter { Value = "Paid" });
+            update.Parameters.Add(new HanaParameter { Value = now });
+            update.Parameters.Add(new HanaParameter { Value = instanceId });
+            return update.ExecuteNonQuery() > 0;
+        }
+        catch (Exception ex) when (ex is not InvalidOperationException)
+        {
+            throw new InvalidOperationException(
+                "HANA Cloud paid-status update failed: " + Truncate(ex.Message, 400));
+        }
     }
 
     private async Task<HanaDatabaseSettings> LoadSettingsAsync(Guid connectorId, CancellationToken cancellationToken)
@@ -185,7 +284,13 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         string poNumber,
         string instanceId,
         string? invoiceNumber,
-        string? status)
+        string? supplierName,
+        DateTime? invoiceDate,
+        string? currency,
+        decimal? totalAmount,
+        string? status,
+        string? invoiceStatus,
+        string? itemsJson)
     {
         var poTable = $"{QuoteIdent(settings.Schema)}.{QuoteIdent(settings.Table)}";
         var matchTable = $"{QuoteIdent(settings.Schema)}.{QuoteIdent(MatchTable)}";
@@ -208,8 +313,10 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                 using var insert = new HanaCommand(
                     $"""
                     INSERT INTO {matchTable}
-                    ("MATCH_ID", "PO_NUMBER", "INSTANCE_ID", "INVOICE_NUMBER", "MATCH_STATUS", "CREATED_AT", "UPDATED_AT")
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ("MATCH_ID", "PO_NUMBER", "INSTANCE_ID", "INVOICE_NUMBER", "SUPPLIER_NAME",
+                     "INVOICE_DATE", "CURRENCY", "TOTAL_AMOUNT", "MATCH_STATUS", "INVOICE_STATUS",
+                     "ITEMS", "CREATED_AT", "UPDATED_AT")
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     conn);
                 insert.CommandTimeout = 30;
@@ -217,25 +324,48 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                 insert.Parameters.Add(new HanaParameter { Value = poNumber });
                 insert.Parameters.Add(new HanaParameter { Value = instanceId });
                 insert.Parameters.Add(new HanaParameter { Value = invoiceNumber });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)supplierName ?? DBNull.Value });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)invoiceDate ?? DBNull.Value });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)currency ?? DBNull.Value });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)totalAmount ?? DBNull.Value });
                 insert.Parameters.Add(new HanaParameter { Value = status });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)invoiceStatus ?? DBNull.Value });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)itemsJson ?? DBNull.Value });
                 insert.Parameters.Add(new HanaParameter { Value = now });
                 insert.Parameters.Add(new HanaParameter { Value = now });
                 insert.ExecuteNonQuery();
-                return new MatchSnapshot(true, poNumber, instanceId, invoiceNumber, status);
+                return new MatchSnapshot(
+                    true,
+                    poNumber,
+                    instanceId,
+                    invoiceNumber,
+                    supplierName,
+                    FormatDate(invoiceDate),
+                    currency,
+                    totalAmount,
+                    status,
+                    invoiceStatus,
+                    itemsJson);
             }
 
             var sets = new List<string> { "\"UPDATED_AT\" = ?" };
             var values = new List<object> { now };
-            if (invoiceNumber is not null)
+            void Set(string column, object? value)
             {
-                sets.Add("\"INVOICE_NUMBER\" = ?");
-                values.Add(invoiceNumber);
+                if (value is null)
+                    return;
+                sets.Add($"\"{column}\" = ?");
+                values.Add(value);
             }
-            if (status is not null)
-            {
-                sets.Add("\"MATCH_STATUS\" = ?");
-                values.Add(status);
-            }
+
+            Set("INVOICE_NUMBER", invoiceNumber);
+            Set("SUPPLIER_NAME", supplierName);
+            Set("INVOICE_DATE", invoiceDate);
+            Set("CURRENCY", currency);
+            Set("TOTAL_AMOUNT", totalAmount);
+            Set("MATCH_STATUS", status);
+            Set("INVOICE_STATUS", invoiceStatus);
+            Set("ITEMS", itemsJson);
 
             using var update = new HanaCommand(
                 $"UPDATE {matchTable} SET {string.Join(", ", sets)} WHERE \"PO_NUMBER\" = ? AND \"INSTANCE_ID\" = ?",
@@ -251,7 +381,13 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                 poNumber,
                 instanceId,
                 invoiceNumber ?? existing!.InvoiceNumber,
-                status ?? existing.Status);
+                supplierName ?? existing.SupplierName,
+                FormatDate(invoiceDate) ?? existing.InvoiceDate,
+                currency ?? existing.Currency,
+                totalAmount ?? existing.TotalAmount,
+                status ?? existing.Status,
+                invoiceStatus ?? existing.InvoiceStatus,
+                itemsJson ?? existing.ItemsJson);
         }
         catch (Exception ex) when (ex is not InvalidOperationException and not ArgumentException)
         {
@@ -270,7 +406,8 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         var matchTable = $"{QuoteIdent(settings.Schema)}.{QuoteIdent(MatchTable)}";
         using var cmd = new HanaCommand(
             $"""
-            SELECT "INSTANCE_ID", "INVOICE_NUMBER", "MATCH_STATUS"
+            SELECT "INSTANCE_ID", "INVOICE_NUMBER", "SUPPLIER_NAME", "INVOICE_DATE",
+                   "CURRENCY", "TOTAL_AMOUNT", "MATCH_STATUS", "INVOICE_STATUS", "ITEMS"
             FROM {matchTable}
             WHERE "PO_NUMBER" = ?
             ORDER BY "UPDATED_AT" DESC, "INSTANCE_ID"
@@ -284,7 +421,13 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
             links.Add(new ConnectorHanaPoMatchLinkDto(
                 ReadString(reader, 0),
                 ReadString(reader, 1),
-                ReadString(reader, 2)));
+                ReadString(reader, 2),
+                ReadDate(reader, 3),
+                ReadString(reader, 4),
+                ReadDecimal(reader, 5),
+                ReadString(reader, 6),
+                ReadString(reader, 7),
+                HanaCloudPurchaseOrderMapper.ParseItems(ReadString(reader, 8))));
         }
 
         return links;
@@ -301,7 +444,8 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
     {
         using var cmd = new HanaCommand(
             $"""
-            SELECT "PO_NUMBER", "INSTANCE_ID", "INVOICE_NUMBER", "MATCH_STATUS"
+            SELECT "PO_NUMBER", "INSTANCE_ID", "INVOICE_NUMBER", "SUPPLIER_NAME", "INVOICE_DATE",
+                   "CURRENCY", "TOTAL_AMOUNT", "MATCH_STATUS", "INVOICE_STATUS", "ITEMS"
             FROM {matchTable}
             WHERE "PO_NUMBER" = ? AND "INSTANCE_ID" = ?
             """,
@@ -318,7 +462,13 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
             ReadString(reader, 0) ?? poNumber,
             ReadString(reader, 1) ?? instanceId,
             ReadString(reader, 2),
-            ReadString(reader, 3));
+            ReadString(reader, 3),
+            ReadDate(reader, 4),
+            ReadString(reader, 5),
+            ReadDecimal(reader, 6),
+            ReadString(reader, 7),
+            ReadString(reader, 8),
+            ReadString(reader, 9));
     }
 
     private static void EnsureMatchTable(HanaConnection conn, HanaDatabaseSettings settings)
@@ -333,25 +483,65 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         exists.Parameters.Add(new HanaParameter { Value = settings.Schema });
         exists.Parameters.Add(new HanaParameter { Value = MatchTable });
         var count = Convert.ToInt32(exists.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
+        var table = $"{QuoteIdent(settings.Schema)}.{QuoteIdent(MatchTable)}";
+        if (count == 0)
+        {
+            using var create = new HanaCommand(
+                $"""
+                CREATE COLUMN TABLE {table} (
+                    "MATCH_ID" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
+                    "PO_NUMBER" NVARCHAR(40) NOT NULL,
+                    "INSTANCE_ID" NVARCHAR(128) NOT NULL,
+                    "INVOICE_NUMBER" NVARCHAR(64),
+                    "SUPPLIER_NAME" NVARCHAR(256),
+                    "INVOICE_DATE" DATE,
+                    "CURRENCY" NVARCHAR(16),
+                    "TOTAL_AMOUNT" DECIMAL(21, 6),
+                    "MATCH_STATUS" NVARCHAR(64),
+                    "INVOICE_STATUS" NVARCHAR(64),
+                    "ITEMS" NCLOB,
+                    "CREATED_AT" TIMESTAMP,
+                    "UPDATED_AT" TIMESTAMP,
+                    UNIQUE ("PO_NUMBER", "INSTANCE_ID")
+                )
+                """,
+                conn);
+            create.ExecuteNonQuery();
+            return;
+        }
+
+        EnsureMatchColumn(conn, settings, "SUPPLIER_NAME", "NVARCHAR(256)");
+        EnsureMatchColumn(conn, settings, "INVOICE_DATE", "DATE");
+        EnsureMatchColumn(conn, settings, "CURRENCY", "NVARCHAR(16)");
+        EnsureMatchColumn(conn, settings, "TOTAL_AMOUNT", "DECIMAL(21, 6)");
+        EnsureMatchColumn(conn, settings, "INVOICE_STATUS", "NVARCHAR(64)");
+        EnsureMatchColumn(conn, settings, "ITEMS", "NCLOB");
+    }
+
+    private static void EnsureMatchColumn(
+        HanaConnection conn,
+        HanaDatabaseSettings settings,
+        string column,
+        string sqlType)
+    {
+        using var exists = new HanaCommand(
+            """
+            SELECT COUNT(*)
+            FROM SYS.TABLE_COLUMNS
+            WHERE SCHEMA_NAME = ? AND TABLE_NAME = ? AND COLUMN_NAME = ?
+            """,
+            conn);
+        exists.Parameters.Add(new HanaParameter { Value = settings.Schema });
+        exists.Parameters.Add(new HanaParameter { Value = MatchTable });
+        exists.Parameters.Add(new HanaParameter { Value = column });
+        var count = Convert.ToInt32(exists.ExecuteScalar(), System.Globalization.CultureInfo.InvariantCulture);
         if (count > 0)
             return;
 
-        var table = $"{QuoteIdent(settings.Schema)}.{QuoteIdent(MatchTable)}";
-        using var create = new HanaCommand(
-            $"""
-            CREATE COLUMN TABLE {table} (
-                "MATCH_ID" BIGINT GENERATED BY DEFAULT AS IDENTITY PRIMARY KEY,
-                "PO_NUMBER" NVARCHAR(40) NOT NULL,
-                "INSTANCE_ID" NVARCHAR(128) NOT NULL,
-                "INVOICE_NUMBER" NVARCHAR(64),
-                "MATCH_STATUS" NVARCHAR(64),
-                "CREATED_AT" TIMESTAMP,
-                "UPDATED_AT" TIMESTAMP,
-                UNIQUE ("PO_NUMBER", "INSTANCE_ID")
-            )
-            """,
-            conn);
-        create.ExecuteNonQuery();
+        var alter =
+            $"ALTER TABLE {QuoteIdent(settings.Schema)}.{QuoteIdent(MatchTable)} ADD (\"{column}\" {sqlType})";
+        using var cmd = new HanaCommand(alter, conn);
+        cmd.ExecuteNonQuery();
     }
 
     private static HanaConnection OpenConnection(HanaDatabaseSettings settings)
@@ -394,6 +584,32 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         return trimmed;
     }
 
+    private static DateTime? ParseInvoiceDate(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        if (DateTime.TryParse(
+                value.Trim(),
+                System.Globalization.CultureInfo.InvariantCulture,
+                System.Globalization.DateTimeStyles.AssumeUniversal | System.Globalization.DateTimeStyles.AdjustToUniversal,
+                out var dt))
+        {
+            return dt.Date;
+        }
+
+        throw new ArgumentException("invoiceDate must be a valid date, e.g. 2026-09-14.");
+    }
+
+    private static string? FormatDate(DateTime? value) =>
+        value?.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static decimal? ReadDecimal(HanaDataReader reader, int ordinal)
+    {
+        if (reader.IsDBNull(ordinal))
+            return null;
+        return Convert.ToDecimal(reader.GetValue(ordinal), System.Globalization.CultureInfo.InvariantCulture);
+    }
+
     private static string QuoteIdent(string name)
     {
         if (!SafeIdent.IsMatch(name))
@@ -426,7 +642,13 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         string PoNumber,
         string? InstanceId,
         string? InvoiceNumber,
-        string? Status);
+        string? SupplierName,
+        string? InvoiceDate,
+        string? Currency,
+        decimal? TotalAmount,
+        string? Status,
+        string? InvoiceStatus,
+        string? ItemsJson);
 
     private sealed record HanaDatabaseSettings(
         string Host,

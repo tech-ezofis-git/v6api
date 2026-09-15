@@ -16,6 +16,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IWorkflowEzfbFormDataLoader _ezfbFormDataLoader;
     private readonly IWorkflowPdfGenerationService _pdfGeneration;
     private readonly IWorkflowMoveNotificationService _moveNotifications;
+    private readonly IHanaCloudPurchaseOrderService _hanaPurchaseOrders;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
 
@@ -28,6 +29,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IWorkflowEzfbFormDataLoader ezfbFormDataLoader,
         IWorkflowPdfGenerationService pdfGeneration,
         IWorkflowMoveNotificationService moveNotifications,
+        IHanaCloudPurchaseOrderService hanaPurchaseOrders,
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider)
     {
@@ -39,6 +41,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _ezfbFormDataLoader = ezfbFormDataLoader;
         _pdfGeneration = pdfGeneration;
         _moveNotifications = moveNotifications;
+        _hanaPurchaseOrders = hanaPurchaseOrders;
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
     }
@@ -391,6 +394,20 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             currentTransactionId: legacySync.CurrentTransactionId,
             nextTransactionId: isCompleted ? null : legacySync.NextTransactionId);
 
+        // HANA invoices only: if this instance has a PO_INVOICE_MATCH row, mark it Paid.
+        // Non-HANA invoices have no row → no change. Failures must not block the move.
+        if (IsPaidStep(notifyNextStep) || (isCompleted && IsPaidStep(targetDefinitionStep)))
+        {
+            try
+            {
+                await _hanaPurchaseOrders.TryMarkPaidByInstanceIdAsync(instance.Id, cancellationToken);
+            }
+            catch
+            {
+                // Leave workflow move successful; HANA mark can be retried via match API.
+            }
+        }
+
         return new MoveToNextStepCommandResult(
             true,
             resultMessage,
@@ -444,6 +461,10 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             || string.Equals(s.Id.ToString("D"), id, StringComparison.OrdinalIgnoreCase)
             || string.Equals(s.Id.ToString("N"), id, StringComparison.OrdinalIgnoreCase));
     }
+
+    private static bool IsPaidStep(WorkflowStep? step) =>
+        !string.IsNullOrWhiteSpace(step?.Name)
+        && step!.Name.Contains("paid", StringComparison.OrdinalIgnoreCase);
 
     private static bool HasUserFormData(MoveToNextStepCommand request) =>
         !string.IsNullOrWhiteSpace(request.SubmittedFormDataJson)

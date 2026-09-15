@@ -19,7 +19,13 @@ public sealed record ConnectorHanaPoLineDto(
 public sealed record ConnectorHanaPoMatchLinkDto(
     string? InstanceId,
     string? InvoiceNumber,
-    string? Status);
+    string? SupplierName,
+    string? InvoiceDate,
+    string? Currency,
+    decimal? TotalAmount,
+    string? Status,
+    string? InvoiceStatus,
+    IReadOnlyList<ConnectorHanaPoLineDto> Items);
 
 public sealed record ConnectorHanaPurchaseOrderDto(
     string? PoNumber,
@@ -40,13 +46,19 @@ public sealed record ConnectorHanaPurchaseOrderDto(
 /// <summary>
 /// One row in PO_INVOICE_MATCH. The same PO can have many instance ids.
 /// instanceId + poNumber identify the row. Send invoiceNumber to create the link.
-/// Send status later to update that instance only.
+/// Send status / invoice fields later to update that instance only.
 /// </summary>
 public sealed record ConnectorHanaPoMatchRequest(
     string PoNumber,
     string? InstanceId = null,
     string? InvoiceNumber = null,
-    string? Status = null);
+    string? SupplierName = null,
+    string? InvoiceDate = null,
+    string? Currency = null,
+    decimal? TotalAmount = null,
+    string? Status = null,
+    string? InvoiceStatus = null,
+    IReadOnlyList<ConnectorHanaPoLineDto>? Items = null);
 
 public sealed record ConnectorHanaPoMatchResponse(
     bool Updated,
@@ -55,7 +67,13 @@ public sealed record ConnectorHanaPoMatchResponse(
     string PoNumber,
     string? InstanceId,
     string? InvoiceNumber,
-    string? Status);
+    string? SupplierName,
+    string? InvoiceDate,
+    string? Currency,
+    decimal? TotalAmount,
+    string? Status,
+    string? InvoiceStatus,
+    IReadOnlyList<ConnectorHanaPoLineDto> Items);
 
 public sealed record ConnectorHanaPoLookupResponse(
     bool Found,
