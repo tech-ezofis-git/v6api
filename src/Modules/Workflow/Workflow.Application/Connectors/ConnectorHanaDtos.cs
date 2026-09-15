@@ -25,7 +25,8 @@ public sealed record ConnectorHanaPoMatchLinkDto(
     decimal? TotalAmount,
     string? Status,
     string? InvoiceStatus,
-    IReadOnlyList<ConnectorHanaPoLineDto> Items);
+    IReadOnlyList<ConnectorHanaPoLineDto> Items,
+    string? PaymentDate = null);
 
 public sealed record ConnectorHanaPurchaseOrderDto(
     string? PoNumber,

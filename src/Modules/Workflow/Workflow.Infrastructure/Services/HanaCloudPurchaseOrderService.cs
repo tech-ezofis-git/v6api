@@ -123,14 +123,14 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
             using var update = new HanaCommand(
                 $"""
                 UPDATE {matchTable}
-                SET "MATCH_STATUS" = ?, "INVOICE_STATUS" = ?, "UPDATED_AT" = ?
+                SET "INVOICE_STATUS" = ?, "PAYMENT_DATE" = ?, "UPDATED_AT" = ?
                 WHERE "INSTANCE_ID" = ?
                 """,
                 conn);
             update.CommandTimeout = 30;
             var now = DateTime.UtcNow;
             update.Parameters.Add(new HanaParameter { Value = "Paid" });
-            update.Parameters.Add(new HanaParameter { Value = "Paid" });
+            update.Parameters.Add(new HanaParameter { Value = now.Date });
             update.Parameters.Add(new HanaParameter { Value = now });
             update.Parameters.Add(new HanaParameter { Value = instanceId });
             return update.ExecuteNonQuery() > 0;
@@ -284,13 +284,14 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                 if (invoiceNumber is null)
                     throw new ArgumentException("invoiceNumber is required when creating a match.");
                 status ??= "Matched";
+                var paymentDate = IsPaidValue(status) || IsPaidValue(invoiceStatus) ? now.Date : (DateTime?)null;
                 using var insert = new HanaCommand(
                     $"""
                     INSERT INTO {matchTable}
                     ("MATCH_ID", "PO_NUMBER", "INSTANCE_ID", "INVOICE_NUMBER", "SUPPLIER_NAME",
                      "INVOICE_DATE", "CURRENCY", "TOTAL_AMOUNT", "MATCH_STATUS", "INVOICE_STATUS",
-                     "ITEMS", "CREATED_AT", "UPDATED_AT")
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     "ITEMS", "PAYMENT_DATE", "CREATED_AT", "UPDATED_AT")
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     conn);
                 insert.CommandTimeout = 30;
@@ -305,6 +306,7 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                 insert.Parameters.Add(new HanaParameter { Value = status });
                 insert.Parameters.Add(new HanaParameter { Value = (object?)invoiceStatus ?? DBNull.Value });
                 insert.Parameters.Add(new HanaParameter { Value = (object?)itemsJson ?? DBNull.Value });
+                insert.Parameters.Add(new HanaParameter { Value = (object?)paymentDate ?? DBNull.Value });
                 insert.Parameters.Add(new HanaParameter { Value = now });
                 insert.Parameters.Add(new HanaParameter { Value = now });
                 insert.ExecuteNonQuery();
@@ -340,6 +342,8 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
             Set("MATCH_STATUS", status);
             Set("INVOICE_STATUS", invoiceStatus);
             Set("ITEMS", itemsJson);
+            if (IsPaidValue(status) || IsPaidValue(invoiceStatus))
+                Set("PAYMENT_DATE", now.Date);
 
             using var update = new HanaCommand(
                 $"UPDATE {matchTable} SET {string.Join(", ", sets)} WHERE \"PO_NUMBER\" = ? AND \"INSTANCE_ID\" = ?",
@@ -381,7 +385,7 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         using var cmd = new HanaCommand(
             $"""
             SELECT "INSTANCE_ID", "INVOICE_NUMBER", "SUPPLIER_NAME", "INVOICE_DATE",
-                   "CURRENCY", "TOTAL_AMOUNT", "MATCH_STATUS", "INVOICE_STATUS", "ITEMS"
+                   "CURRENCY", "TOTAL_AMOUNT", "MATCH_STATUS", "INVOICE_STATUS", "ITEMS", "PAYMENT_DATE"
             FROM {matchTable}
             WHERE "PO_NUMBER" = ?
             ORDER BY "UPDATED_AT" DESC, "INSTANCE_ID"
@@ -401,7 +405,8 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                 ReadDecimal(reader, 5),
                 ReadString(reader, 6),
                 ReadString(reader, 7),
-                HanaCloudPurchaseOrderMapper.ParseItems(ReadString(reader, 8))));
+                HanaCloudPurchaseOrderMapper.ParseItems(ReadString(reader, 8)),
+                ReadDate(reader, 9)));
         }
 
         return links;
@@ -474,6 +479,7 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
                     "MATCH_STATUS" NVARCHAR(64),
                     "INVOICE_STATUS" NVARCHAR(64),
                     "ITEMS" NCLOB,
+                    "PAYMENT_DATE" DATE,
                     "CREATED_AT" TIMESTAMP,
                     "UPDATED_AT" TIMESTAMP,
                     UNIQUE ("PO_NUMBER", "INSTANCE_ID")
@@ -490,6 +496,7 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
         EnsureMatchColumn(conn, settings, "TOTAL_AMOUNT", "DECIMAL(21, 6)");
         EnsureMatchColumn(conn, settings, "INVOICE_STATUS", "NVARCHAR(64)");
         EnsureMatchColumn(conn, settings, "ITEMS", "NCLOB");
+        EnsureMatchColumn(conn, settings, "PAYMENT_DATE", "DATE");
     }
 
     private static void EnsureMatchColumn(
@@ -576,6 +583,10 @@ public sealed class HanaCloudPurchaseOrderService : IHanaCloudPurchaseOrderServi
 
     private static string? FormatDate(DateTime? value) =>
         value?.ToString("yyyy-MM-dd", System.Globalization.CultureInfo.InvariantCulture);
+
+    private static bool IsPaidValue(string? value) =>
+        !string.IsNullOrWhiteSpace(value)
+        && value.Trim().Equals("Paid", StringComparison.OrdinalIgnoreCase);
 
     private static decimal? ReadDecimal(HanaDataReader reader, int ordinal)
     {
