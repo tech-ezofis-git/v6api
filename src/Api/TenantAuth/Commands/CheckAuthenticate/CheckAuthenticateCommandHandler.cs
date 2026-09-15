@@ -37,9 +37,10 @@ public sealed class CheckAuthenticateCommandHandler : IRequestHandler<CheckAuthe
 
         await using (var catalog = await _catalogFactory.CreateDbContextAsync(cancellationToken))
         {
-            var exists = await catalog.UserTenants
+            // Unique org email lives on Tenants; UserTenants can have many users per tenant.
+            var exists = await catalog.Tenants
                 .AsNoTracking()
-                .AnyAsync(x => x.Email == email, cancellationToken);
+                .AnyAsync(x => x.Email != null && x.Email.ToLower() == email, cancellationToken);
 
             if (exists)
                 return new CheckAuthenticateResult(409, "Tenant is already exists, Please change the Email for signup");

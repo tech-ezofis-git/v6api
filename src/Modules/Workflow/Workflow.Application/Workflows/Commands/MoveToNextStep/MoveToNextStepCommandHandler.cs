@@ -17,6 +17,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IWorkflowPdfGenerationService _pdfGeneration;
     private readonly IWorkflowMoveNotificationService _moveNotifications;
     private readonly IHanaCloudPurchaseOrderService _hanaPurchaseOrders;
+    private readonly IWorkflowJsonStorageService _workflowJsonStorage;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
 
@@ -30,6 +31,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IWorkflowPdfGenerationService pdfGeneration,
         IWorkflowMoveNotificationService moveNotifications,
         IHanaCloudPurchaseOrderService hanaPurchaseOrders,
+        IWorkflowJsonStorageService workflowJsonStorage,
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider)
     {
@@ -42,6 +44,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _pdfGeneration = pdfGeneration;
         _moveNotifications = moveNotifications;
         _hanaPurchaseOrders = hanaPurchaseOrders;
+        _workflowJsonStorage = workflowJsonStorage;
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
     }
@@ -394,13 +397,22 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             currentTransactionId: legacySync.CurrentTransactionId,
             nextTransactionId: isCompleted ? null : legacySync.NextTransactionId);
 
-        // HANA invoices only: if this instance has a PO_INVOICE_MATCH row, mark it Paid.
-        // Non-HANA invoices have no row → no change. Failures must not block the move.
+        // HANA invoices only: use apAgent.connectorId from workflow JSON → PO_INVOICE_MATCH Paid.
+        // Non-HANA / missing connector / no match row → no change. Failures must not block the move.
         if (IsPaidStep(notifyNextStep) || (isCompleted && IsPaidStep(targetDefinitionStep)))
         {
             try
             {
-                await _hanaPurchaseOrders.TryMarkPaidByInstanceIdAsync(instance.Id, cancellationToken);
+                var workflowJson = await _workflowJsonStorage.GetWorkflowJsonAsync(
+                    instance.WorkflowId,
+                    cancellationToken);
+                if (WorkflowApAgentJson.TryReadConnectorId(workflowJson, out var hanaConnectorId))
+                {
+                    await _hanaPurchaseOrders.TryMarkPaidByInstanceIdAsync(
+                        hanaConnectorId,
+                        instance.Id,
+                        cancellationToken);
+                }
             }
             catch
             {

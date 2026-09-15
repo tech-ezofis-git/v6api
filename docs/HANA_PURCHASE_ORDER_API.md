@@ -264,10 +264,13 @@ You can also send a new `invoiceNumber`, totals, or `items` with the status to c
 
 ### Auto mark Paid on workflow move
 
-When Accounts Payable moves into a step whose name contains `Paid`, the API looks up `PO_INVOICE_MATCH` by `INSTANCE_ID` only:
+When Accounts Payable moves into a step whose name contains `Paid`, the API:
+
+1. Reads `Blocks[].Settings.apAgent.connectorId` from the workflow JSON
+2. Uses that connector’s `HanaDatabaseJson` to update `PO_INVOICE_MATCH` by `INSTANCE_ID`
 
 - Row found → set `MATCH_STATUS` and `INVOICE_STATUS` to `Paid`
-- No row → leave HANA unchanged (non-HANA invoices)
+- No connector id / no row → leave HANA unchanged (non-HANA invoices)
 
 No extra client call is required for that case.
 
