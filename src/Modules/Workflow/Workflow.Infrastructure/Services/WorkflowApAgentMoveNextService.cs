@@ -236,7 +236,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
         var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
         var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
-        var ezfbTable = $"dbo.ezfb_{tableSuffix}_items";
+        var ezfbTable = $"dbo.\"ezfb_{tableSuffix}_items\"";
         var ezfbColumns = await LoadTableColumnsAsync(connection, "dbo", $"ezfb_{tableSuffix}_items", cancellationToken);
 
         if (ezfbColumns.Count == 0)
@@ -257,8 +257,9 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
                 matchedControl = control;
-                // Table child cells belong in the parent DYNAMIC_TABLE JSON, not their own columns.
-                if (control.ParentId != 0)
+                // Only skip TABLE *cells*. A TABLE nested in a section still has ParentId != 0
+                // and must be written to ezfb or start/json leaves the form row empty.
+                if (IsNestedTableCell(control, controls))
                     continue;
 
                 var (columnOk, colFromControl) = await TryResolveOrCreateEzfbColumnAsync(
@@ -291,6 +292,8 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             }
 
             var valueToWrite = PrepareFormDataValueForEzfb(value, matchedControl, controls, fields);
+            if (ShouldSkipBlankEzfbTableWrite(matchedControl, valueToWrite))
+                continue;
 
             try
             {
@@ -994,8 +997,23 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         if (EzfbColumnNaming.TryResolveEzfbColumn(columnName, name, jsonId, ezfbColumns, out var existing))
             return (true, existing);
 
-        if (!EzfbColumnNaming.TryToColumnName(jsonId, out var newColumn) || string.IsNullOrWhiteSpace(newColumn))
+        var newColumn = string.Empty;
+        if (!string.IsNullOrWhiteSpace(columnName)
+            && EzfbColumnNaming.TryToColumnNameFromLabel(columnName, out var fromStored)
+            && !string.IsNullOrWhiteSpace(fromStored))
+        {
+            newColumn = fromStored;
+        }
+        else if (!string.IsNullOrWhiteSpace(name)
+            && EzfbColumnNaming.TryToColumnNameFromLabel(name, out var fromName)
+            && !string.IsNullOrWhiteSpace(fromName))
+        {
+            newColumn = fromName;
+        }
+        else if (!EzfbColumnNaming.TryToColumnName(jsonId, out newColumn) || string.IsNullOrWhiteSpace(newColumn))
+        {
             return (false, string.Empty);
+        }
 
         try
         {
@@ -1064,7 +1082,28 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
         var type = control.Type.Trim();
         return type.Contains("DYNAMIC_TABLE", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(type, "TABLE", StringComparison.OrdinalIgnoreCase);
+            || type.Contains("TABLE", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// True only for cells that belong to a TABLE/DYNAMIC_TABLE parent.
+    /// Nested TABLE controls (ParentId points at a section) must still be written to ezfb.
+    /// </summary>
+    private static bool IsNestedTableCell(FormControlRow control, IReadOnlyList<FormControlRow> controls)
+    {
+        if (control.ParentId == 0)
+            return false;
+        if (IsDynamicTableControl(control) || IsPoLineItemTableControl(control))
+            return false;
+
+        foreach (var parent in controls)
+        {
+            if (parent.Id != control.ParentId)
+                continue;
+            return IsDynamicTableControl(parent) || IsPoLineItemTableControl(parent);
+        }
+
+        return false;
     }
 
     private static bool IsPoRowLineItemKey(string poRowKey) =>
@@ -1199,7 +1238,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
         foreach (var row in controls)
         {
-            if (row.ParentId == parentId && !string.IsNullOrWhiteSpace(TableCellOutputKey(row)))
+            if (row.ParentId == parentId && !string.IsNullOrWhiteSpace(row.JsonId))
                 children.Add(row);
         }
 
@@ -1288,17 +1327,29 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                         continue;
                     }
 
-                    writer.WriteStartObject();
+                    var cells = new List<(string Key, string Value)>();
                     var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    var anyValue = false;
                     foreach (var child in childControls)
                     {
                         var outputKey = TableCellOutputKey(child);
                         if (string.IsNullOrWhiteSpace(outputKey) || !written.Add(outputKey))
                             continue;
 
-                        var cell = ResolveTableCellValue(rowObject, child);
-                        writer.WritePropertyName(outputKey);
-                        writer.WriteStringValue(cell ?? string.Empty);
+                        var cell = ResolveTableCellValue(rowObject, child) ?? string.Empty;
+                        cells.Add((outputKey, cell));
+                        if (!string.IsNullOrWhiteSpace(cell))
+                            anyValue = true;
+                    }
+
+                    if (!anyValue)
+                        continue;
+
+                    writer.WriteStartObject();
+                    foreach (var (key, cell) in cells)
+                    {
+                        writer.WritePropertyName(key);
+                        writer.WriteStringValue(cell);
                     }
 
                     writer.WriteEndObject();
@@ -1318,14 +1369,24 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         }
     }
 
-    /// <summary>Table JSON keys are the control Name (label). jsonId is only used to read old payloads.</summary>
+    /// <summary>Ezfb TABLE JSON keys are the physical column / label. Inbox/sent keep jsonId in mailbox formData.</summary>
     private static string? TableCellOutputKey(FormControlRow child)
     {
-        if (!string.IsNullOrWhiteSpace(child.Name))
-            return child.Name.Trim();
         if (!string.IsNullOrWhiteSpace(child.ColumnName))
             return child.ColumnName.Trim();
+        if (!string.IsNullOrWhiteSpace(child.Name))
+            return child.Name.Trim();
         return null;
+    }
+
+    private static bool ShouldSkipBlankEzfbTableWrite(FormControlRow? matchedControl, string valueToWrite)
+    {
+        if (!IsBlankTableJson(valueToWrite))
+            return false;
+        if (matchedControl is not null
+            && (IsDynamicTableControl(matchedControl) || IsPoLineItemTableControl(matchedControl) || IsLineItemControl(matchedControl)))
+            return true;
+        return IsJsonArrayValue(valueToWrite);
     }
 
     private static string? ResolveTableCellValue(JsonElement row, FormControlRow child)
@@ -1351,6 +1412,13 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
     private static IEnumerable<string> TableCellKeyCandidates(FormControlRow child)
     {
+        if (!string.IsNullOrWhiteSpace(child.JsonId))
+        {
+            yield return child.JsonId;
+            if (EzfbColumnNaming.TryToColumnName(child.JsonId, out var jsonCol) && !string.IsNullOrWhiteSpace(jsonCol))
+                yield return jsonCol;
+        }
+
         if (!string.IsNullOrWhiteSpace(child.Name))
         {
             yield return child.Name.Trim();
@@ -1361,13 +1429,6 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         {
             yield return child.ColumnName.Trim();
             yield return NormalizeFieldName(child.ColumnName);
-        }
-
-        if (!string.IsNullOrWhiteSpace(child.JsonId))
-        {
-            yield return child.JsonId;
-            if (EzfbColumnNaming.TryToColumnName(child.JsonId, out var jsonCol) && !string.IsNullOrWhiteSpace(jsonCol))
-                yield return jsonCol;
         }
     }
 
@@ -1507,7 +1568,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         var updated = 0;
         foreach (var tableControl in controls)
         {
-            if (tableControl.ParentId != 0)
+            if (IsNestedTableCell(tableControl, controls))
                 continue;
             if (!IsDynamicTableControl(tableControl) && !IsPoLineItemTableControl(tableControl))
                 continue;
