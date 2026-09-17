@@ -719,6 +719,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             instance.Context,
             out var masterSource,
             out var masterConnectorId);
+        string? masterFormId = null;
 
         try
         {
@@ -728,6 +729,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 if (string.IsNullOrWhiteSpace(masterSource))
                     masterSource = mailbox.MasterSource;
                 masterConnectorId ??= mailbox.MasterConnectorId;
+                if (string.IsNullOrWhiteSpace(masterFormId))
+                    masterFormId = mailbox.MasterFormId;
             }
         }
         catch (Exception ex)
@@ -738,28 +741,27 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 workflowId);
         }
 
-        if (string.IsNullOrWhiteSpace(masterSource) || masterConnectorId is null)
+        try
         {
-            try
+            var workflowJson = await _workflowJsonStorage.GetWorkflowJsonAsync(workflowId, cancellationToken);
+            if (WorkflowPoMasterJson.TryRead(workflowJson, out var jsonSource, out var jsonConnectorId, out var jsonFormId))
             {
-                var workflowJson = await _workflowJsonStorage.GetWorkflowJsonAsync(workflowId, cancellationToken);
-                if (WorkflowPoMasterJson.TryRead(workflowJson, out var jsonSource, out var jsonConnectorId, out _))
-                {
-                    if (string.IsNullOrWhiteSpace(masterSource))
-                        masterSource = jsonSource;
-                    masterConnectorId ??= jsonConnectorId;
-                }
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(
-                    ex,
-                    "PO master workflow JSON lookup failed for workflow {WorkflowId}.",
-                    workflowId);
+                if (string.IsNullOrWhiteSpace(masterSource))
+                    masterSource = jsonSource;
+                masterConnectorId ??= jsonConnectorId;
+                if (string.IsNullOrWhiteSpace(masterFormId))
+                    masterFormId = jsonFormId;
             }
         }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "PO master workflow JSON lookup failed for workflow {WorkflowId}.",
+                workflowId);
+        }
 
-        ApAgentPoMasterStartPayloadEnricher.Enrich(payload, masterSource, masterConnectorId);
+        ApAgentPoMasterStartPayloadEnricher.Enrich(payload, masterSource, masterConnectorId, masterFormId);
 
         if (payload.TryGetValue("resource", out var resource) && resource is not null)
         {
@@ -767,6 +769,12 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 "AP start payload enriched for PO master: resource={Resource}, connector_id={ConnectorId}",
                 resource,
                 payload.TryGetValue("connector_id", out var cid) ? cid : null);
+        }
+        else if (payload.TryGetValue("master_form_id", out var formId) && formId is not null)
+        {
+            _logger.LogInformation(
+                "AP start payload enriched for InternalForm PO master: master_form_id={MasterFormId}",
+                formId);
         }
     }
 

@@ -9,16 +9,35 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
     private static readonly Guid QbConnectorId = Guid.Parse("11111111-2222-3333-4444-555555555555");
 
     [Fact]
-    public void Enrich_InternalForm_LeavesPayloadUnchanged()
+    public void Enrich_InternalForm_SetsMasterSourceAndFormId()
+    {
+        var payload = BasePayload();
+        const string formId = "168f611f-464e-47c5-be1d-d194d5a3c0dc";
+        ApAgentPoMasterStartPayloadEnricher.Enrich(
+            payload,
+            EmailIngestMasterSources.InternalForm,
+            null,
+            formId);
+
+        Assert.Equal(EmailIngestMasterSources.InternalForm, payload["master_source"]);
+        Assert.Equal(formId, payload["master_form_id"]);
+        Assert.False(payload.ContainsKey("resource"));
+        Assert.False(payload.ContainsKey("connector_id"));
+        Assert.False(payload.ContainsKey("skills"));
+    }
+
+    [Fact]
+    public void Enrich_InternalForm_WithoutFormId_SetsMasterSourceOnly()
     {
         var payload = BasePayload();
         ApAgentPoMasterStartPayloadEnricher.Enrich(
             payload,
             EmailIngestMasterSources.InternalForm,
-            SapConnectorId);
+            null);
 
+        Assert.Equal(EmailIngestMasterSources.InternalForm, payload["master_source"]);
+        Assert.False(payload.ContainsKey("master_form_id"));
         Assert.False(payload.ContainsKey("resource"));
-        Assert.False(payload.ContainsKey("connector_id"));
         Assert.False(payload.ContainsKey("skills"));
     }
 
