@@ -7,7 +7,8 @@ namespace SaaSApp.Workflow.Application.Workflows;
 /// When PO Master (email-ingest masterSource) is QuickBooks or SAP,
 /// inject resource / connector_id / skills into the Hangfire start payload
 /// so Python runs po_lookup_* before po_match.
-/// InternalForm leaves the payload unchanged (default AP skills).
+/// InternalForm sets master_source + master_form_id (ezfb PO master table)
+/// and leaves connector skills unset.
 /// </summary>
 public static class ApAgentPoMasterStartPayloadEnricher
 {
@@ -30,7 +31,8 @@ public static class ApAgentPoMasterStartPayloadEnricher
     public static void Enrich(
         IDictionary<string, object?> payload,
         string? masterSource,
-        Guid? masterConnectorId)
+        Guid? masterConnectorId,
+        string? masterFormId = null)
     {
         if (payload is null)
             throw new ArgumentNullException(nameof(payload));
@@ -39,8 +41,13 @@ public static class ApAgentPoMasterStartPayloadEnricher
         if (source.Length == 0)
             return;
 
-        if (string.Equals(source, EmailIngestMasterSources.InternalForm, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(source, EmailIngestMasterSources.InternalForm, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source, "Ezofis", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source, "Form", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplyInternalFormMaster(payload, masterFormId);
             return;
+        }
 
         if (string.Equals(source, EmailIngestMasterSources.QuickBooks, StringComparison.OrdinalIgnoreCase))
         {
@@ -49,9 +56,11 @@ public static class ApAgentPoMasterStartPayloadEnricher
         }
 
         if (string.Equals(source, EmailIngestMasterSources.Sap, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(source, "Sap", StringComparison.OrdinalIgnoreCase))
+            || string.Equals(source, "Sap", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source, "HANA", StringComparison.OrdinalIgnoreCase))
         {
-            ApplyConnectorMaster(payload, "SAP", masterConnectorId, SkillPoLookupSap);
+            var resource = string.Equals(source, "HANA", StringComparison.OrdinalIgnoreCase) ? "HANA" : "SAP";
+            ApplyConnectorMaster(payload, resource, masterConnectorId, SkillPoLookupSap);
         }
     }
 
@@ -78,6 +87,28 @@ public static class ApAgentPoMasterStartPayloadEnricher
         catch (JsonException)
         {
             // ignore malformed context
+        }
+    }
+
+    private static void ApplyInternalFormMaster(
+        IDictionary<string, object?> payload,
+        string? masterFormId)
+    {
+        if (!HasNonEmptyString(payload, "master_source")
+            && !HasNonEmptyString(payload, "masterSource")
+            && !HasNonEmptyString(payload, "MasterSource"))
+        {
+            payload["master_source"] = EmailIngestMasterSources.InternalForm;
+        }
+
+        var formId = (masterFormId ?? string.Empty).Trim();
+        if (formId.Length == 0)
+            return;
+        if (!HasNonEmptyString(payload, "master_form_id")
+            && !HasNonEmptyString(payload, "masterFormId")
+            && !HasNonEmptyString(payload, "MasterFormId"))
+        {
+            payload["master_form_id"] = formId;
         }
     }
 
