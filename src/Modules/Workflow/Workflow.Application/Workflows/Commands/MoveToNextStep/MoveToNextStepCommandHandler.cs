@@ -520,16 +520,8 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
 
         string? formDataJson = null;
 
-        // After AP-agent po_row sync, ezfb is the source of truth (includes PO Amount / PO Date / PO Line Item).
-        if (preferEzfb)
-        {
-            formDataJson = await _ezfbFormDataLoader.LoadFormDataJsonAsync(
-                resolvedFormId,
-                resolvedEntryId.Value,
-                cancellationToken);
-        }
-
-        if (string.IsNullOrWhiteSpace(formDataJson) && HasUserFormData(request))
+        // Inbox/sent keep jsonId keys from the client payload. Ezfb stores Label/column names.
+        if (HasUserFormData(request))
         {
             formDataJson = MoveToNextStepFormDataComposer.ForMailbox(request.SubmittedFormDataJson)
                 ?? MoveToNextStepFormDataComposer.FromParsedFields(
@@ -537,7 +529,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                     request.FormLineItemsJson);
         }
 
-        if (string.IsNullOrWhiteSpace(formDataJson) && !preferEzfb)
+        if (string.IsNullOrWhiteSpace(formDataJson))
         {
             formDataJson = await _ezfbFormDataLoader.LoadFormDataJsonAsync(
                 resolvedFormId,

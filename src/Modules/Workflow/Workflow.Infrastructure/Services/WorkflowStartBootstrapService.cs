@@ -7,6 +7,7 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows;
+using SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
 using SaaSApp.Workflow.Domain.Entities;
 using SaaSApp.Workflow.Domain.Enums;
 
@@ -191,6 +192,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             cancellationToken);
 
         await ApplyStartFormDataAsync(workflow.FormId, formEntryItemId, request, cancellationToken);
+        await PropagateStartMailboxFormAsync(workflow, instance, formEntryItemId, request, cancellationToken);
 
         var (stagedItemId, stagedBlobPath) = await ArchiveStagedFilesAsync(
             request,
@@ -305,7 +307,11 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
 
         await ApplyStartFormDataAsync(workflow.FormId, formEntryItemId, request, cancellationToken);
 
-        var mailboxForm = await BuildMailboxFormSnapshotAsync(workflow.FormId, formEntryItemId, cancellationToken);
+        var mailboxForm = await BuildMailboxFormSnapshotAsync(
+            workflow.FormId,
+            formEntryItemId,
+            cancellationToken,
+            request);
 
         var startActivityId = !string.IsNullOrWhiteSpace(startStep.ActivityId)
             ? startStep.ActivityId
@@ -489,19 +495,49 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
     private async Task<MailboxFormSnapshot?> BuildMailboxFormSnapshotAsync(
         string? formId,
         Guid formEntryItemId,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        WorkflowStartBootstrapRequest? request = null)
     {
         if (string.IsNullOrWhiteSpace(formId) || formEntryItemId == Guid.Empty)
             return null;
 
-        var formDataJson = await _ezfbFormDataLoader.LoadFormDataJsonAsync(
+        var fromEzfb = await _ezfbFormDataLoader.LoadFormDataJsonAsync(
             formId,
             formEntryItemId,
             cancellationToken);
+        var fromRequest = request == null
+            ? null
+            : MoveToNextStepFormDataComposer.FromParsedFields(
+                request.FormDataFields,
+                request.FormLineItemsJson);
 
+        // Inbox/sent stay jsonId-keyed. Ezfb uses Label/column names separately.
+        var formDataJson = !string.IsNullOrWhiteSpace(fromRequest) ? fromRequest : fromEzfb;
         return string.IsNullOrWhiteSpace(formDataJson)
             ? null
             : new MailboxFormSnapshot(formId, formEntryItemId, formDataJson);
+    }
+
+    private async Task PropagateStartMailboxFormAsync(
+        Domain.Entities.Workflow workflow,
+        WorkflowInstance instance,
+        Guid formEntryItemId,
+        WorkflowStartBootstrapRequest request,
+        CancellationToken cancellationToken)
+    {
+        var snapshot = await BuildMailboxFormSnapshotAsync(
+            workflow.FormId,
+            formEntryItemId,
+            cancellationToken,
+            request);
+        if (snapshot == null)
+            return;
+
+        await _legacyMailboxSync.PropagateInstanceFormDataAsync(
+            workflow.Id,
+            instance.Id,
+            snapshot,
+            cancellationToken);
     }
 
     private async Task ApplyStartFormDataAsync(
@@ -517,12 +553,18 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
 
         try
         {
-            await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
+            var updated = await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
                 formId,
                 formEntryItemId,
                 request.FormDataFields ?? new Dictionary<string, string>(),
                 request.FormLineItemsJson,
                 cancellationToken);
+            _logger.LogInformation(
+                "Start formData wrote {UpdatedCount} ezfb column(s) for form {FormId}, entry {FormEntryId} ({FieldCount} field(s)).",
+                updated,
+                formId,
+                formEntryItemId,
+                request.FormDataFields?.Count ?? 0);
         }
         catch (Exception ex)
         {
@@ -612,7 +654,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             var refreshedMailboxForm = await BuildMailboxFormSnapshotAsync(
                 workflow.FormId,
                 formEntryItemId,
-                cancellationToken);
+                cancellationToken,
+                request);
             if (refreshedMailboxForm != null)
             {
                 await _legacyMailboxSync.PropagateInstanceFormDataAsync(
