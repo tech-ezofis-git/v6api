@@ -1,3 +1,6 @@
+using System.Text.Json.Serialization;
+using SaaSApp.Workflow.Application.Workflows;
+
 namespace SaaSApp.Workflow.Application.Contracts;
 
 public enum LegacyMailboxTableKind
@@ -52,6 +55,7 @@ public sealed record LegacyMailboxRowDto(
     string? ItemId,
     string? FormId,
     string? FormEntryId,
+    [property: JsonConverter(typeof(RawJsonStringConverter))]
     string? FormData,
     string? MlPrediction,
     string? MlCondition,

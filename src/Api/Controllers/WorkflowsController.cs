@@ -2587,6 +2587,7 @@ public sealed record WorkflowInboxFormData(
     int WFormId,
     Guid FormEntryId,
     string? FormId = null,
+    [property: System.Text.Json.Serialization.JsonConverter(typeof(SaaSApp.Workflow.Application.Workflows.RawJsonStringConverter))]
     string? FieldsJson = null);
 // PHASE 4: RepositoryId/ItemId widened from int? to Guid? -- workflow.workflow_attachments_{suffix}
 // always has uuid-typed repository_id/item_id columns on Postgres (see WorkflowTableCreator.cs's
