@@ -804,6 +804,15 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             {
                 return true;
             }
+
+            if (!string.IsNullOrWhiteSpace(control.Name)
+                && EzfbColumnNaming.TryToColumnNameFromLabel(control.Name, out var fromName)
+                && string.Equals(fromName, key, StringComparison.OrdinalIgnoreCase)
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out column))
+            {
+                return true;
+            }
         }
 
         foreach (var control in controls)
@@ -849,9 +858,14 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var scalar = GetScalarValue(value);
         var listValues = GetValueList(value);
 
+        if (TryBuildSemanticDateCondition(columnExpr, cond, scalar, out sql, out parameters))
+            return true;
+
         switch (cond)
         {
             case "eq" or "=" or "equal":
+                if (isDate && TryBuildDateEquals(columnExpr, paramBase, scalar, out sql, out parameters))
+                    return true;
                 sql = $"{columnExpr} = {paramBase}";
                 parameters.Add(new NpgsqlParameter(paramBase, scalar ?? string.Empty));
                 return true;
@@ -971,6 +985,69 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         sql = $"{columnExpr} >= {fromName} AND {columnExpr} <= {toName}";
         parameters.Add(new NpgsqlParameter(fromName, valueFrom));
         parameters.Add(new NpgsqlParameter(toName, valueTo));
+        return true;
+    }
+
+    private static bool TryBuildSemanticDateCondition(
+        string columnExpr,
+        string condition,
+        string? scalar,
+        out string sql,
+        out List<NpgsqlParameter> parameters)
+    {
+        sql = string.Empty;
+        parameters = new List<NpgsqlParameter>();
+        if (condition is not ("eq" or "=" or "equal"))
+            return false;
+
+        var token = (scalar ?? string.Empty)
+            .Trim()
+            .ToLowerInvariant()
+            .Replace(" ", "_", StringComparison.Ordinal)
+            .Replace("-", "_", StringComparison.Ordinal);
+        if (string.IsNullOrWhiteSpace(token))
+            return false;
+
+        var dateExpr = $"dbo.try_cast_timestamp({columnExpr})::date";
+        var utcToday = "((CURRENT_TIMESTAMP AT TIME ZONE 'UTC')::date)";
+
+        switch (token)
+        {
+            case "overdue":
+                sql = $"{dateExpr} IS NOT NULL AND {dateExpr} < {utcToday}";
+                return true;
+            case "due_today" or "duetoday" or "today":
+                sql = $"{dateExpr} IS NOT NULL AND {dateExpr} = {utcToday}";
+                return true;
+            case "upcoming" or "not_due" or "notdue" or "due_later":
+                sql = $"{dateExpr} IS NOT NULL AND {dateExpr} > {utcToday}";
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static bool TryBuildDateEquals(
+        string columnExpr,
+        string paramBase,
+        string? scalar,
+        out string sql,
+        out List<NpgsqlParameter> parameters)
+    {
+        sql = string.Empty;
+        parameters = new List<NpgsqlParameter>();
+        if (!DateTime.TryParse(
+                scalar,
+                CultureInfo.InvariantCulture,
+                DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal,
+                out var dt)
+            || decimal.TryParse(scalar, NumberStyles.Number, CultureInfo.InvariantCulture, out _))
+        {
+            return false;
+        }
+
+        sql = $"dbo.try_cast_timestamp({columnExpr})::date = {paramBase}::date";
+        parameters.Add(new NpgsqlParameter(paramBase, dt));
         return true;
     }
 

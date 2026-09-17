@@ -1,3 +1,4 @@
+using System.Text;
 using System.Text.Json;
 
 namespace SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
@@ -14,9 +15,10 @@ public static class MoveToNextStepFormDataComposer
         try
         {
             using var doc = JsonDocument.Parse(submittedFormDataJson);
-            return doc.RootElement.ValueKind == JsonValueKind.Object
-                ? doc.RootElement.GetRawText()
-                : null;
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return null;
+
+            return WriteMailboxObject(doc.RootElement);
         }
         catch (JsonException)
         {
@@ -48,11 +50,86 @@ public static class MoveToNextStepFormDataComposer
                 map[lineItemKey] = lineItemsJson;
         }
 
-        return map.Count == 0 ? null : JsonSerializer.Serialize(map);
+        if (map.Count == 0)
+            return null;
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var (key, value) in map)
+            {
+                writer.WritePropertyName(key);
+                WriteMailboxValue(writer, value);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static string WriteMailboxObject(JsonElement root)
+    {
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+            WriteExpanded(writer, root);
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteExpanded(Utf8JsonWriter writer, JsonElement element)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                foreach (var prop in element.EnumerateObject())
+                {
+                    writer.WritePropertyName(prop.Name);
+                    WriteExpanded(writer, prop.Value);
+                }
+
+                writer.WriteEndObject();
+                return;
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (var item in element.EnumerateArray())
+                    WriteExpanded(writer, item);
+                writer.WriteEndArray();
+                return;
+            case JsonValueKind.String:
+                WriteMailboxValue(writer, element.GetString() ?? string.Empty);
+                return;
+            default:
+                element.WriteTo(writer);
+                return;
+        }
+    }
+
+    private static void WriteMailboxValue(Utf8JsonWriter writer, string value)
+    {
+        var trimmed = value.Trim();
+        if (IsJsonArrayValue(trimmed) || (trimmed.StartsWith('{') && trimmed.EndsWith('}')))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                if (doc.RootElement.ValueKind is JsonValueKind.Array or JsonValueKind.Object)
+                {
+                    doc.RootElement.WriteTo(writer);
+                    return;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        writer.WriteStringValue(value);
     }
 
     private static string? BuildFromLineItemsOnly(string lineItemsJson) =>
-        string.IsNullOrWhiteSpace(lineItemsJson) ? null : $"{{\"Line Item\":{lineItemsJson}}}";
+        string.IsNullOrWhiteSpace(lineItemsJson) ? null : "{\"Line Item\":" + lineItemsJson + "}";
 
     private static bool IsJsonArrayValue(string value)
     {
