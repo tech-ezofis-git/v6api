@@ -246,6 +246,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         }
 
         var updated = 0;
+        var writtenColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in fields)
         {
             if (IsEmptyValue(value))
@@ -256,11 +257,22 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
                 matchedControl = control;
-                if (!EzfbColumnNaming.TryResolveEzfbColumn(
-                        control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var colFromControl))
+                // Table child cells belong in the parent DYNAMIC_TABLE JSON, not their own columns.
+                if (control.ParentId != 0)
+                    continue;
+
+                var (columnOk, colFromControl) = await TryResolveOrCreateEzfbColumnAsync(
+                    connection,
+                    ezfbTable,
+                    control.JsonId,
+                    ezfbColumns,
+                    cancellationToken,
+                    control.Name,
+                    control.ColumnName);
+                if (!columnOk)
                 {
                     _logger.LogWarning(
-                        "ezfb column not found for jsonId {JsonId} (control name {ControlName}).",
+                        "ezfb column not found/created for jsonId {JsonId} (control name {ControlName}).",
                         control.JsonId,
                         control.Name);
                     continue;
@@ -278,24 +290,12 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 column = colFromKey;
             }
 
-            var valueToWrite = value;
-            if (IsJsonArrayValue(value)
-                && matchedControl is not null
-                && IsLineItemControl(matchedControl))
-            {
-                valueToWrite = NormalizeLineItemsJson(value);
-            }
-            else if (IsJsonArrayValue(value) && matchedControl is null)
-            {
-                _logger.LogDebug(
-                    "Skipping array formData key {FieldKey}: no matching wFormControl for DYNAMIC_TABLE.",
-                    key);
-                continue;
-            }
+            var valueToWrite = PrepareFormDataValueForEzfb(value, matchedControl, controls, fields);
 
             try
             {
                 await UpdateEzfbColumnAsync(connection, ezfbTable, formEntryId, column, valueToWrite, cancellationToken);
+                writtenColumns.Add(column);
                 updated++;
             }
             catch (Exception ex)
@@ -309,6 +309,16 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             }
         }
 
+        updated += await TryFillEmptyTableControlsFromChildFieldsAsync(
+            connection,
+            ezfbTable,
+            formEntryId,
+            controls,
+            ezfbColumns,
+            fields,
+            writtenColumns,
+            cancellationToken);
+
         if (!string.IsNullOrWhiteSpace(lineItemsJson) && ezfbColumns.Count > 0)
         {
             var lineItemsColumn = ResolveLineItemsEzfbColumn(controls, ezfbColumns);
@@ -316,12 +326,28 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             {
                 try
                 {
+                    FormControlRow? lineControl = null;
+                    foreach (var row in controls)
+                    {
+                        if (!IsLineItemControl(row) && !IsDynamicTableControl(row))
+                            continue;
+                        if (EzfbColumnNaming.TryResolveEzfbColumn(row.ColumnName, row.Name, row.JsonId, ezfbColumns, out var col)
+                            && string.Equals(col, lineItemsColumn, StringComparison.OrdinalIgnoreCase))
+                        {
+                            lineControl = row;
+                            break;
+                        }
+                    }
+
+                    var lineValue = lineControl is null
+                        ? NormalizeLineItemsJson(lineItemsJson)
+                        : PrepareFormDataValueForEzfb(lineItemsJson, lineControl, controls, fields);
                     await UpdateEzfbColumnAsync(
                         connection,
                         ezfbTable,
                         formEntryId,
                         lineItemsColumn,
-                        NormalizeLineItemsJson(lineItemsJson),
+                        lineValue,
                         cancellationToken);
                     updated++;
                 }
@@ -1119,6 +1145,488 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         return trimmed.StartsWith("[", StringComparison.Ordinal)
             ? trimmed
             : value;
+    }
+
+    private static bool IsJsonObjectValue(string value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        var trimmed = value.Trim();
+        return trimmed.StartsWith("{", StringComparison.Ordinal)
+            && trimmed.EndsWith("}", StringComparison.Ordinal);
+    }
+
+    private static string PrepareFormDataValueForEzfb(
+        string value,
+        FormControlRow? matchedControl,
+        IReadOnlyList<FormControlRow> controls,
+        IReadOnlyDictionary<string, string> fields)
+    {
+        if (matchedControl is not null && IsMultiSelectControl(matchedControl) && IsJsonArrayValue(value))
+            return value.Trim();
+
+        if (matchedControl is not null && (IsDynamicTableControl(matchedControl) || IsPoLineItemTableControl(matchedControl)))
+        {
+            var children = GetChildControls(controls, matchedControl.Id);
+            var tableJson = NormalizeDynamicTableJson(value, children);
+            if (IsBlankTableJson(tableJson))
+            {
+                var assembled = AssembleTableRowFromChildFields(fields, children);
+                if (!string.IsNullOrWhiteSpace(assembled))
+                    return assembled;
+            }
+
+            return tableJson;
+        }
+
+        if (IsJsonArrayValue(value))
+        {
+            if (matchedControl is not null && IsLineItemControl(matchedControl))
+                return NormalizeLineItemsJson(value);
+
+            return NormalizeTableRowsJson(value);
+        }
+
+        return value;
+    }
+
+    private static List<FormControlRow> GetChildControls(IReadOnlyList<FormControlRow> controls, int parentId)
+    {
+        var children = new List<FormControlRow>();
+        if (parentId <= 0)
+            return children;
+
+        foreach (var row in controls)
+        {
+            if (row.ParentId == parentId && !string.IsNullOrWhiteSpace(TableCellOutputKey(row)))
+                children.Add(row);
+        }
+
+        return children;
+    }
+
+    private static string NormalizeDynamicTableJson(string value, IReadOnlyList<FormControlRow> childControls)
+    {
+        var trimmed = (value ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(trimmed))
+            return trimmed;
+
+        if (IsJsonObjectValue(trimmed))
+        {
+            try
+            {
+                using var objDoc = JsonDocument.Parse(trimmed);
+                foreach (var nestedKey in new[] { "rows", "items", "data", "value", "lineItems", "LineItems" })
+                {
+                    if (!TryGetPropertyIgnoreCase(objDoc.RootElement, nestedKey, out var nested))
+                        continue;
+                    if (nested.ValueKind == JsonValueKind.Array)
+                    {
+                        trimmed = nested.GetRawText();
+                        break;
+                    }
+                }
+
+                if (IsJsonObjectValue(trimmed))
+                    trimmed = "[" + trimmed + "]";
+            }
+            catch (JsonException)
+            {
+                trimmed = "[" + trimmed + "]";
+            }
+        }
+
+        if (!IsJsonArrayValue(trimmed))
+            return value;
+
+        if (childControls.Count == 0)
+            return NormalizeTableRowsJson(trimmed);
+
+        return RemapDynamicTableToChildNames(trimmed, childControls) ?? NormalizeTableRowsJson(trimmed);
+    }
+
+    private static string? RemapDynamicTableToChildNames(string tableJson, IReadOnlyList<FormControlRow> childControls)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(tableJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return null;
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartArray();
+                var wroteRow = false;
+                foreach (var row in doc.RootElement.EnumerateArray())
+                {
+                    JsonElement rowObject = default;
+                    if (row.ValueKind == JsonValueKind.Object)
+                    {
+                        rowObject = row;
+                    }
+                    else if (row.ValueKind == JsonValueKind.String)
+                    {
+                        var inner = row.GetString();
+                        if (string.IsNullOrWhiteSpace(inner) || !IsJsonObjectValue(inner))
+                            continue;
+                        try
+                        {
+                            using var innerDoc = JsonDocument.Parse(inner);
+                            if (innerDoc.RootElement.ValueKind != JsonValueKind.Object)
+                                continue;
+                            rowObject = innerDoc.RootElement.Clone();
+                        }
+                        catch (JsonException)
+                        {
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        continue;
+                    }
+
+                    writer.WriteStartObject();
+                    var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    foreach (var child in childControls)
+                    {
+                        var outputKey = TableCellOutputKey(child);
+                        if (string.IsNullOrWhiteSpace(outputKey) || !written.Add(outputKey))
+                            continue;
+
+                        var cell = ResolveTableCellValue(rowObject, child);
+                        writer.WritePropertyName(outputKey);
+                        writer.WriteStringValue(cell ?? string.Empty);
+                    }
+
+                    writer.WriteEndObject();
+                    wroteRow = true;
+                }
+
+                writer.WriteEndArray();
+                if (!wroteRow)
+                    return "[]";
+            }
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Table JSON keys are the control Name (label). jsonId is only used to read old payloads.</summary>
+    private static string? TableCellOutputKey(FormControlRow child)
+    {
+        if (!string.IsNullOrWhiteSpace(child.Name))
+            return child.Name.Trim();
+        if (!string.IsNullOrWhiteSpace(child.ColumnName))
+            return child.ColumnName.Trim();
+        return null;
+    }
+
+    private static string? ResolveTableCellValue(JsonElement row, FormControlRow child)
+    {
+        string? best = null;
+        foreach (var candidate in TableCellKeyCandidates(child))
+        {
+            if (!TryGetPropertyIgnoreCase(row, candidate, out var prop))
+                continue;
+
+            var unwrapped = UnwrapTableCellValue(prop);
+            if (string.IsNullOrWhiteSpace(unwrapped))
+            {
+                best ??= string.Empty;
+                continue;
+            }
+
+            return unwrapped;
+        }
+
+        return best;
+    }
+
+    private static IEnumerable<string> TableCellKeyCandidates(FormControlRow child)
+    {
+        if (!string.IsNullOrWhiteSpace(child.Name))
+        {
+            yield return child.Name.Trim();
+            yield return NormalizeFieldName(child.Name);
+        }
+
+        if (!string.IsNullOrWhiteSpace(child.ColumnName))
+        {
+            yield return child.ColumnName.Trim();
+            yield return NormalizeFieldName(child.ColumnName);
+        }
+
+        if (!string.IsNullOrWhiteSpace(child.JsonId))
+        {
+            yield return child.JsonId;
+            if (EzfbColumnNaming.TryToColumnName(child.JsonId, out var jsonCol) && !string.IsNullOrWhiteSpace(jsonCol))
+                yield return jsonCol;
+        }
+    }
+
+    private static string? UnwrapTableCellValue(JsonElement value)
+    {
+        switch (value.ValueKind)
+        {
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                return string.Empty;
+            case JsonValueKind.String:
+                var text = value.GetString();
+                if (!string.IsNullOrWhiteSpace(text) && (IsJsonObjectValue(text) || IsJsonArrayValue(text)))
+                {
+                    try
+                    {
+                        using var nested = JsonDocument.Parse(text);
+                        return UnwrapTableCellValue(nested.RootElement);
+                    }
+                    catch (JsonException)
+                    {
+                        return text;
+                    }
+                }
+
+                return text ?? string.Empty;
+            case JsonValueKind.Number:
+            case JsonValueKind.True:
+            case JsonValueKind.False:
+                return value.GetRawText();
+            case JsonValueKind.Object:
+                foreach (var key in new[] { "value", "text", "label", "name", "displayValue" })
+                {
+                    if (TryGetPropertyIgnoreCase(value, key, out var inner) && inner.ValueKind != JsonValueKind.Object)
+                    {
+                        var unwrapped = UnwrapTableCellValue(inner);
+                        if (!string.IsNullOrWhiteSpace(unwrapped))
+                            return unwrapped;
+                    }
+                }
+
+                return string.Empty;
+            default:
+                return string.Empty;
+        }
+    }
+
+    private static string? AssembleTableRowFromChildFields(
+        IReadOnlyDictionary<string, string> fields,
+        IReadOnlyList<FormControlRow> childControls)
+    {
+        if (childControls.Count == 0 || fields.Count == 0)
+            return null;
+
+        var cells = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var anyValue = false;
+        foreach (var child in childControls)
+        {
+            var found = string.Empty;
+            foreach (var candidate in TableCellKeyCandidates(child))
+            {
+                if (!fields.TryGetValue(candidate, out var raw) || string.IsNullOrWhiteSpace(raw))
+                    continue;
+                if (IsJsonArrayValue(raw) || IsJsonObjectValue(raw))
+                    continue;
+
+                found = raw.Trim();
+                break;
+            }
+
+            var outputKey = TableCellOutputKey(child);
+            if (string.IsNullOrWhiteSpace(outputKey))
+                continue;
+
+            cells[outputKey] = found;
+            if (!string.IsNullOrWhiteSpace(found))
+                anyValue = true;
+        }
+
+        if (!anyValue)
+            return null;
+
+        return JsonSerializer.Serialize(new[] { cells });
+    }
+
+    private static bool IsBlankTableJson(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return true;
+
+        var trimmed = value.Trim();
+        if (trimmed is "[]" or "{}" or "[{}]" or "[null]")
+            return true;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return IsBlankEzfbValue(trimmed);
+
+            if (doc.RootElement.GetArrayLength() == 0)
+                return true;
+
+            foreach (var row in doc.RootElement.EnumerateArray())
+            {
+                if (row.ValueKind != JsonValueKind.Object)
+                    return false;
+
+                foreach (var prop in row.EnumerateObject())
+                {
+                    if (string.Equals(prop.Name, "_rowId", StringComparison.OrdinalIgnoreCase))
+                        continue;
+                    var cell = UnwrapTableCellValue(prop.Value);
+                    if (!string.IsNullOrWhiteSpace(cell))
+                        return false;
+                }
+            }
+
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private async Task<int> TryFillEmptyTableControlsFromChildFieldsAsync(
+        NpgsqlConnection connection,
+        string ezfbTable,
+        Guid formEntryId,
+        IReadOnlyList<FormControlRow> controls,
+        HashSet<string> ezfbColumns,
+        IReadOnlyDictionary<string, string> fields,
+        HashSet<string> writtenColumns,
+        CancellationToken cancellationToken)
+    {
+        var updated = 0;
+        foreach (var tableControl in controls)
+        {
+            if (tableControl.ParentId != 0)
+                continue;
+            if (!IsDynamicTableControl(tableControl) && !IsPoLineItemTableControl(tableControl))
+                continue;
+
+            var children = GetChildControls(controls, tableControl.Id);
+            if (children.Count == 0)
+                continue;
+
+            var assembled = AssembleTableRowFromChildFields(fields, children);
+            if (string.IsNullOrWhiteSpace(assembled))
+                continue;
+
+            var (columnOk, column) = await TryResolveOrCreateEzfbColumnAsync(
+                connection,
+                ezfbTable,
+                tableControl.JsonId,
+                ezfbColumns,
+                cancellationToken,
+                tableControl.Name,
+                tableControl.ColumnName);
+            if (!columnOk)
+                continue;
+
+            if (writtenColumns.Contains(column))
+            {
+                var current = await GetEzfbColumnValueAsync(connection, ezfbTable, formEntryId, column, cancellationToken);
+                if (!IsBlankTableJson(current))
+                    continue;
+            }
+
+            try
+            {
+                await UpdateEzfbColumnAsync(connection, ezfbTable, formEntryId, column, assembled, cancellationToken);
+                writtenColumns.Add(column);
+                updated++;
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "ezfb table fold from child fields failed for formEntryId {FormEntryId}, column {Column}",
+                    formEntryId,
+                    column);
+            }
+        }
+
+        return updated;
+    }
+
+    private static string NormalizeTableRowsJson(string value)
+    {
+        var trimmed = value.Trim();
+        if (!trimmed.StartsWith("[", StringComparison.Ordinal))
+            return value;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return trimmed;
+
+            var hasRowObjects = false;
+            foreach (var item in doc.RootElement.EnumerateArray())
+            {
+                if (item.ValueKind != JsonValueKind.Object)
+                    continue;
+
+                hasRowObjects = true;
+                break;
+            }
+
+            if (!hasRowObjects)
+                return trimmed;
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartArray();
+                foreach (var item in doc.RootElement.EnumerateArray())
+                {
+                    if (item.ValueKind != JsonValueKind.Object)
+                    {
+                        item.WriteTo(writer);
+                        continue;
+                    }
+
+                    writer.WriteStartObject();
+                    foreach (var prop in item.EnumerateObject())
+                    {
+                        if (string.Equals(prop.Name, "_rowId", StringComparison.OrdinalIgnoreCase))
+                            continue;
+
+                        writer.WritePropertyName(prop.Name);
+                        var cell = UnwrapTableCellValue(prop.Value);
+                        writer.WriteStringValue(cell ?? string.Empty);
+                    }
+
+                    writer.WriteEndObject();
+                }
+
+                writer.WriteEndArray();
+            }
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+        catch (JsonException)
+        {
+            return value;
+        }
+    }
+
+    private static bool IsMultiSelectControl(FormControlRow control)
+    {
+        if (string.IsNullOrWhiteSpace(control.Type))
+            return false;
+
+        var type = control.Type.Trim();
+        return type.Contains("MULTI_SELECT", StringComparison.OrdinalIgnoreCase)
+            || type.Contains("MULTISELECT", StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool IsLineItemControl(FormControlRow control) =>
@@ -1995,6 +2503,10 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
 
     private static bool TryGetPropertyIgnoreCase(JsonElement obj, string name, out JsonElement value)
     {
+        value = default;
+        if (obj.ValueKind != JsonValueKind.Object || string.IsNullOrWhiteSpace(name))
+            return false;
+
         foreach (var prop in obj.EnumerateObject())
         {
             if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
@@ -2004,7 +2516,6 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             return true;
         }
 
-        value = default;
         return false;
     }
 

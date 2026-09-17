@@ -53,7 +53,7 @@ public static class MoveToNextStepFormDataParser
             if (ReservedKeys.Contains(prop.Name))
                 continue;
 
-            if (prop.Value.ValueKind == JsonValueKind.Array)
+            if (prop.Value.ValueKind is JsonValueKind.Array or JsonValueKind.Object)
             {
                 dict[prop.Name] = prop.Value.GetRawText();
                 continue;
