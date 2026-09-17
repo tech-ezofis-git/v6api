@@ -128,6 +128,9 @@ public sealed class CreateUserCommandHandler : IRequestHandler<CreateUserCommand
         if (!string.IsNullOrWhiteSpace(request.Password))
             user.SetPasswordHash(BCrypt.Net.BCrypt.HashPassword(request.Password.Trim()));
 
+        // Tenant-setup users stay Configuration=0 (onboarding wizard). Users created later skip it.
+        user.MarkConfigurationCompleted();
+
         await _userRepository.AddAsync(user, cancellationToken);
 
         foreach (var groupName in groupNames)

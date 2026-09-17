@@ -1,5 +1,6 @@
-using Npgsql;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows.Commands.CreateWorkflow;
 
@@ -8,18 +9,26 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 /// <summary>Manages workflow security and user assignments.</summary>
 public sealed class WorkflowSecurityService : IWorkflowSecurityService
 {
+    private const string DefaultPilotEmail = "pilot@ezofis.com";
+
     private readonly ITenantContext _tenantContext;
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly ILogger<WorkflowSecurityService> _logger;
+    private readonly string _pilotEmail;
+    private Guid _unrestrictedCacheUserId;
+    private bool? _unrestrictedCache;
 
     public WorkflowSecurityService(
         ITenantContext tenantContext,
         ICurrentUserProvider currentUserProvider,
-        ILogger<WorkflowSecurityService> logger)
+        ILogger<WorkflowSecurityService> logger,
+        IConfiguration? configuration = null)
     {
         _tenantContext = tenantContext;
         _currentUserProvider = currentUserProvider;
         _logger = logger;
+        var configured = configuration?["TenantPilotUser:Email"]?.Trim();
+        _pilotEmail = string.IsNullOrWhiteSpace(configured) ? DefaultPilotEmail : configured;
     }
 
     public async Task EnsureDefaultWorkflowSecurityAsync(
@@ -273,5 +282,145 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         await insertCommand.ExecuteNonQueryAsync(cancellationToken);
 
         _logger.LogInformation("Workflow users set by domain for workflow {WorkflowId}", workflowId);
+    }
+
+    public Task<bool> UserSeesAllWorkflowsAsync(
+        Guid userId,
+        CancellationToken cancellationToken = default) =>
+        IsUnrestrictedUserAsync(userId, cancellationToken);
+
+    public async Task<bool> CanAccessWorkflowAsync(
+        Guid workflowId,
+        Guid userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (await IsUnrestrictedUserAsync(userId, cancellationToken))
+            return true;
+
+        var connectionString = _tenantContext.ConnectionString;
+        if (string.IsNullOrEmpty(connectionString) || userId == Guid.Empty || workflowId == Guid.Empty)
+            return false;
+
+        const string sql = """
+            SELECT 1
+            FROM workflow."Workflows" w
+            WHERE w."Id" = @WorkflowId
+              AND w."IsDeleted" = false
+              AND (
+                    w."CreatedBy" = @UserId
+                    OR EXISTS (
+                        SELECT 1 FROM workflow."WorkflowSecurity" s
+                        WHERE s."WorkflowId" = w."Id" AND s."UserId" = @UserId AND s."IsDeleted" = false)
+                    OR EXISTS (
+                        SELECT 1 FROM workflow."WorkflowUsers" u
+                        WHERE u."WorkflowId" = w."Id" AND u."UserId" = @UserId AND u."IsDeleted" = false)
+                  )
+            LIMIT 1
+            """;
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue("@WorkflowId", workflowId);
+            command.Parameters.AddWithValue("@UserId", userId);
+            var result = await command.ExecuteScalarAsync(cancellationToken);
+            return result != null && result != DBNull.Value;
+        }
+        catch (PostgresException)
+        {
+            return false;
+        }
+    }
+
+    public async Task<IReadOnlySet<Guid>> GetAccessibleWorkflowIdsAsync(
+        Guid userId,
+        CancellationToken cancellationToken = default)
+    {
+        var ids = new HashSet<Guid>();
+        var connectionString = _tenantContext.ConnectionString;
+        if (string.IsNullOrEmpty(connectionString) || userId == Guid.Empty)
+            return ids;
+
+        const string sql = """
+            SELECT w."Id"
+            FROM workflow."Workflows" w
+            WHERE w."IsDeleted" = false
+              AND (
+                    w."CreatedBy" = @UserId
+                    OR EXISTS (
+                        SELECT 1 FROM workflow."WorkflowSecurity" s
+                        WHERE s."WorkflowId" = w."Id" AND s."UserId" = @UserId AND s."IsDeleted" = false)
+                    OR EXISTS (
+                        SELECT 1 FROM workflow."WorkflowUsers" u
+                        WHERE u."WorkflowId" = w."Id" AND u."UserId" = @UserId AND u."IsDeleted" = false)
+                  )
+            """;
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            await using var command = new NpgsqlCommand(sql, connection);
+            command.Parameters.AddWithValue("@UserId", userId);
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+                ids.Add(reader.GetGuid(0));
+        }
+        catch (PostgresException)
+        {
+            return ids;
+        }
+
+        return ids;
+    }
+
+    private async Task<bool> IsUnrestrictedUserAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        if (userId == Guid.Empty)
+            return false;
+        if (_unrestrictedCache is not null && _unrestrictedCacheUserId == userId)
+            return _unrestrictedCache.Value;
+
+        var unrestricted = false;
+        var connectionString = _tenantContext.ConnectionString;
+        var tenantId = _tenantContext.TenantId;
+        if (!string.IsNullOrEmpty(connectionString) && tenantId is Guid tid)
+        {
+            try
+            {
+                await using var connection = new NpgsqlConnection(connectionString);
+                await connection.OpenAsync(cancellationToken);
+                await using var cmd = new NpgsqlCommand("""
+                    SELECT "Role", "Email"
+                    FROM users."Users"
+                    WHERE "Id" = @UserId
+                      AND "TenantId" = @TenantId
+                      AND "IsDeleted" = false
+                    LIMIT 1
+                    """, connection);
+                cmd.Parameters.AddWithValue("@UserId", userId);
+                cmd.Parameters.AddWithValue("@TenantId", tid);
+                await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+                if (await reader.ReadAsync(cancellationToken))
+                {
+                    var role = reader.IsDBNull(0) ? null : reader.GetString(0);
+                    var email = reader.IsDBNull(1) ? null : reader.GetString(1);
+                    unrestricted = string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase)
+                        || (!string.IsNullOrWhiteSpace(_pilotEmail)
+                            && string.Equals(email?.Trim(), _pilotEmail, StringComparison.OrdinalIgnoreCase));
+                }
+            }
+            catch (PostgresException)
+            {
+                unrestricted = false;
+            }
+        }
+
+        _unrestrictedCacheUserId = userId;
+        _unrestrictedCache = unrestricted;
+        return unrestricted;
     }
 }

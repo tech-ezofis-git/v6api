@@ -3,7 +3,9 @@ using System.Text.Json;
 using MediatR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 using SaaSApp.Api.Middleware;
+using SaaSApp.Api.Options;
 using SaaSApp.Billing.Application.Contracts;
 using SaaSApp.Billing.Application.Credits.Commands.UpdateCredit;
 using SaaSApp.MultiTenancy;
@@ -36,6 +38,7 @@ public sealed class RepositoriesController : ControllerBase
     private readonly IRepositoryAiSummaryService _aiSummary;
     private readonly IMediator _mediator;
     private readonly ILogger<RepositoriesController> _logger;
+    private readonly TenantPilotUserOptions _pilotUserOptions;
 
     public RepositoriesController(
         ITenantProvider tenantProvider,
@@ -53,7 +56,8 @@ public sealed class RepositoriesController : ControllerBase
         ITenantConnectionProvider connectionProvider,
         IRepositoryAiSummaryService aiSummary,
         IMediator mediator,
-        ILogger<RepositoriesController> logger)
+        ILogger<RepositoriesController> logger,
+        IOptions<TenantPilotUserOptions> pilotUserOptions)
     {
         _tenantProvider = tenantProvider;
         _provisioner = provisioner;
@@ -71,6 +75,7 @@ public sealed class RepositoriesController : ControllerBase
         _aiSummary = aiSummary;
         _mediator = mediator;
         _logger = logger;
+        _pilotUserOptions = pilotUserOptions.Value;
     }
 
     /// <summary>Seed default storage providers (EZOFIS, GCP, ONEDRIVE) for current tenant.</summary>
@@ -1255,13 +1260,23 @@ public sealed class RepositoriesController : ControllerBase
         return (repositoryId, itemId, RequireTenantId());
     }
 
-    private bool IsCurrentUserAdmin() =>
-        User.Claims.Any(c =>
+    private bool IsCurrentUserAdmin()
+    {
+        if (User.Claims.Any(c =>
             (c.Type == ClaimTypes.Role || c.Type == "role") &&
             (string.Equals(c.Value, "Admin", StringComparison.OrdinalIgnoreCase) ||
-             string.Equals(c.Value, "Administrator", StringComparison.OrdinalIgnoreCase)));
+             string.Equals(c.Value, "Administrator", StringComparison.OrdinalIgnoreCase))))
+            return true;
 
-    /// <summary>Share-token viewers skip ACL. Admin skips. TenantUser must pass permission.</summary>
+        var email = GetUserEmail();
+        var pilotEmail = _pilotUserOptions.Email?.Trim();
+        if (string.IsNullOrWhiteSpace(pilotEmail))
+            pilotEmail = "pilot@ezofis.com";
+        return !string.IsNullOrWhiteSpace(email)
+            && string.Equals(email.Trim(), pilotEmail, StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Share-token viewers skip ACL. Admin and tenant pilot skip. TenantUser must pass permission.</summary>
     private async Task<IActionResult?> EnsureRepositoryAccessAsync(
         Guid repositoryId,
         Guid tenantId,

@@ -20,6 +20,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly IApAgentPythonJobClient _apAgentPythonJobClient;
     private readonly IApAgentPythonPipelineService _apAgentPythonPipeline;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
+    private readonly IWorkflowSecurityService _security;
     private readonly ILogger<StartWorkflowCommandHandler> _logger;
 
     public StartWorkflowCommandHandler(
@@ -33,6 +34,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         IApAgentPythonJobClient apAgentPythonJobClient,
         IApAgentPythonPipelineService apAgentPythonPipeline,
         IApAgentJobProgressService apAgentJobProgress,
+        IWorkflowSecurityService security,
         ILogger<StartWorkflowCommandHandler> logger)
     {
         _repository = repository;
@@ -45,6 +47,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _apAgentPythonJobClient = apAgentPythonJobClient;
         _apAgentPythonPipeline = apAgentPythonPipeline;
         _apAgentJobProgress = apAgentJobProgress;
+        _security = security;
         _logger = logger;
     }
 
@@ -56,6 +59,9 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         var workflow = await _repository.GetByIdWithStepsAsync(request.WorkflowId, cancellationToken);
         if (workflow == null || workflow.IsDeleted || workflow.TenantId != tenantId)
             throw new InvalidOperationException("Workflow not found.");
+
+        if (!await _security.CanAccessWorkflowAsync(request.WorkflowId, userId, cancellationToken))
+            throw new InvalidOperationException("You do not have access to this workflow.");
 
         if (workflow.Status != WorkflowStatus.Active)
             throw new InvalidOperationException("Only active workflows can be started.");

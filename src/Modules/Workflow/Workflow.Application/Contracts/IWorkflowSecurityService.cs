@@ -20,5 +20,21 @@ public interface IWorkflowSecurityService
         Guid workflowId,
         string[] domains,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Admin and tenant pilot see every workflow. TenantUsers see none until granted.</summary>
+    Task<bool> UserSeesAllWorkflowsAsync(
+        Guid userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>True when the user is unrestricted or is granted this workflow (security, users, or creator).</summary>
+    Task<bool> CanAccessWorkflowAsync(
+        Guid workflowId,
+        Guid userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Workflow ids the user may list. Empty when nothing is granted.</summary>
+    Task<IReadOnlySet<Guid>> GetAccessibleWorkflowIdsAsync(
+        Guid userId,
+        CancellationToken cancellationToken = default);
 }
 
