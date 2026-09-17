@@ -112,7 +112,8 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         var isApAgentMoveNext = ApAgentStepDetector.IsApAgentMoveNext(targetDefinitionStep, request.ActivityId);
         var isApAgentStep = WorkflowStepTransitionHelper.IsApAgentStep(targetDefinitionStep) || isApAgentMoveNext;
         var routesByAction = WorkflowStepActionsHelper.HasMatchingAction(targetDefinitionStep, request.Review)
-            || WorkflowStepTransitionHelper.IsApproveReview(request.Review);
+            || WorkflowStepTransitionHelper.IsApproveReview(request.Review)
+            || (isApAgentStep && WorkflowStepTransitionHelper.IsApAgentDecisionReview(request.Review));
 
         var formId = !string.IsNullOrWhiteSpace(request.FormId)
             ? request.FormId

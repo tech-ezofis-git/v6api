@@ -30,6 +30,27 @@ public static class WorkflowStepTransitionHelper
     public static bool IsApproveReview(string? review) =>
         string.Equals(review?.Trim(), "Approve", StringComparison.OrdinalIgnoreCase);
 
+    /// <summary>
+    /// Reviews the Python AP Agent posts on move-next. These must advance the AP_AGENT
+    /// step to Verifier even when the designer Actions JSON omits matching ProceedAction rows.
+    /// </summary>
+    public static bool IsApAgentDecisionReview(string? review)
+    {
+        if (string.IsNullOrWhiteSpace(review))
+            return false;
+
+        var normalized = string.Join(
+            ' ',
+            review.Trim().Split((char[]?)null, StringSplitOptions.RemoveEmptyEntries));
+
+        return normalized.Equals("Matched", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("Partially Matched", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("Not Matched", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("Non-Invoice", StringComparison.OrdinalIgnoreCase)
+            || normalized.Equals("Non Invoice", StringComparison.OrdinalIgnoreCase)
+            || IsApproveReview(normalized);
+    }
+
     public static WorkflowStepInstance? FindStepInstance(WorkflowInstance instance, Guid workflowStepId) =>
         instance.StepInstances.FirstOrDefault(s => s.WorkflowStepId == workflowStepId);
 

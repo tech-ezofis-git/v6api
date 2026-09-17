@@ -116,6 +116,10 @@ public static class WorkflowStepActionsHelper
             return "VERIFY";
         if (upper is "MATCH" or "MATCHED")
             return "MATCH";
+        if (upper is "NOT MATCHED" or "NOTMATCHED" or "UNMATCHED")
+            return "NOT_MATCH";
+        if (upper is "NON-INVOICE" or "NON INVOICE" or "NONINVOICE")
+            return "NON_INVOICE";
         if (upper is "SUBMIT")
             return "SUBMIT";
         return null;
