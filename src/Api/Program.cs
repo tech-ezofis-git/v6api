@@ -102,6 +102,7 @@ else
     builder.Services.AddDistributedMemoryCache();
 }
 builder.Services.AddScoped<ITwoFactorService, TwoFactorService>();
+builder.Services.AddScoped<ILoginEmailOtpService, LoginEmailOtpService>();
 builder.Services.AddScoped<IEzofisAuthService, EzofisAuthService>();
 builder.Services.AddScoped<SaaSApp.Users.Application.Contracts.IUserTenantRoleSync, UserTenantRoleSync>();
 
