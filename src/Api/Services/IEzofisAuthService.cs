@@ -6,7 +6,7 @@ public interface IEzofisAuthService
     /// <summary>Login with email and password. Returns JWT or LoginRequiresTwoFactor if 2FA enabled.</summary>
     Task<LoginResult> LoginAsync(string email, string password, Guid tenantId, CancellationToken cancellationToken = default);
 
-    /// <summary>Complete login after 2FA. Verifies TOTP code and returns JWT.</summary>
+    /// <summary>Complete login after 2FA. Verifies authenticator TOTP or email OTP and returns JWT.</summary>
     Task<LoginResult> CompleteTwoFactorAsync(string tempToken, string code, CancellationToken cancellationToken = default);
 
     /// <summary>Social login (Google / Microsoft). Email + provider only; no password.</summary>
@@ -53,8 +53,16 @@ public abstract record LoginResult;
 /// <summary>Login succeeded. Use AccessToken in Authorization: Bearer header.</summary>
 public sealed record LoginSuccess(Guid UserId, string AccessToken, string TokenType, int ExpiresIn) : LoginResult;
 
-/// <summary>2FA required. Call POST /api/auth/2fa/complete with TempToken and TOTP code. Send X-Tenant-Id: TenantId.</summary>
-public sealed record LoginRequiresTwoFactor(string TempToken, Guid TenantId, Guid UserId, int ExpiresInSeconds) : LoginResult;
+/// <summary>2FA required. Call POST /api/auth/2fa/complete with TempToken and code. Send X-Tenant-Id: TenantId.</summary>
+/// <param name="Method">Email OTP or Authenticator OTP.</param>
+/// <param name="Message">Human-readable hint (e.g. OTP sent to email).</param>
+public sealed record LoginRequiresTwoFactor(
+    string TempToken,
+    Guid TenantId,
+    Guid UserId,
+    int ExpiresInSeconds,
+    string Method = "Authenticator OTP",
+    string? Message = null) : LoginResult;
 
 /// <summary>Guest-invited user must set password first. Call POST /api/auth/share/set-password.</summary>
 public sealed record LoginRequiresPasswordSetup(Guid TenantId, Guid UserId, string Email, string? ShareToken) : LoginResult;
