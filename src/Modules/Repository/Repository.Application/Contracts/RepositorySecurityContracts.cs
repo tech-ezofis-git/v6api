@@ -116,7 +116,7 @@ public interface IRepositorySecurityService
         Guid? sharedByUserId = null,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Admin bypasses. TenantUser needs View (or grant-only access for item paths).</summary>
+    /// <summary>Admin and tenant pilot bypass. TenantUser needs View (or grant-only access for item paths).</summary>
     Task<bool> CanAccessRepositoryAsync(
         Guid repositoryId,
         Guid tenantId,

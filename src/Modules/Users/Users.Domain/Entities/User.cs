@@ -63,7 +63,10 @@ public sealed class User : Entity<Guid>, ITenantEntity
     // Preferences
     public string? UiPreference { get; private set; }
 
-    /// <summary>Onboarding/configuration wizard: 0 = not completed, 1 = completed.</summary>
+    /// <summary>
+    /// Onboarding wizard: 0 = tenant-setup user (must complete config), 1 = completed / skip wizard.
+    /// New users created inside an existing tenant are stored as 1.
+    /// </summary>
     public int Configuration { get; private set; }
 
     // Audit

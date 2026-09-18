@@ -11,21 +11,32 @@ public sealed class GetWorkflowByIdQueryHandler : IRequestHandler<GetWorkflowByI
     private readonly IWorkflowRepository _repository;
     private readonly IWorkflowJsonStorageService _jsonStorage;
     private readonly IEmailIngestService _emailIngest;
+    private readonly ICurrentUserProvider _currentUser;
+    private readonly IWorkflowSecurityService _security;
 
     public GetWorkflowByIdQueryHandler(
         IWorkflowRepository repository,
         IWorkflowJsonStorageService jsonStorage,
-        IEmailIngestService emailIngest)
+        IEmailIngestService emailIngest,
+        ICurrentUserProvider currentUser,
+        IWorkflowSecurityService security)
     {
         _repository = repository;
         _jsonStorage = jsonStorage;
         _emailIngest = emailIngest;
+        _currentUser = currentUser;
+        _security = security;
     }
 
     public async Task<GetWorkflowByIdQueryResult?> Handle(GetWorkflowByIdQuery request, CancellationToken cancellationToken)
     {
         var workflow = await _repository.GetByIdWithStepsAsync(request.WorkflowId, cancellationToken);
         if (workflow == null || workflow.IsDeleted)
+            return null;
+
+        var userId = _currentUser.GetUserId();
+        if (userId is Guid uid
+            && !await _security.CanAccessWorkflowAsync(request.WorkflowId, uid, cancellationToken))
             return null;
 
         var steps = workflow.Steps

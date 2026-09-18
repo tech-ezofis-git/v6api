@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Globalization;
 using System.Text.Json;
+using Microsoft.Extensions.Configuration;
 using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
@@ -9,17 +10,24 @@ namespace SaaSApp.Repository.Infrastructure.Services;
 
 public sealed class RepositorySecurityService : IRepositorySecurityService
 {
+    private const string DefaultPilotEmail = "pilot@ezofis.com";
     private static readonly ConcurrentDictionary<string, byte> SchemaEnsured = new(StringComparer.OrdinalIgnoreCase);
 
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IStaticRepositoryProvisioner _provisioner;
+    private readonly string _pilotEmail;
+    private Guid _privilegedCacheUserId;
+    private bool? _privilegedCache;
 
     public RepositorySecurityService(
         ITenantConnectionProvider connectionProvider,
-        IStaticRepositoryProvisioner provisioner)
+        IStaticRepositoryProvisioner provisioner,
+        IConfiguration? configuration = null)
     {
         _connectionProvider = connectionProvider;
         _provisioner = provisioner;
+        var configured = configuration?["TenantPilotUser:Email"]?.Trim();
+        _pilotEmail = string.IsNullOrWhiteSpace(configured) ? DefaultPilotEmail : configured;
     }
 
     public async Task EnsureSchemaAsync(CancellationToken cancellationToken = default)
@@ -393,7 +401,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         string permission = RepositorySecurityPermissions.View,
         CancellationToken cancellationToken = default)
     {
-        if (isAdmin)
+        if (await IsPrivilegedUserAsync(tenantId, userId, isAdmin, cancellationToken))
             return true;
 
         await EnsureSchemaAsync(cancellationToken);
@@ -415,14 +423,10 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         var principalIds = await ResolvePrincipalIdsAsync(tenantId, userId, cancellationToken);
         var access = await GetEffectiveFolderAccessAsync(repositoryId, principalIds, cancellationToken);
 
-        // No policies saved yet → open for all TenantUsers (same as before security was configured).
-        if (!access.PoliciesConfigured)
+        if (access.PoliciesConfigured && HasPermission(access.Permissions, permission))
             return true;
 
-        if (HasPermission(access.Permissions, permission))
-            return true;
-
-        // Grant-only users may open the repository to see granted documents.
+        // Default deny until folder or document access is granted to this user.
         if (string.Equals(permission, RepositorySecurityPermissions.View, StringComparison.OrdinalIgnoreCase))
         {
             var docs = await GetDocumentSecurityAsync(repositoryId, tenantId, cancellationToken);
@@ -441,7 +445,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         bool isAdmin,
         CancellationToken cancellationToken = default)
     {
-        if (isAdmin || repositoryIds.Count == 0)
+        if (repositoryIds.Count == 0)
+            return repositoryIds;
+        if (await IsPrivilegedUserAsync(tenantId, userId, isAdmin, cancellationToken))
             return repositoryIds;
 
         await EnsureSchemaAsync(cancellationToken);
@@ -464,7 +470,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         string permission = RepositorySecurityPermissions.View,
         CancellationToken cancellationToken = default)
     {
-        if (isAdmin)
+        if (await IsPrivilegedUserAsync(tenantId, userId, isAdmin, cancellationToken))
             return true;
 
         await EnsureSchemaAsync(cancellationToken);
@@ -494,11 +500,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
 
         var access = await GetEffectiveFolderAccessAsync(repositoryId, principalIds, cancellationToken);
 
-        // Open by default until folder policies exist.
-        if (!access.PoliciesConfigured)
-            return true;
-
-        if (HasPermission(access.Permissions, permission))
+        if (access.PoliciesConfigured && HasPermission(access.Permissions, permission))
             return true;
 
         if (string.Equals(permission, RepositorySecurityPermissions.View, StringComparison.OrdinalIgnoreCase)
@@ -523,7 +525,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         string permission = RepositorySecurityPermissions.View,
         CancellationToken cancellationToken = default)
     {
-        if (isAdmin || items.Count == 0)
+        if (items.Count == 0)
+            return items;
+        if (await IsPrivilegedUserAsync(tenantId, userId, isAdmin, cancellationToken))
             return items;
 
         var result = new List<T>(items.Count);
@@ -546,7 +550,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         string paramPrefix,
         CancellationToken cancellationToken = default)
     {
-        if (isAdmin || userId == Guid.Empty)
+        if (userId == Guid.Empty)
+            return (null, Array.Empty<(string, object)>());
+        if (await IsPrivilegedUserAsync(tenantId, userId, isAdmin, cancellationToken))
             return (null, Array.Empty<(string, object)>());
 
         await EnsureSchemaAsync(cancellationToken);
@@ -660,6 +666,56 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
     private string RequireConnectionString() =>
         _connectionProvider.ConnectionString
         ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+    /// <summary>Admin JWT, Admin role, and the tenant pilot service account always keep folder/document access.</summary>
+    private async Task<bool> IsPrivilegedUserAsync(
+        Guid tenantId,
+        Guid userId,
+        bool isAdmin,
+        CancellationToken cancellationToken)
+    {
+        if (isAdmin)
+            return true;
+        if (userId == Guid.Empty)
+            return false;
+        if (_privilegedCache is not null && _privilegedCacheUserId == userId)
+            return _privilegedCache.Value;
+
+        var privileged = false;
+        try
+        {
+            await using var connection = new NpgsqlConnection(RequireConnectionString());
+            await connection.OpenAsync(cancellationToken);
+            await using var cmd = new NpgsqlCommand("""
+                SELECT "Role", "Email"
+                FROM users."Users"
+                WHERE "Id" = @UserId
+                  AND "TenantId" = @TenantId
+                  AND "IsDeleted" = false
+                LIMIT 1
+                """, connection);
+            cmd.Parameters.AddWithValue("@UserId", userId);
+            cmd.Parameters.AddWithValue("@TenantId", tenantId);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                var role = reader.IsDBNull(0) ? null : reader.GetString(0);
+                var email = reader.IsDBNull(1) ? null : reader.GetString(1);
+                privileged = string.Equals(role, "Admin", StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(role, "Administrator", StringComparison.OrdinalIgnoreCase)
+                    || (!string.IsNullOrWhiteSpace(_pilotEmail)
+                        && string.Equals(email?.Trim(), _pilotEmail, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+        catch (PostgresException)
+        {
+            privileged = false;
+        }
+
+        _privilegedCacheUserId = userId;
+        _privilegedCache = privileged;
+        return privileged;
+    }
 
     private async Task<PrincipalSet> ResolvePrincipalIdsAsync(
         Guid tenantId,
