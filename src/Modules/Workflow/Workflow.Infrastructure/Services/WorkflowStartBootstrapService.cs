@@ -718,8 +718,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         ApAgentPoMasterStartPayloadEnricher.TryReadMasterFromContext(
             instance.Context,
             out var masterSource,
-            out var masterConnectorId);
-        string? masterFormId = null;
+            out var masterConnectorId,
+            out var masterFormId);
 
         try
         {
@@ -763,18 +763,14 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
 
         ApAgentPoMasterStartPayloadEnricher.Enrich(payload, masterSource, masterConnectorId, masterFormId);
 
-        if (payload.TryGetValue("resource", out var resource) && resource is not null)
+        if (payload.TryGetValue("master_source", out var stampedSource) && stampedSource is not null)
         {
             _logger.LogInformation(
-                "AP start payload enriched for PO master: resource={Resource}, connector_id={ConnectorId}",
-                resource,
+                "AP start payload enriched for PO master: master_source={MasterSource}, master_form_id={MasterFormId}, resource={Resource}, connector_id={ConnectorId}",
+                stampedSource,
+                payload.TryGetValue("master_form_id", out var fid) ? fid : null,
+                payload.TryGetValue("resource", out var resource) ? resource : null,
                 payload.TryGetValue("connector_id", out var cid) ? cid : null);
-        }
-        else if (payload.TryGetValue("master_form_id", out var formId) && formId is not null)
-        {
-            _logger.LogInformation(
-                "AP start payload enriched for InternalForm PO master: master_form_id={MasterFormId}",
-                formId);
         }
     }
 
