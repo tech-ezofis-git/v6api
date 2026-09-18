@@ -164,27 +164,52 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 bootstrap.StartPayload,
                 skills);
 
-            if (request.TriggerApAgentPythonJob
-                && dedicatedApAgent != null
-                && !string.IsNullOrWhiteSpace(formDataJson))
+            // Bootstrap may already advance onto the dedicated AP_AGENT step. Always enqueue when we
+            // have that step + payload so tickets are not stranded on AP AGENT 1 without JobProgress.
+            // TriggerApAgentPythonJob remains an explicit opt-in for callers; missing it must not skip.
+            if (dedicatedApAgent != null)
             {
-                var jobArgs = new ApAgentPythonJobArgs(
-                    tenantId,
-                    userId,
-                    request.WorkflowId,
-                    instance.Id,
-                    formDataJson,
-                    Skills: skills);
+                if (string.IsNullOrWhiteSpace(formDataJson))
+                {
+                    _logger.LogWarning(
+                        "AP Agent step present for instance {InstanceId} but form payload is empty; skipping enqueue.",
+                        instance.Id);
+                }
+                else
+                {
+                    var existingJobId = await _apAgentJobProgress.GetLatestActiveJobIdForInstanceAsync(
+                        instance.Id,
+                        cancellationToken);
+                    if (!string.IsNullOrWhiteSpace(existingJobId))
+                    {
+                        apAgentJobId = existingJobId;
+                        _logger.LogInformation(
+                            "AP Agent job {JobId} already active for instance {InstanceId}; skipping enqueue.",
+                            apAgentJobId,
+                            instance.Id);
+                    }
+                    else
+                    {
+                        var jobArgs = new ApAgentPythonJobArgs(
+                            tenantId,
+                            userId,
+                            request.WorkflowId,
+                            instance.Id,
+                            formDataJson,
+                            Skills: skills);
 
-                apAgentJobId = await _apAgentPythonJobClient.EnqueueAsync(jobArgs, cancellationToken);
+                        apAgentJobId = await _apAgentPythonJobClient.EnqueueAsync(jobArgs, cancellationToken);
 
-                var chatJson = _apAgentPythonPipeline.BuildChatRequestJson(jobArgs, apAgentJobId);
-                pythonInput = JsonSerializer.Deserialize<JsonElement>(chatJson);
+                        var chatJson = _apAgentPythonPipeline.BuildChatRequestJson(jobArgs, apAgentJobId);
+                        pythonInput = JsonSerializer.Deserialize<JsonElement>(chatJson);
 
-                _logger.LogInformation(
-                    "Enqueued AP Agent Python job {JobId} for instance {InstanceId} (multipart start with file).",
-                    apAgentJobId,
-                    instance.Id);
+                        _logger.LogInformation(
+                            "Enqueued AP Agent Python job {JobId} for instance {InstanceId} (triggerRequested={TriggerRequested}).",
+                            apAgentJobId,
+                            instance.Id,
+                            request.TriggerApAgentPythonJob);
+                    }
+                }
             }
 
             return new StartWorkflowCommandResult(
