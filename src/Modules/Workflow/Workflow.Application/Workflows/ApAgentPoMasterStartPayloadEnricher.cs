@@ -4,15 +4,14 @@ using SaaSApp.Workflow.Application.Connectors;
 namespace SaaSApp.Workflow.Application.Workflows;
 
 /// <summary>
-/// When PO Master (email-ingest masterSource) is QuickBooks or SAP,
-/// inject resource / connector_id / skills into the Hangfire start payload
-/// so Python runs po_lookup_* before po_match.
-/// InternalForm sets master_source + master_form_id (ezfb PO master table)
-/// and leaves connector skills unset.
+/// When Workflow PO Master is configured, stamp the Hangfire/AP start payload so
+/// Agents validate only what Workflow says (no tenant GUID hardcodes).
+/// InternalForm → master_source + master_form_id (ezfb /masters/po).
+/// QuickBooks / SAP / HANA → master_source + resource + connector_id + po_lookup_* before po_match.
 /// </summary>
 public static class ApAgentPoMasterStartPayloadEnricher
 {
-    /// <summary>Matches orchestrator PHASE1_SKILL_ORDER.</summary>
+    /// <summary>Matches orchestrator DEFAULT_SKILL_ORDER.</summary>
     public static readonly string[] DefaultApSkills =
     [
         "extract_invoice",
@@ -38,6 +37,12 @@ public static class ApAgentPoMasterStartPayloadEnricher
             throw new ArgumentNullException(nameof(payload));
 
         var source = (masterSource ?? string.Empty).Trim();
+        var formId = (masterFormId ?? string.Empty).Trim();
+
+        // Form-only binding with empty source → treat as InternalForm.
+        if (source.Length == 0 && formId.Length > 0)
+            source = EmailIngestMasterSources.InternalForm;
+
         if (source.Length == 0)
             return;
 
@@ -45,33 +50,38 @@ public static class ApAgentPoMasterStartPayloadEnricher
             || string.Equals(source, "Ezofis", StringComparison.OrdinalIgnoreCase)
             || string.Equals(source, "Form", StringComparison.OrdinalIgnoreCase))
         {
-            ApplyInternalFormMaster(payload, masterFormId);
+            ApplyInternalFormMaster(payload, formId);
             return;
         }
 
-        if (string.Equals(source, EmailIngestMasterSources.QuickBooks, StringComparison.OrdinalIgnoreCase))
+        // Always stamp master_source for connector masters (Agents gate on it).
+        SetIfMissing(payload, "master_source", source);
+        SetIfMissing(payload, "masterSource", source);
+
+        if (string.Equals(source, EmailIngestMasterSources.QuickBooks, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source, "QB", StringComparison.OrdinalIgnoreCase))
         {
             ApplyConnectorMaster(payload, "QUICKBOOKS", masterConnectorId, SkillPoLookupQuickBooks);
             return;
         }
 
-        if (string.Equals(source, EmailIngestMasterSources.Sap, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(source, "Sap", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(source, "HANA", StringComparison.OrdinalIgnoreCase))
+        if (IsSapOrHanaSource(source))
         {
-            var resource = string.Equals(source, "HANA", StringComparison.OrdinalIgnoreCase) ? "HANA" : "SAP";
+            var resource = source.Contains("HANA", StringComparison.OrdinalIgnoreCase) ? "HANA" : "SAP";
             ApplyConnectorMaster(payload, resource, masterConnectorId, SkillPoLookupSap);
         }
     }
 
-    /// <summary>Read masterSource / masterConnectorId from workflow instance Context JSON.</summary>
+    /// <summary>Read masterSource / masterConnectorId / masterFormId from workflow instance Context JSON.</summary>
     public static void TryReadMasterFromContext(
         string? contextJson,
         out string? masterSource,
-        out Guid? masterConnectorId)
+        out Guid? masterConnectorId,
+        out string? masterFormId)
     {
         masterSource = null;
         masterConnectorId = null;
+        masterFormId = null;
         if (string.IsNullOrWhiteSpace(contextJson))
             return;
 
@@ -81,13 +91,35 @@ public static class ApAgentPoMasterStartPayloadEnricher
             if (doc.RootElement.ValueKind != JsonValueKind.Object)
                 return;
             var root = doc.RootElement;
-            masterSource = ReadString(root, "masterSource", "MasterSource");
-            masterConnectorId = ReadGuid(root, "masterConnectorId", "MasterConnectorId");
+            masterSource = ReadString(root, "masterSource", "MasterSource", "master_source");
+            masterFormId = ReadString(root, "masterFormId", "MasterFormId", "master_form_id");
+            masterConnectorId = ReadGuid(root, "masterConnectorId", "MasterConnectorId", "master_connector_id");
         }
         catch (JsonException)
         {
             // ignore malformed context
         }
+    }
+
+    /// <summary>Backward-compatible overload (ignores masterFormId).</summary>
+    public static void TryReadMasterFromContext(
+        string? contextJson,
+        out string? masterSource,
+        out Guid? masterConnectorId)
+        => TryReadMasterFromContext(contextJson, out masterSource, out masterConnectorId, out _);
+
+    private static bool IsSapOrHanaSource(string source)
+    {
+        if (string.Equals(source, EmailIngestMasterSources.Sap, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source, "Sap", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(source, "HANA", StringComparison.OrdinalIgnoreCase))
+            return true;
+        var compact = source.Replace(" ", "", StringComparison.Ordinal)
+            .Replace("-", "", StringComparison.Ordinal)
+            .Replace("_", "", StringComparison.Ordinal);
+        return compact.Contains("HANA", StringComparison.OrdinalIgnoreCase)
+            || compact.StartsWith("SAP", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(compact, "S4", StringComparison.OrdinalIgnoreCase);
     }
 
     private static void ApplyInternalFormMaster(
@@ -166,6 +198,12 @@ public static class ApAgentPoMasterStartPayloadEnricher
         }
 
         payload["skills"] = skills;
+    }
+
+    private static void SetIfMissing(IDictionary<string, object?> payload, string key, string value)
+    {
+        if (!HasNonEmptyString(payload, key))
+            payload[key] = value;
     }
 
     private static List<string>? ReadSkills(IDictionary<string, object?> payload)

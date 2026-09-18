@@ -7,23 +7,38 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
 {
     private static readonly Guid SapConnectorId = Guid.Parse("983bddbe-6a1a-4cd8-a024-9b4d84ba9981");
     private static readonly Guid QbConnectorId = Guid.Parse("11111111-2222-3333-4444-555555555555");
+    private static readonly Guid MasterFormId = Guid.Parse("168f611f-464e-47c5-be1d-d194d5a3c0dc");
 
     [Fact]
     public void Enrich_InternalForm_SetsMasterSourceAndFormId()
     {
         var payload = BasePayload();
-        const string formId = "168f611f-464e-47c5-be1d-d194d5a3c0dc";
         ApAgentPoMasterStartPayloadEnricher.Enrich(
             payload,
             EmailIngestMasterSources.InternalForm,
             null,
-            formId);
+            MasterFormId.ToString("D"));
 
         Assert.Equal(EmailIngestMasterSources.InternalForm, payload["master_source"]);
-        Assert.Equal(formId, payload["master_form_id"]);
+        Assert.Equal(MasterFormId.ToString("D"), payload["master_form_id"]);
         Assert.False(payload.ContainsKey("resource"));
         Assert.False(payload.ContainsKey("connector_id"));
         Assert.False(payload.ContainsKey("skills"));
+    }
+
+    [Fact]
+    public void Enrich_FormIdOnly_TreatsAsInternalForm()
+    {
+        var payload = BasePayload();
+        ApAgentPoMasterStartPayloadEnricher.Enrich(
+            payload,
+            null,
+            null,
+            MasterFormId.ToString("D"));
+
+        Assert.Equal(EmailIngestMasterSources.InternalForm, payload["master_source"]);
+        Assert.Equal(MasterFormId.ToString("D"), payload["master_form_id"]);
+        Assert.False(payload.ContainsKey("resource"));
     }
 
     [Fact]
@@ -50,6 +65,7 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
             EmailIngestMasterSources.Sap,
             SapConnectorId);
 
+        Assert.Equal("SAP", payload["master_source"]);
         Assert.Equal("SAP", payload["resource"]);
         Assert.Equal(SapConnectorId.ToString("D"), payload["connector_id"]);
         var skills = Assert.IsType<List<string>>(payload["skills"]);
@@ -64,6 +80,22 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
     }
 
     [Fact]
+    public void Enrich_Hana_InjectsHanaResourceAndSapLookupSkill()
+    {
+        var payload = BasePayload();
+        ApAgentPoMasterStartPayloadEnricher.Enrich(
+            payload,
+            "HANA",
+            SapConnectorId);
+
+        Assert.Equal("HANA", payload["master_source"]);
+        Assert.Equal("HANA", payload["resource"]);
+        Assert.Equal(SapConnectorId.ToString("D"), payload["connector_id"]);
+        var skills = Assert.IsType<List<string>>(payload["skills"]);
+        Assert.Contains(ApAgentPoMasterStartPayloadEnricher.SkillPoLookupSap, skills);
+    }
+
+    [Fact]
     public void Enrich_QuickBooks_InjectsResourceConnectorAndSkills()
     {
         var payload = BasePayload();
@@ -72,6 +104,7 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
             EmailIngestMasterSources.QuickBooks,
             QbConnectorId);
 
+        Assert.Equal("QuickBooks", payload["master_source"]);
         Assert.Equal("QUICKBOOKS", payload["resource"]);
         Assert.Equal(QbConnectorId.ToString("D"), payload["connector_id"]);
         var skills = Assert.IsType<List<string>>(payload["skills"]);
@@ -97,7 +130,6 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
         Assert.Equal("CUSTOM", payload["resource"]);
         Assert.Equal("already-set", payload["connector_id"]);
         var skills = Assert.IsType<List<string>>(payload["skills"]);
-        // Still inserts lookup before po_match when skills already present without it.
         Assert.Equal(
             new[] { "extract_invoice", "po_lookup_sap", "po_match", "finalize_decision" },
             skills);
@@ -110,17 +142,20 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
             {
               "emailIngest": true,
               "masterSource": "SAP",
-              "masterConnectorId": "983bddbe-6a1a-4cd8-a024-9b4d84ba9981"
+              "masterConnectorId": "983bddbe-6a1a-4cd8-a024-9b4d84ba9981",
+              "masterFormId": "168f611f-464e-47c5-be1d-d194d5a3c0dc"
             }
             """;
 
         ApAgentPoMasterStartPayloadEnricher.TryReadMasterFromContext(
             context,
             out var source,
-            out var connectorId);
+            out var connectorId,
+            out var formId);
 
         Assert.Equal("SAP", source);
         Assert.Equal(SapConnectorId, connectorId);
+        Assert.Equal(MasterFormId.ToString("D"), formId);
     }
 
     private static Dictionary<string, object?> BasePayload() => new()
