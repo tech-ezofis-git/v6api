@@ -650,7 +650,10 @@ WHERE "Id" = @WorkflowId AND "IsDeleted" = false;
         MailboxFormSnapshot formData,
         CancellationToken cancellationToken = default)
     {
-        if (string.IsNullOrWhiteSpace(formData.FormId) || formData.FormEntryId is not { } entryGuid || entryGuid == Guid.Empty)
+        if (string.IsNullOrWhiteSpace(formData.FormDataJson)
+            && (string.IsNullOrWhiteSpace(formData.FormId)
+                || formData.FormEntryId is not { } missingEntry
+                || missingEntry == Guid.Empty))
             return;
 
         var connectionString = _tenantContext.ConnectionString;
@@ -667,20 +670,51 @@ WHERE "Id" = @WorkflowId AND "IsDeleted" = false;
         var workflowIdCompact = workflowId.ToString("N");
         var instanceStr = workflowInstanceId.ToString("D");
 
-        var formId = formData.FormId.Trim();
-        var formEntryId = formData.FormEntryId.Value.ToString("D");
+        var formId = formData.FormId?.Trim();
+        var formEntryId = formData.FormEntryId is { } entry && entry != Guid.Empty
+            ? entry.ToString("D")
+            : null;
         var formDataJson = formData.FormDataJson;
 
-        if (string.IsNullOrWhiteSpace(formDataJson))
+        if (string.IsNullOrWhiteSpace(formId) || string.IsNullOrWhiteSpace(formEntryId))
+        {
+            var process = await ReadProcessFormIdentityAsync(connection, suffix, workflowInstanceId, cancellationToken);
+            if (process != null)
+            {
+                formId = string.IsNullOrWhiteSpace(formId) ? process.Value.FormId : formId;
+                formEntryId ??= process.Value.FormEntryId?.ToString("D");
+            }
+        }
+
+        if (string.IsNullOrWhiteSpace(formId))
+            return;
+
+        if (string.IsNullOrWhiteSpace(formDataJson)
+            && !string.IsNullOrWhiteSpace(formEntryId)
+            && Guid.TryParse(formEntryId, out var entryGuid)
+            && entryGuid != Guid.Empty)
         {
             formDataJson = await WorkflowEzfbFormDataLoader.LoadFormDataJsonAsync(
-                connection, formId, formData.FormEntryId.Value, cancellationToken);
+                connection, formId, entryGuid, cancellationToken);
         }
+
+        if (string.IsNullOrWhiteSpace(formDataJson))
+            return;
 
         foreach (var prefix in new[] { "inbox", "sent", "completed" })
         {
             var table = MailboxTable(prefix, suffix);
-            var sql = $@"
+            var sql = string.IsNullOrWhiteSpace(formEntryId)
+                ? $@"
+UPDATE {table}
+SET form_id = @FormId,
+    form_data = @FormData
+WHERE (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
+  AND (
+      workflow_instance_id = @WorkflowInstanceIdStr
+      OR {TryCastUuid("workflow_instance_id")} = @WorkflowInstanceId
+  );"
+                : $@"
 UPDATE {table}
 SET form_id = @FormId,
     form_entry_id = @FormEntryId,
@@ -693,8 +727,9 @@ WHERE (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
 
             await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@FormId", formId);
-            cmd.Parameters.AddWithValue("@FormEntryId", formEntryId);
-            cmd.Parameters.AddWithValue("@FormData", (object?)formDataJson ?? DBNull.Value);
+            if (!string.IsNullOrWhiteSpace(formEntryId))
+                cmd.Parameters.AddWithValue("@FormEntryId", formEntryId);
+            cmd.Parameters.AddWithValue("@FormData", formDataJson);
             cmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
             cmd.Parameters.AddWithValue("@WorkflowTableKey", workflowIdCompact);
             cmd.Parameters.AddWithValue("@WorkflowInstanceIdStr", instanceStr);
@@ -709,6 +744,66 @@ WHERE (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
                     table,
                     workflowInstanceId);
             }
+        }
+    }
+
+    public async Task<(string? FormId, Guid? FormEntryId)?> TryGetProcessFormIdentityAsync(
+        Guid workflowId,
+        Guid workflowInstanceId,
+        CancellationToken cancellationToken = default)
+    {
+        var connectionString = _tenantContext.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return null;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        var suffix = workflowId.ToString("N")[..8];
+        return await ReadProcessFormIdentityAsync(connection, suffix, workflowInstanceId, cancellationToken);
+    }
+
+    private static async Task<(string? FormId, Guid? FormEntryId)?> ReadProcessFormIdentityAsync(
+        NpgsqlConnection connection,
+        string suffix,
+        Guid workflowInstanceId,
+        CancellationToken cancellationToken)
+    {
+        var processFormTable = $"workflow.process_form_{suffix}";
+        var sql = $@"
+SELECT
+    w_form_id,
+    form_entry_id
+FROM {processFormTable}
+WHERE workflow_instance_id = @WorkflowInstanceId
+  AND is_deleted = false
+ORDER BY id DESC
+LIMIT 1;";
+
+        try
+        {
+            await using var cmd = new NpgsqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                return null;
+
+            var formId = reader.IsDBNull(0) ? null : Convert.ToString(reader.GetValue(0));
+            Guid? formEntryId = null;
+            if (!reader.IsDBNull(1))
+            {
+                var raw = Convert.ToString(reader.GetValue(1));
+                if (Guid.TryParse(raw, out var parsed) && parsed != Guid.Empty)
+                    formEntryId = parsed;
+            }
+
+            if (string.IsNullOrWhiteSpace(formId) && formEntryId is null)
+                return null;
+
+            return (string.IsNullOrWhiteSpace(formId) ? null : formId.Trim(), formEntryId);
+        }
+        catch (PostgresException)
+        {
+            return null;
         }
     }
 }
