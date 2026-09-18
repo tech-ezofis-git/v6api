@@ -28,4 +28,13 @@ public interface IWorkflowLegacyMailboxSyncService
         Guid workflowInstanceId,
         MailboxFormSnapshot formData,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Reads <c>process_form_*</c> for the instance (w_form_id + form_entry_id).
+    /// Used when move-next omits formEntryId but the start already linked an ezfb row.
+    /// </summary>
+    Task<(string? FormId, Guid? FormEntryId)?> TryGetProcessFormIdentityAsync(
+        Guid workflowId,
+        Guid workflowInstanceId,
+        CancellationToken cancellationToken = default);
 }

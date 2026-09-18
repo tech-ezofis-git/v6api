@@ -2470,36 +2470,45 @@ public record MoveToNextStepRequest(
 
     private (string? FormId, Guid? FormEntryId) ResolveFormData()
     {
-        if (!string.IsNullOrWhiteSpace(FormId) || FormEntryId.HasValue)
-            return (FormId, FormEntryId);
+        string? formId = string.IsNullOrWhiteSpace(FormId) ? null : FormId.Trim();
+        Guid? formEntryId = FormEntryId is { } fe && fe != Guid.Empty ? fe : null;
 
-        if (!FormData.HasValue)
-            return (null, null);
-
-        var el = FormData.Value;
-        if (el.ValueKind == JsonValueKind.Object)
+        if (FormData.HasValue)
         {
-            string? fid = null;
-            Guid? entry = null;
-            if (el.TryGetProperty("formId", out var f) && f.ValueKind == JsonValueKind.String)
-                fid = f.GetString();
-            if (TryReadFormEntryGuid(el, "formentryId", out var n))
-                entry = n;
-            else if (TryReadFormEntryGuid(el, "formEntryId", out var n2))
-                entry = n2;
-            return (fid, entry);
+            var el = FormData.Value;
+            if (el.ValueKind == JsonValueKind.Object)
+            {
+                if (string.IsNullOrWhiteSpace(formId)
+                    && el.TryGetProperty("formId", out var f)
+                    && f.ValueKind == JsonValueKind.String)
+                    formId = f.GetString();
+                if (formEntryId is null)
+                {
+                    if (TryReadFormEntryGuid(el, "formentryId", out var n))
+                        formEntryId = n;
+                    else if (TryReadFormEntryGuid(el, "formEntryId", out var n2))
+                        formEntryId = n2;
+                }
+            }
+            else if (el.ValueKind == JsonValueKind.String
+                && (string.IsNullOrWhiteSpace(formId) || formEntryId is null))
+            {
+                var parts = el.GetString()?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+                if (parts is { Length: >= 2 }
+                    && Guid.TryParse(parts[1], out var entryId)
+                    && entryId != Guid.Empty)
+                {
+                    formId ??= parts[0];
+                    formEntryId ??= entryId;
+                }
+            }
         }
 
-        if (el.ValueKind == JsonValueKind.String)
-        {
-            var parts = el.GetString()?.Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
-            if (parts is { Length: >= 2 }
-                && Guid.TryParse(parts[1], out var entryId)
-                && entryId != Guid.Empty)
-                return (parts[0], entryId);
-        }
+        // Item-table / repository-linked starts store ezfb row id as itemId when formEntryId is omitted.
+        if (formEntryId is null && ItemId is { } itemId && itemId != Guid.Empty)
+            formEntryId = itemId;
 
-        return (null, null);
+        return (formId, formEntryId);
     }
 
     private static bool TryReadFormEntryGuid(JsonElement el, string name, out Guid entryId)

@@ -83,15 +83,34 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             throw new InvalidOperationException("Workflow is cancelled.");
 
         var lineItemsJson = request.FormLineItemsJson;
+        var formId = !string.IsNullOrWhiteSpace(request.FormId)
+            ? request.FormId
+            : request.ApAgent?.FormId;
+        var formEntryId = ResolveFormEntryId(request);
 
-        if (!string.IsNullOrWhiteSpace(request.FormId)
-            && request.FormEntryId is { } reqEntryId && reqEntryId != Guid.Empty
-            && ((request.FormDataFields is { Count: > 0 })
-                || !string.IsNullOrWhiteSpace(lineItemsJson)))
+        if ((formEntryId is null || formEntryId == Guid.Empty)
+            && HasUserFormData(request))
+        {
+            var fromProcess = await _mailboxSync.TryGetProcessFormIdentityAsync(
+                instance.WorkflowId,
+                instance.Id,
+                cancellationToken);
+            if (fromProcess != null)
+            {
+                if (string.IsNullOrWhiteSpace(formId) && !string.IsNullOrWhiteSpace(fromProcess.Value.FormId))
+                    formId = fromProcess.Value.FormId;
+                if (fromProcess.Value.FormEntryId is { } processEntry && processEntry != Guid.Empty)
+                    formEntryId = processEntry;
+            }
+        }
+
+        if (!string.IsNullOrWhiteSpace(formId)
+            && formEntryId is { } reqEntryId && reqEntryId != Guid.Empty
+            && HasUserFormData(request))
         {
             await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
-                request.FormId,
-                request.FormEntryId.Value,
+                formId,
+                reqEntryId,
                 request.FormDataFields ?? new Dictionary<string, string>(),
                 lineItemsJson,
                 cancellationToken);
@@ -115,12 +134,10 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             || WorkflowStepTransitionHelper.IsApproveReview(request.Review)
             || (isApAgentStep && WorkflowStepTransitionHelper.IsApAgentDecisionReview(request.Review));
 
-        var formId = !string.IsNullOrWhiteSpace(request.FormId)
-            ? request.FormId
-            : request.ApAgent?.FormId;
-        var formEntryId = request.FormEntryId is { } fe && fe != Guid.Empty
-            ? request.FormEntryId
-            : request.ApAgent?.FormEntryId;
+        if (string.IsNullOrWhiteSpace(formId))
+            formId = request.ApAgent?.FormId;
+        if (formEntryId is null || formEntryId == Guid.Empty)
+            formEntryId = ResolveFormEntryId(request);
 
         if (isApAgentStep && !string.IsNullOrWhiteSpace(request.Review) && !routesByAction)
         {
@@ -502,6 +519,17 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         return false;
     }
 
+    private static Guid? ResolveFormEntryId(MoveToNextStepCommand request)
+    {
+        if (request.FormEntryId is { } fe && fe != Guid.Empty)
+            return fe;
+        if (request.ApAgent?.FormEntryId is { } afe && afe != Guid.Empty)
+            return afe;
+        if (request.ApAgent?.RepositoryItemId is { } itemId && itemId != Guid.Empty)
+            return itemId;
+        return null;
+    }
+
     private static bool HasUserFormData(MoveToNextStepCommand request) =>
         !string.IsNullOrWhiteSpace(request.SubmittedFormDataJson)
         || request.FormDataFields is { Count: > 0 }
@@ -515,9 +543,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         bool preferEzfb = false)
     {
         var resolvedFormId = !string.IsNullOrWhiteSpace(formId) ? formId : request.FormId;
-        var resolvedEntryId = formEntryId is { } e && e != Guid.Empty ? formEntryId : request.FormEntryId;
-        if (string.IsNullOrWhiteSpace(resolvedFormId) || resolvedEntryId is not { } resolved || resolved == Guid.Empty)
-            return null;
+        var resolvedEntryId = formEntryId is { } e && e != Guid.Empty
+            ? formEntryId
+            : ResolveFormEntryId(request);
 
         string? formDataJson = null;
 
@@ -530,7 +558,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                     request.FormLineItemsJson);
         }
 
-        if (string.IsNullOrWhiteSpace(formDataJson))
+        if (string.IsNullOrWhiteSpace(formDataJson)
+            && !string.IsNullOrWhiteSpace(resolvedFormId)
+            && resolvedEntryId is { } resolved && resolved != Guid.Empty)
         {
             formDataJson = await _ezfbFormDataLoader.LoadFormDataJsonAsync(
                 resolvedFormId,
