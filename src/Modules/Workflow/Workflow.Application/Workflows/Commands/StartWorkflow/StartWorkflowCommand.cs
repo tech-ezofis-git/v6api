@@ -9,6 +9,10 @@ public record StartWorkflowCommand(
     string? Context = null,
     string? EnvType = null,
     StartWorkflowAttachmentPayload? Attachment = null,
+    /// <summary>
+    /// Explicit opt-in to enqueue AP Agent. When the workflow has a dedicated AP_AGENT step and
+    /// bootstrap produced form payload, Core enqueues regardless of this flag so tickets are not stranded.
+    /// </summary>
     bool TriggerApAgentPythonJob = false,
     IReadOnlyList<string>? Skills = null,
     IReadOnlyDictionary<string, string>? FormDataFields = null,
