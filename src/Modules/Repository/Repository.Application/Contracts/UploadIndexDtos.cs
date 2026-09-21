@@ -71,11 +71,14 @@ public sealed record UploadIndexSaveRequest(
     IReadOnlyList<UploadIndexFieldDto>? Fields,
     string? OcrResult = null);
 
-/// <summary>Accepted response when archive is queued.</summary>
+/// <summary>Response when stage file is archived (sync — no Hangfire).</summary>
 public sealed record UploadIndexArchiveQueuedResult(
     string StageId,
     string HangfireJobId,
-    string Message);
+    string Message,
+    Guid? ItemId = null,
+    string? FileName = null,
+    string? FilePath = null);
 
 public sealed record UploadIndexListRequest(
     int CurrentPage = 1,
@@ -98,6 +101,60 @@ public sealed record UploadIndexListResult(
     int CurrentPage,
     int ItemsPerPage,
     int TotalItems);
+
+/// <summary>One file in a bulk upload batch (staged immediately; OCR may still be running).</summary>
+public sealed record BulkUploadFileResult(
+    string FileId,
+    Guid RepositoryId,
+    string FileName,
+    string FilePath,
+    string OcrJson,
+    IReadOnlyList<UploadIndexFieldDto>? OcrFieldList,
+    bool Succeeded,
+    string? Error = null,
+    string? Status = null);
+
+/// <summary>
+/// Immediate bulk-upload response — files are on monitor/stage; OCR runs in Hangfire.
+/// Poll GET bulkUpload/jobs/{jobId} for OCR progress.
+/// </summary>
+public sealed record BulkUploadResult(
+    Guid RepositoryId,
+    string JobId,
+    string Message,
+    IReadOnlyList<BulkUploadFileResult> Files,
+    int Succeeded,
+    int Failed);
+
+/// <summary>Hangfire args for background OCR of a bulk-upload batch (StageIdsCsv = comma-separated GUIDs).</summary>
+public sealed record BulkOcrJobArgs(
+    Guid TenantId,
+    Guid RepositoryId,
+    string StageIdsCsv,
+    string? SharedFieldsJson,
+    string? PageNo,
+    string? OcrType,
+    string? ValidateType,
+    Guid? UserId);
+
+/// <summary>Per-file OCR status for a bulk job.</summary>
+public sealed record BulkUploadFileStatusItem(
+    string FileId,
+    string FileName,
+    string Status,
+    string? Error = null);
+
+/// <summary>Poll bulk OCR job — Hangfire state + each stage row status.</summary>
+public sealed record BulkUploadJobStatusResult(
+    string JobId,
+    string HangfireState,
+    bool IsTerminal,
+    string? ErrorMessage,
+    Guid RepositoryId,
+    IReadOnlyList<BulkUploadFileStatusItem> Files,
+    int OcrCompleted,
+    int OcrPending,
+    int OcrFailed);
 
 public sealed record ArchiveStageJobArgs(
     Guid TenantId,

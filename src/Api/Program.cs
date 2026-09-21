@@ -38,9 +38,14 @@ var builder = WebApplication.CreateBuilder(args);
 
 builder.Configuration
     .AddJsonFile("appsettings.ActivityLog.json", optional: true, reloadOnChange: true)
-    .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true)
-    // Loaded last so committed production secrets (EzofisAuth, TenantPilotUser) win over blank .env.azure overrides.
-    .AddJsonFile("appsettings.Production.json", optional: true, reloadOnChange: true);
+    .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true);
+
+// Production-only overrides (EzofisAuth, pool sizes, RunServerInApi=false for separate worker).
+// Do NOT load this in Development — it disables the in-process Hangfire server and blocks OCR/archive jobs.
+if (builder.Environment.IsProduction())
+{
+    builder.Configuration.AddJsonFile("appsettings.Production.json", optional: true, reloadOnChange: true);
+}
 
 
 // Serilog + Application Insights (clear default providers to avoid duplicate log lines)

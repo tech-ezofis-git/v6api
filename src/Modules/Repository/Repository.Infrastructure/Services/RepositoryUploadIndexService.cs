@@ -479,20 +479,30 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             tenantId,
             stageId,
             fieldValues,
-            status: string.IsNullOrWhiteSpace(request.Status) ? "Queued" : request.Status,
+            status: string.IsNullOrWhiteSpace(request.Status) ? "Indexing" : request.Status,
             stageStatus: "Archiving",
             ocrResult: request.OcrResult,
             userId,
             cancellationToken);
 
-        var tenantDisplay = await _tenantDisplay.ResolveAsync(tenantId, cancellationToken);
-        var jobId = BackgroundJob.Enqueue<ArchiveStageItemJob>(j =>
-            j.Execute(tenantDisplay, new ArchiveStageJobArgs(tenantId, request.RepositoryId, stageId, userId), null));
+        // Archive immediately (no Hangfire) — promote monitor file into repository archive.
+        var promoted = await PromoteStageAsync(
+            stageId,
+            request.RepositoryId,
+            tenantId,
+            userId,
+            cancellationToken);
+
+        if (promoted == null)
+            return null;
 
         return new UploadIndexArchiveQueuedResult(
             stageId.ToString("D"),
-            jobId,
-            "Archive queued. Hangfire will promote the staged file into the repository archive layout.");
+            HangfireJobId: string.Empty,
+            Message: "Archived successfully.",
+            promoted.ItemId,
+            promoted.FileName,
+            promoted.FilePath);
     }
 
     public async Task<UploadIndexListResult> ListIndexAsync(
@@ -533,6 +543,398 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             r.PromotedItemId?.ToString("D"))).ToList();
 
         return new UploadIndexListResult(items, page, pageSize, total);
+    }
+
+    public async Task<BulkUploadResult> BulkUploadAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        IReadOnlyList<(Stream Stream, string FileName, string? ContentType, long FileSize)> files,
+        string? sharedFieldsJson,
+        string? pageNo,
+        string? ocrType,
+        string? validateType,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (files == null || files.Count == 0)
+            throw new ArgumentException("At least one file is required for bulk upload.");
+
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException("Repository not found.");
+
+        await _provisioner.EnsureRepositoryTablesAsync(repositoryId, tenantId, cancellationToken);
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        var results = new List<BulkUploadFileResult>(files.Count);
+        var stagedIds = new List<Guid>(files.Count);
+
+        foreach (var file in files)
+        {
+            var fileName = string.IsNullOrWhiteSpace(file.FileName) ? "upload.bin" : file.FileName.Trim();
+            try
+            {
+                await using var buffer = new MemoryStream();
+                await file.Stream.CopyToAsync(buffer, cancellationToken);
+                buffer.Position = 0;
+
+                // Stage to monitor + stage table only — OCR runs in Hangfire.
+                var upload = await UploadAsync(
+                    repositoryId,
+                    tenantId,
+                    buffer,
+                    fileName,
+                    file.ContentType,
+                    file.FileSize > 0 ? file.FileSize : buffer.Length,
+                    sharedFieldsJson,
+                    userId,
+                    cancellationToken);
+
+                if (!Guid.TryParse(upload.FileId, out var stageId))
+                    throw new InvalidOperationException("Stage id was not returned from upload.");
+
+                await using (var connection = new NpgsqlConnection(connectionString))
+                {
+                    await connection.OpenAsync(cancellationToken);
+                    await RepositoryStageStore.UpdateFieldsAsync(
+                        connection,
+                        repo,
+                        tenantId,
+                        stageId,
+                        ParseFieldsToDictionary(sharedFieldsJson),
+                        status: "Queued",
+                        stageStatus: "PendingOCR",
+                        ocrResult: null,
+                        userId,
+                        cancellationToken);
+                }
+
+                stagedIds.Add(stageId);
+                results.Add(new BulkUploadFileResult(
+                    stageId.ToString("D"),
+                    repositoryId,
+                    fileName,
+                    FilePath: string.Empty,
+                    OcrJson: string.Empty,
+                    OcrFieldList: upload.OcrFieldList,
+                    Succeeded: true,
+                    Status: "Queued"));
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or PostgresException)
+            {
+                results.Add(new BulkUploadFileResult(
+                    FileId: string.Empty,
+                    repositoryId,
+                    fileName,
+                    FilePath: string.Empty,
+                    OcrJson: string.Empty,
+                    OcrFieldList: null,
+                    Succeeded: false,
+                    Error: ex.Message,
+                    Status: "Failed"));
+            }
+        }
+
+        var succeeded = results.Count(r => r.Succeeded);
+        if (stagedIds.Count == 0)
+        {
+            return new BulkUploadResult(
+                repositoryId,
+                JobId: string.Empty,
+                Message: "No files were uploaded.",
+                results,
+                succeeded,
+                results.Count - succeeded);
+        }
+
+        var tenantDisplay = await _tenantDisplay.ResolveAsync(tenantId, cancellationToken);
+        var jobArgs = new BulkOcrJobArgs(
+            tenantId,
+            repositoryId,
+            string.Join(",", stagedIds.Select(id => id.ToString("D"))),
+            sharedFieldsJson,
+            pageNo,
+            ocrType,
+            validateType,
+            userId);
+
+        var jobId = BackgroundJob.Enqueue<BulkUploadOcrJob>(j =>
+            j.Execute(tenantDisplay, jobArgs, null));
+
+        return new BulkUploadResult(
+            repositoryId,
+            jobId,
+            "Upload successful. OCR queued — poll job status for progress.",
+            results,
+            succeeded,
+            results.Count - succeeded);
+    }
+
+    public async Task ProcessBulkOcrForStageAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid stageId,
+        string? sharedFieldsJson,
+        string? pageNo,
+        string? ocrType,
+        string? validateType,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException("Repository not found.");
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken)
+            ?? throw new InvalidOperationException($"Stage row {stageId:D} not found.");
+
+        if (string.IsNullOrWhiteSpace(row.FilePath) || string.IsNullOrWhiteSpace(row.FileName))
+            throw new InvalidOperationException("Stage row is missing file path or name.");
+
+        // Already OCR'd (idempotent retry).
+        if (string.Equals(row.Status, "OCR", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(row.OcrJson))
+            return;
+
+        var providers = await _storageSeed.ListProvidersAsync(tenantId, cancellationToken);
+        var providerCode = providers.First(p => p.Id == row.StorageProviderId).Code;
+
+        await using var source = await _fileStorage.OpenReadAsync(
+            tenantId,
+            row.FilePath,
+            providerCode,
+            cancellationToken);
+
+        await using var buffer = new MemoryStream();
+        await source.CopyToAsync(buffer, cancellationToken);
+        buffer.Position = 0;
+
+        try
+        {
+            var ocr = await UploadForOcrAsync(
+                repositoryId,
+                tenantId,
+                buffer,
+                sharedFieldsJson,
+                pageNo,
+                ocrType,
+                validateType,
+                row.FileName,
+                cancellationToken);
+
+            var sharedFieldValues = ParseFieldsToDictionary(sharedFieldsJson);
+            var merged = ParseFieldsToDictionary(ocr.OcrFieldList);
+
+            // Drop OCR placeholders like "null" so naming/shared values can fill them.
+            foreach (var key in merged.Keys.ToList())
+            {
+                if (IsEmptyOcrValue(merged[key]))
+                    merged.Remove(key);
+            }
+
+            // Shared bulk inputs win only when the user actually supplied a value
+            // (OCR param lines like "Year, SINGLE_SELECT" parse to empty — must not wipe OCR).
+            foreach (var (key, value) in sharedFieldValues)
+            {
+                if (string.IsNullOrWhiteSpace(key) || IsEmptyOcrValue(value))
+                    continue;
+                merged[key] = value;
+            }
+
+            // Keep any values already on the stage row (from initial shared-fields upload).
+            foreach (var (key, value) in row.FieldValues)
+            {
+                if (!string.IsNullOrWhiteSpace(key) && !IsEmptyOcrValue(value))
+                    merged.TryAdd(key, value);
+            }
+
+            RepositoryNamingFieldMetadataInjector.InjectFromOriginalFileName(
+                repo.Fields,
+                merged,
+                row.FileName,
+                row.FileType);
+
+            var fieldValues = CollapseFieldValuesToSqlColumns(merged, repo.Fields);
+
+            await RepositoryStageStore.UpdateFieldsAsync(
+                connection,
+                repo,
+                tenantId,
+                stageId,
+                fieldValues,
+                status: "OCR",
+                stageStatus: "OCR",
+                ocrResult: ocr.OcrJson,
+                userId,
+                cancellationToken,
+                ocrText: ocr.OcrText);
+        }
+        catch (Exception)
+        {
+            await RepositoryStageStore.UpdateFieldsAsync(
+                connection,
+                repo,
+                tenantId,
+                stageId,
+                row.FieldValues,
+                status: "OCRFailed",
+                stageStatus: "OCRFailed",
+                ocrResult: null,
+                userId,
+                cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task<BulkUploadJobStatusResult?> GetBulkUploadJobStatusAsync(
+        string jobId,
+        Guid tenantId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(jobId))
+            return null;
+
+        jobId = jobId.Trim();
+        var hangfireState = ResolveHangfireState(jobId);
+        if (hangfireState == null)
+            return null;
+
+        var args = TryGetBulkOcrJobArgs(jobId);
+        var repositoryId = args?.RepositoryId ?? Guid.Empty;
+        var stageIds = ParseBulkStageIds(args?.StageIdsCsv);
+
+        var files = new List<BulkUploadFileStatusItem>();
+        if (repositoryId != Guid.Empty && stageIds.Count > 0)
+        {
+            var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+            if (repo != null)
+            {
+                var connectionString = _connectionProvider.ConnectionString
+                    ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+                await using var connection = new NpgsqlConnection(connectionString);
+                await connection.OpenAsync(cancellationToken);
+
+                foreach (var stageId in stageIds)
+                {
+                    var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+                    if (row == null)
+                    {
+                        files.Add(new BulkUploadFileStatusItem(
+                            stageId.ToString("D"),
+                            string.Empty,
+                            "Missing",
+                            "Stage row not found."));
+                        continue;
+                    }
+
+                    var status = row.Status ?? row.StageStatus ?? "Unknown";
+                    files.Add(new BulkUploadFileStatusItem(
+                        stageId.ToString("D"),
+                        row.FileName ?? string.Empty,
+                        status));
+                }
+            }
+        }
+
+        var ocrCompleted = files.Count(f =>
+            string.Equals(f.Status, "OCR", StringComparison.OrdinalIgnoreCase));
+        var ocrFailed = files.Count(f =>
+            f.Status.Contains("Fail", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(f.Status, "Missing", StringComparison.OrdinalIgnoreCase));
+        var ocrPending = files.Count - ocrCompleted - ocrFailed;
+
+        var terminal = string.Equals(hangfireState, "Succeeded", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(hangfireState, "Failed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(hangfireState, "Deleted", StringComparison.OrdinalIgnoreCase);
+
+        string? errorMessage = null;
+        if (string.Equals(hangfireState, "Failed", StringComparison.OrdinalIgnoreCase))
+            errorMessage = TryGetHangfireExceptionMessage(jobId);
+
+        return new BulkUploadJobStatusResult(
+            jobId,
+            hangfireState,
+            terminal,
+            errorMessage,
+            repositoryId,
+            files,
+            ocrCompleted,
+            Math.Max(0, ocrPending),
+            ocrFailed);
+    }
+
+    private static string? ResolveHangfireState(string jobId)
+    {
+        try
+        {
+            var connection = JobStorage.Current.GetConnection();
+            var state = connection.GetStateData(jobId);
+            return state?.Name;
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static string? TryGetHangfireExceptionMessage(string jobId)
+    {
+        try
+        {
+            var connection = JobStorage.Current.GetConnection();
+            var state = connection.GetStateData(jobId);
+            if (state?.Data != null
+                && state.Data.TryGetValue("ExceptionMessage", out var message)
+                && !string.IsNullOrWhiteSpace(message))
+            {
+                return message;
+            }
+        }
+        catch
+        {
+            // Hangfire storage may be unavailable.
+        }
+
+        return null;
+    }
+
+    private static BulkOcrJobArgs? TryGetBulkOcrJobArgs(string jobId)
+    {
+        try
+        {
+            var details = JobStorage.Current.GetMonitoringApi().JobDetails(jobId);
+            if (details?.Job?.Args == null || details.Job.Args.Count < 2)
+                return null;
+
+            var raw = details.Job.Args[1];
+            if (raw is BulkOcrJobArgs typed)
+                return typed;
+
+            var json = JsonSerializer.Serialize(raw);
+            return JsonSerializer.Deserialize<BulkOcrJobArgs>(json, JsonOptions);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static List<Guid> ParseBulkStageIds(string? csv)
+    {
+        if (string.IsNullOrWhiteSpace(csv))
+            return new List<Guid>();
+
+        return csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(s => Guid.TryParse(s, out var g) ? g : Guid.Empty)
+            .Where(g => g != Guid.Empty)
+            .ToList();
     }
 
     private UploadIndexLoadResult MapToLoadResult(RepositoryDetailDto repo, RepositoryStageRow row)
@@ -608,11 +1010,19 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         {
             if (string.IsNullOrWhiteSpace(field.Name))
                 continue;
-            dict[field.Name.Trim()] = field.Value ?? string.Empty;
+            var value = field.Value ?? string.Empty;
+            if (IsEmptyOcrValue(value))
+                continue;
+            dict[field.Name.Trim()] = value.Trim();
         }
 
         return dict;
     }
+
+    /// <summary>OCR often returns the literal string "null" for missing fields.</summary>
+    private static bool IsEmptyOcrValue(string? value) =>
+        string.IsNullOrWhiteSpace(value)
+        || value.Trim().Equals("null", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>
     /// Maps OCR/UI display names (e.g. "Document Description", "Project No") onto SqlColumnName keys

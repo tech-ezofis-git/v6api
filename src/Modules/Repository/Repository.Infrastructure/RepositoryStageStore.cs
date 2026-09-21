@@ -62,16 +62,19 @@ internal static class RepositoryStageStore
         var columns = new List<string>();
         var values = new List<string>();
         var parameters = new List<NpgsqlParameter>();
+        // Physical names (file_name) — logical "FileName" + field "Filename" both map here.
         var used = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         void Add(string column, string param, object? value)
         {
             if (!RepositoryItemTableColumns.Has(tableColumns, column))
                 return;
+            if (!used.Add(RepositorySqlHelper.ToPhysicalName(column)))
+                return;
+
             columns.Add(RepositorySqlHelper.ColumnRef(column));
             values.Add(param);
             parameters.Add(new NpgsqlParameter(param, value ?? DBNull.Value));
-            used.Add(column);
         }
 
         Add("Id", "@Id", stageId);
@@ -89,6 +92,10 @@ internal static class RepositoryStageStore
         var fieldIndex = 0;
         foreach (var (key, value) in fieldValues ?? new Dictionary<string, string>())
         {
+            if (string.IsNullOrWhiteSpace(value))
+                continue;
+            if (RepositorySqlHelper.ReservedItemColumns.Contains(key))
+                continue;
             if (!RepositoryItemFilterHelper.TryResolveFilterColumn(key, allowedColumns, repo, out var col))
                 continue;
 
@@ -96,7 +103,8 @@ internal static class RepositoryStageStore
                 ? canonicalCol
                 : col;
 
-            if (!RepositoryItemTableColumns.Has(tableColumns, canonical) || !used.Add(canonical))
+            if (!RepositoryItemTableColumns.Has(tableColumns, canonical)
+                || !used.Add(RepositorySqlHelper.ToPhysicalName(canonical)))
                 continue;
 
             var param = $"@F{fieldIndex++}";
