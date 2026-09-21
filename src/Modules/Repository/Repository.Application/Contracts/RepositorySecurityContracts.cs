@@ -116,6 +116,32 @@ public interface IRepositorySecurityService
         Guid? sharedByUserId = null,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Filter share: mark recipient as share-scoped on this repository and grant view on documents
+    /// matching the live filters (plus files they upload when <paramref name="canUpload"/>).
+    /// New matching documents become visible automatically.
+    /// </summary>
+    Task EnsureShareRecipientFilterAccessAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid recipientUserId,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> filters,
+        bool canUpload,
+        Guid? sharedByUserId = null,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Dashboard / folder share: recipient can open the repository and view all documents in it
+    /// (plus upload when <paramref name="canUpload"/>).
+    /// </summary>
+    Task EnsureShareRecipientRepositoryAccessAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid recipientUserId,
+        bool canUpload,
+        Guid? sharedByUserId = null,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Admin and tenant pilot bypass. TenantUser needs View (or grant-only access for item paths).</summary>
     Task<bool> CanAccessRepositoryAsync(
         Guid repositoryId,

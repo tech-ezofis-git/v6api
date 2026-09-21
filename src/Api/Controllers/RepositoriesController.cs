@@ -11,6 +11,7 @@ using SaaSApp.Billing.Application.Credits.Commands.UpdateCredit;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
+using SaaSApp.Repository.Infrastructure;
 using SaaSApp.Repository.Infrastructure.Options;
 using SaaSApp.Repository.Infrastructure.Services;
 using SaaSApp.Security;
@@ -354,14 +355,17 @@ public sealed class RepositoriesController : ControllerBase
     [HttpGet("/api/repositories/{id:guid}/items")]
     public async Task<IActionResult> ListItems(Guid id, [FromQuery] RepositoryItemListQuery query, CancellationToken cancellationToken)
     {
-        var tenantId = RequireTenantId();
-        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+        if (await EnsureShareContextAsync(cancellationToken) is { } shareError)
+            return shareError;
+
+        var (repoId, tenantId) = ResolveRepositoryAccess(id);
+        if (await EnsureRepositoryAccessAsync(repoId, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
             return denied;
         try
         {
-            var normalized = NormalizeItemListQuery(query);
-            var result = await _items.ListItemsAsync(id, tenantId, normalized, cancellationToken);
-            result = await ApplyItemListSecurityAsync(id, tenantId, result, cancellationToken);
+            var normalized = ApplyShareFiltersToQuery(NormalizeItemListQuery(query));
+            var result = await _items.ListItemsAsync(repoId, tenantId, normalized, cancellationToken);
+            result = await ApplyItemListSecurityAsync(repoId, tenantId, result, cancellationToken);
             return Ok(result);
         }
         catch (ArgumentException ex)
@@ -391,14 +395,17 @@ public sealed class RepositoriesController : ControllerBase
         [FromBody] RepositoryItemQueryRequest request,
         CancellationToken cancellationToken)
     {
-        var tenantId = RequireTenantId();
-        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+        if (await EnsureShareContextAsync(cancellationToken) is { } shareError)
+            return shareError;
+
+        var (repoId, tenantId) = ResolveRepositoryAccess(id);
+        if (await EnsureRepositoryAccessAsync(repoId, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
             return denied;
         try
         {
-            var query = ToItemListQuery(request);
-            var result = await _items.ListItemsAsync(id, tenantId, query, cancellationToken);
-            result = await ApplyItemListSecurityAsync(id, tenantId, result, cancellationToken);
+            var query = ApplyShareFiltersToQuery(ToItemListQuery(request));
+            var result = await _items.ListItemsAsync(repoId, tenantId, query, cancellationToken);
+            result = await ApplyItemListSecurityAsync(repoId, tenantId, result, cancellationToken);
             return Ok(result);
         }
         catch (ArgumentException ex)
@@ -778,6 +785,45 @@ public sealed class RepositoriesController : ControllerBase
             var result = await _itemShares.CreateShareAsync(
                 tenantId, id, itemId, userId.Value, request, cancellationToken);
             return CreatedAtAction(nameof(GetItem), new { id, itemId }, result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Share a live filtered view of this repository with an external user.
+    /// Recipient can open only this folder and only documents matching <c>filters</c>
+    /// (same JSON as items list). New matching files appear automatically.
+    /// Example: <c>{"filters":"{\"Supplier\":\"APC-T001\"}"}</c> or body filters object.
+    /// </summary>
+    [HttpPost("/api/repositories/{id:guid}/share-filter")]
+    [ProducesResponseType(typeof(CreateRepositoryItemShareResult), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ShareFilter(
+        Guid id,
+        [FromBody] CreateRepositoryFilterShareRequest request,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        var userId = GetUserId();
+        if (userId == null || userId == Guid.Empty)
+            return Unauthorized(new { error = "User id is required." });
+
+        if (await EnsureRepositoryAccessAsync(id, tenantId, RepositorySecurityPermissions.View, cancellationToken) is { } denied)
+            return denied;
+
+        try
+        {
+            var result = await _itemShares.CreateFilterShareAsync(
+                tenantId, id, userId.Value, request, cancellationToken);
+            return StatusCode(StatusCodes.Status201Created, result);
         }
         catch (ArgumentException ex)
         {
@@ -1255,9 +1301,48 @@ public sealed class RepositoriesController : ControllerBase
     private (Guid RepositoryId, Guid ItemId, Guid TenantId) ResolveItemAccess(Guid repositoryId, Guid itemId)
     {
         if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
-            return (share.SourceRepositoryId, share.SourceItemId, share.SourceTenantId);
+        {
+            var resolvedItemId = share.IsFilterShare
+                ? itemId
+                : share.SourceItemId ?? itemId;
+            return (share.SourceRepositoryId, resolvedItemId, share.SourceTenantId);
+        }
 
         return (repositoryId, itemId, RequireTenantId());
+    }
+
+    private (Guid RepositoryId, Guid TenantId) ResolveRepositoryAccess(Guid repositoryId)
+    {
+        if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
+            return (share.SourceRepositoryId, share.SourceTenantId);
+
+        return (repositoryId, RequireTenantId());
+    }
+
+    private RepositoryItemListQuery ApplyShareFiltersToQuery(RepositoryItemListQuery query)
+    {
+        if (!RepositoryShareContext.TryGet(HttpContext, out var share)
+            || share == null
+            || !share.IsFilterShare
+            || string.IsNullOrWhiteSpace(share.FiltersJson))
+        {
+            return query;
+        }
+
+        // Filter share is locked to the invited filters (live matching set).
+        return new RepositoryItemListQuery
+        {
+            Filters = share.FiltersJson,
+            Search = query.Search,
+            DateFrom = query.DateFrom,
+            DateTo = query.DateTo,
+            SortBy = query.SortBy,
+            SortOrder = query.SortOrder,
+            Page = query.Page,
+            PageSize = query.PageSize,
+            SkipTotal = query.SkipTotal,
+            Cursor = query.Cursor
+        };
     }
 
     private bool IsCurrentUserAdmin()
@@ -1307,7 +1392,17 @@ public sealed class RepositoriesController : ControllerBase
         CancellationToken cancellationToken)
     {
         if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
+        {
+            if (share.IsFilterShare)
+            {
+                if (!ItemMatchesShareFilters(fields, share.FiltersJson))
+                    return StatusCode(StatusCodes.Status403Forbidden, new { error = "You do not have access to this document." });
+                return null;
+            }
+
+            // Item and dashboard shares: allowed within shared repository (item share resolves to SourceItemId).
             return null;
+        }
         if (IsCurrentUserAdmin())
             return null;
 
@@ -1433,6 +1528,25 @@ public sealed class RepositoriesController : ControllerBase
     {
         if (RepositoryShareContext.TryGet(HttpContext, out var share) && share != null)
         {
+            if (share.IsDashboardShare)
+            {
+                // Dashboard share: guest may browse all documents in the shared repository.
+                return result;
+            }
+
+            if (share.IsFilterShare)
+            {
+                // Live filter share: keep documents that match invited filters (new files included).
+                var matched = result.Data
+                    .Where(i => ItemMatchesShareFilters(RepositorySecurityFieldMap.FromListItem(i), share.FiltersJson))
+                    .ToList();
+                return result with
+                {
+                    Data = matched,
+                    TotalCount = result.TotalSkipped ? result.TotalCount : matched.Count
+                };
+            }
+
             var sharedOnly = result.Data.Where(i => i.Id == share.SourceItemId).ToList();
             return result with { Data = sharedOnly, TotalCount = sharedOnly.Count };
         }
@@ -1459,6 +1573,52 @@ public sealed class RepositoriesController : ControllerBase
             Data = filtered,
             TotalCount = result.TotalSkipped ? result.TotalCount : filtered.Count
         };
+    }
+
+    private static bool ItemMatchesShareFilters(
+        IReadOnlyDictionary<string, string?> fields,
+        string? filtersJson)
+    {
+        if (string.IsNullOrWhiteSpace(filtersJson))
+            return false;
+
+        IReadOnlyDictionary<string, IReadOnlyList<string>> filters;
+        try
+        {
+            filters = RepositoryItemFilterHelper.ParseItemFilters(filtersJson);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+
+        if (filters.Count == 0)
+            return false;
+
+        foreach (var (field, values) in filters)
+        {
+            if (values.Count == 0)
+                continue;
+
+            fields.TryGetValue(field, out var actual);
+            if (actual is null)
+            {
+                foreach (var kv in fields)
+                {
+                    if (string.Equals(kv.Key, field, StringComparison.OrdinalIgnoreCase))
+                    {
+                        actual = kv.Value;
+                        break;
+                    }
+                }
+            }
+
+            var left = actual?.Trim() ?? string.Empty;
+            if (!values.Any(v => string.Equals(left, v?.Trim(), StringComparison.OrdinalIgnoreCase)))
+                return false;
+        }
+
+        return true;
     }
 
     private Guid? GetUserId()

@@ -1,3 +1,5 @@
+using System.Text.Json;
+
 namespace SaaSApp.Repository.Application.Contracts;
 
 public sealed record CreateRepositoryItemShareRequest(
@@ -14,6 +16,48 @@ public sealed record CreateRepositoryItemShareRequest(
     /// </summary>
     int Action = 0);
 
+/// <summary>
+/// Share a live filtered view of a repository (folder access + filter only).
+/// Recipient sees current matching files and any new files that match the same filters.
+/// </summary>
+public sealed class CreateRepositoryFilterShareRequest
+{
+    public string Email { get; init; } = "";
+
+    /// <summary>JSON object, e.g. <c>{ "Supplier": "APC-T001" }</c>.</summary>
+    public JsonElement? Filters { get; init; }
+
+    /// <summary>Optional alternate when filters are sent as a JSON string.</summary>
+    public string? FiltersJson { get; init; }
+
+    public string? Message { get; init; }
+    public bool ProvisionGuestUser { get; init; } = true;
+
+    /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
+    public int Action { get; init; }
+}
+
+/// <summary>
+/// Share a repository dashboard with an external user.
+/// Guest can open the dashboard and browse documents in that dashboard's repository (live).
+/// </summary>
+public sealed class CreateDashboardShareRequest
+{
+    public string Email { get; init; } = "";
+
+    /// <summary>Repository scoped by the dashboard (required for document access).</summary>
+    public Guid? RepositoryId { get; init; }
+
+    /// <summary>Optional workflow-scoped dashboard.</summary>
+    public Guid? WorkflowId { get; init; }
+
+    public string? Message { get; init; }
+    public bool ProvisionGuestUser { get; init; } = true;
+
+    /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
+    public int Action { get; init; }
+}
+
 public sealed record CreateWorkflowInboxShareRequest(
     string Email,
     Guid RepositoryId,
@@ -29,7 +73,7 @@ public sealed record CreateRepositoryItemShareResult(
     Guid ShareId,
     string ShareToken,
     Guid SourceRepositoryId,
-    Guid SourceItemId,
+    Guid? SourceItemId,
     string RecipientEmail,
     DateTime ExpiresAtUtc,
     /// <summary>
@@ -48,7 +92,13 @@ public sealed record CreateRepositoryItemShareResult(
     IReadOnlyList<string>? AllowedAuthMethods = null,
     Guid? SourceTenantId = null,
     /// <summary>UI label: <c>Can View</c> or <c>Can Edit</c>.</summary>
-    string Permission = "Can View");
+    string Permission = "Can View",
+    /// <summary><c>Item</c>, <c>Filter</c>, or <c>Dashboard</c>.</summary>
+    string ShareKind = "Item",
+    /// <summary>Stored filters for filter shares (same JSON as create request).</summary>
+    string? FiltersJson = null,
+    Guid? SourceDashboardId = null,
+    Guid? SourceWorkflowId = null);
 
 /// <summary>How a share invite recipient should authenticate.</summary>
 public sealed record ShareInviteAuthInfo(
@@ -68,7 +118,7 @@ public sealed record RepositoryItemSharePreviewDto(
     string ShareToken,
     Guid SourceTenantId,
     Guid SourceRepositoryId,
-    Guid SourceItemId,
+    Guid? SourceItemId,
     string? FileName,
     string? SourceOrganizationName,
     string RecipientEmail,
@@ -85,14 +135,21 @@ public sealed record RepositoryItemSharePreviewDto(
     /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
     int Action = 0,
     /// <summary>UI label: <c>Can View</c> or <c>Can Edit</c>.</summary>
-    string Permission = "Can View");
+    string Permission = "Can View",
+    /// <summary><c>Item</c>, <c>Filter</c>, or <c>Dashboard</c>.</summary>
+    string ShareKind = "Item",
+    /// <summary>Live filters for filter shares.</summary>
+    string? FiltersJson = null,
+    string? RepositoryName = null,
+    Guid? SourceDashboardId = null,
+    Guid? SourceWorkflowId = null);
 
 /// <summary>A file that was shared with the logged-in user (for the "Shared with me" list).</summary>
 public sealed record SharedWithMeItemDto(
     Guid ShareId,
     string ShareToken,
     Guid SourceRepositoryId,
-    Guid SourceItemId,
+    Guid? SourceItemId,
     string? FileName,
     string? SourceOrganizationName,
     DateTime SharedAtUtc,
@@ -100,7 +157,11 @@ public sealed record SharedWithMeItemDto(
     /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
     int Action = 0,
     /// <summary>UI label: <c>Can View</c> or <c>Can Edit</c>.</summary>
-    string Permission = "Can View");
+    string Permission = "Can View",
+    string ShareKind = "Item",
+    string? FiltersJson = null,
+    Guid? SourceDashboardId = null,
+    Guid? SourceWorkflowId = null);
 
 public interface IRepositoryItemShareService
 {
@@ -110,6 +171,30 @@ public interface IRepositoryItemShareService
         Guid itemId,
         Guid sharedByUserId,
         CreateRepositoryItemShareRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Share a repository filtered view with an external user. Access is limited to that folder
+    /// and the stored filters; new matching files appear automatically.
+    /// </summary>
+    Task<CreateRepositoryItemShareResult> CreateFilterShareAsync(
+        Guid sourceTenantId,
+        Guid repositoryId,
+        Guid sharedByUserId,
+        CreateRepositoryFilterShareRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Share a dashboard (and its repository documents) with an external user.
+    /// Guest can view the dashboard and browse documents in that repository.
+    /// </summary>
+    Task<CreateRepositoryItemShareResult> CreateDashboardShareAsync(
+        Guid sourceTenantId,
+        Guid sharedByUserId,
+        CreateDashboardShareRequest request,
+        Guid dashboardId,
+        Guid repositoryId,
+        Guid? workflowId,
         CancellationToken cancellationToken = default);
 
     /// <summary>Workflow inbox share: provisions guest user in tenant and creates read-only file share.</summary>
