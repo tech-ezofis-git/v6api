@@ -752,6 +752,22 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 if (string.IsNullOrWhiteSpace(masterFormId))
                     masterFormId = jsonFormId;
             }
+
+            // AP_AGENT block settings (poMasterSourceType + formId / apAgent.formId) are the
+            // designer source of truth for InternalForm masters — not the invoice formId.
+            if (WorkflowApAgentJson.TryReadPoMaster(
+                    workflowJson,
+                    out var blockSource,
+                    out var blockConnectorId,
+                    out var blockFormId))
+            {
+                if (!string.IsNullOrWhiteSpace(blockSource))
+                    masterSource = blockSource;
+                if (blockConnectorId is { } bc && bc != Guid.Empty)
+                    masterConnectorId = bc;
+                if (!string.IsNullOrWhiteSpace(blockFormId))
+                    masterFormId = blockFormId;
+            }
         }
         catch (Exception ex)
         {
