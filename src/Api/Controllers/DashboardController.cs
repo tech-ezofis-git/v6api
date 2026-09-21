@@ -1,9 +1,12 @@
+using System.Security.Claims;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SaaSApp.Api.Middleware;
 using SaaSApp.Api.Services;
 using SaaSApp.MultiTenancy;
+using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Security;
 using SaaSApp.Workflow.Application.Contracts;
 
@@ -21,15 +24,24 @@ public sealed class DashboardController : ControllerBase
     private readonly IDashboardPythonClient _client;
     private readonly IDashboardSchemaService _schemaService;
     private readonly ITenantProvider _tenantProvider;
+    private readonly IRepositoryItemShareService _itemShares;
+    private readonly ITenantConnectionStringResolver _connectionResolver;
+    private readonly ITenantConnectionProvider _connectionProvider;
 
     public DashboardController(
         IDashboardPythonClient client,
         IDashboardSchemaService schemaService,
-        ITenantProvider tenantProvider)
+        ITenantProvider tenantProvider,
+        IRepositoryItemShareService itemShares,
+        ITenantConnectionStringResolver connectionResolver,
+        ITenantConnectionProvider connectionProvider)
     {
         _client = client;
         _schemaService = schemaService;
         _tenantProvider = tenantProvider;
+        _itemShares = itemShares;
+        _connectionResolver = connectionResolver;
+        _connectionProvider = connectionProvider;
     }
 
     /// <summary>
@@ -193,6 +205,9 @@ public sealed class DashboardController : ControllerBase
         CancellationToken cancellationToken = default)
     {
         request ??= new DashboardDataRequest();
+        if (await TryApplyDashboardShareScopeAsync(request, cancellationToken) is { } shareError)
+            return shareError;
+
         request.TenantId ??= _tenantProvider.GetTenantId();
 
         if (request.TenantId is null || request.TenantId == Guid.Empty)
@@ -316,6 +331,84 @@ public sealed class DashboardController : ControllerBase
         return Ok(snapshot);
     }
 
+    /// <summary>
+    /// Share this dashboard with an external user (same invite flow as file/filter share).
+    /// Guest can open the dashboard and browse documents in the dashboard's repository.
+    /// Requires a saved schema for the given repository/workflow (or dashboardId).
+    /// </summary>
+    [HttpPost("share")]
+    [Produces("application/json")]
+    [ProducesResponseType(typeof(CreateRepositoryItemShareResult), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> Share(
+        [FromBody] CreateDashboardShareApiRequest? request,
+        CancellationToken cancellationToken = default)
+    {
+        request ??= new CreateDashboardShareApiRequest();
+        var tenantId = request.TenantId ?? _tenantProvider.GetTenantId();
+        if (tenantId is null || tenantId == Guid.Empty)
+            return BadRequest(new { error = "tenant_id is required." });
+
+        var userId = GetUserId();
+        if (userId is null || userId == Guid.Empty)
+            return Unauthorized(new { error = "User id is required." });
+
+        if (string.IsNullOrWhiteSpace(request.Email))
+            return BadRequest(new { error = "email is required." });
+
+        DashboardSchemaSnapshotDto? snapshot;
+        if (request.DashboardId is Guid dashboardId && dashboardId != Guid.Empty)
+        {
+            snapshot = await _schemaService.GetByIdAsync(tenantId.Value, dashboardId, cancellationToken);
+        }
+        else
+        {
+            if (request.RepositoryId is null && request.WorkflowId is null)
+                return BadRequest(new { error = "repository_id, workflow_id, or dashboard_id is required." });
+
+            snapshot = await _schemaService.GetAsync(
+                tenantId.Value, request.RepositoryId, request.WorkflowId, cancellationToken);
+        }
+
+        if (snapshot == null)
+            return NotFound(new { error = "No saved dashboard found for this scope. Save schema first." });
+
+        var repositoryId = request.RepositoryId ?? snapshot.RepositoryId;
+        if (repositoryId is null || repositoryId == Guid.Empty)
+            return BadRequest(new { error = "repository_id is required to share dashboard documents." });
+
+        try
+        {
+            var result = await _itemShares.CreateDashboardShareAsync(
+                tenantId.Value,
+                userId.Value,
+                new CreateDashboardShareRequest
+                {
+                    Email = request.Email,
+                    RepositoryId = repositoryId,
+                    WorkflowId = request.WorkflowId ?? snapshot.WorkflowId,
+                    Message = request.Message,
+                    ProvisionGuestUser = request.ProvisionGuestUser,
+                    Action = request.Action
+                },
+                snapshot.Id,
+                repositoryId.Value,
+                request.WorkflowId ?? snapshot.WorkflowId,
+                cancellationToken);
+
+            return StatusCode(StatusCodes.Status201Created, result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
     private bool TryValidate(
         DashboardSchemaRequest request,
         bool requireDashboardJson,
@@ -351,6 +444,45 @@ public sealed class DashboardController : ControllerBase
         }
 
         return true;
+    }
+
+    private async Task<IActionResult?> TryApplyDashboardShareScopeAsync(
+        DashboardDataRequest request,
+        CancellationToken cancellationToken)
+    {
+        var shareToken = RepositoryShareTokenReader.Read(HttpContext);
+        if (string.IsNullOrWhiteSpace(shareToken))
+            return null;
+
+        var email = User.FindFirstValue("email")
+            ?? User.FindFirstValue(ClaimTypes.Email)
+            ?? User.FindFirstValue("http://schemas.xmlsoap.org/ws/2005/05/identity/claims/emailaddress");
+        if (string.IsNullOrWhiteSpace(email))
+            return Unauthorized(new { error = "Login required to view shared dashboard." });
+
+        var access = await _itemShares.ResolveShareAccessAsync(shareToken.Trim(), email, cancellationToken: cancellationToken);
+        if (access == null || !access.IsDashboardShare)
+            return StatusCode(StatusCodes.Status403Forbidden, new { error = "Invalid or unauthorized dashboard share link." });
+
+        var sourceConnection = await _connectionResolver.GetConnectionStringAsync(access.SourceTenantId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(sourceConnection))
+            return NotFound(new { error = "Source organization not found." });
+
+        _connectionProvider.SetConnectionString(sourceConnection);
+        HttpContext.Items[RepositoryShareContext.HttpContextItemKey] = new RepositoryShareContext(access);
+
+        request.TenantId = access.SourceTenantId;
+        request.RepositoryId = access.SourceRepositoryId;
+        if (access.SourceWorkflowId is Guid wf && wf != Guid.Empty)
+            request.WorkflowId = wf;
+
+        return null;
+    }
+
+    private Guid? GetUserId()
+    {
+        var raw = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub") ?? User.FindFirstValue("oid");
+        return Guid.TryParse(raw, out var id) ? id : null;
     }
 
     private static IActionResult ToActionResult(DashboardPythonProxyResult result, string fallbackContentType)
@@ -479,5 +611,62 @@ public sealed class SaveDashboardHtmlApiRequest
     {
         get => null;
         set { if (!string.IsNullOrWhiteSpace(value)) DashboardHtml = value; }
+    }
+}
+
+/// <summary>Body for <c>POST /api/dashboard/share</c>.</summary>
+public sealed class CreateDashboardShareApiRequest
+{
+    [JsonPropertyName("email")]
+    public string Email { get; set; } = "";
+
+    [JsonPropertyName("tenant_id")]
+    public Guid? TenantId { get; set; }
+
+    [JsonPropertyName("repository_id")]
+    public Guid? RepositoryId { get; set; }
+
+    [JsonPropertyName("workflow_id")]
+    public Guid? WorkflowId { get; set; }
+
+    [JsonPropertyName("dashboard_id")]
+    public Guid? DashboardId { get; set; }
+
+    [JsonPropertyName("message")]
+    public string? Message { get; set; }
+
+    [JsonPropertyName("provisionGuestUser")]
+    public bool ProvisionGuestUser { get; set; } = true;
+
+    /// <summary>0 = Can View, 1 = Can Edit (upload).</summary>
+    [JsonPropertyName("action")]
+    public int Action { get; set; }
+
+    [JsonPropertyName("tenantId")]
+    public Guid? TenantIdCamel
+    {
+        get => null;
+        set { if (value is { } id && id != Guid.Empty) TenantId = id; }
+    }
+
+    [JsonPropertyName("repositoryId")]
+    public Guid? RepositoryIdCamel
+    {
+        get => null;
+        set { if (value is { } id && id != Guid.Empty) RepositoryId = id; }
+    }
+
+    [JsonPropertyName("workflowId")]
+    public Guid? WorkflowIdCamel
+    {
+        get => null;
+        set { if (value is { } id && id != Guid.Empty) WorkflowId = id; }
+    }
+
+    [JsonPropertyName("dashboardId")]
+    public Guid? DashboardIdCamel
+    {
+        get => null;
+        set { if (value is { } id && id != Guid.Empty) DashboardId = id; }
     }
 }

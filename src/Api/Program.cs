@@ -102,6 +102,7 @@ else
     builder.Services.AddDistributedMemoryCache();
 }
 builder.Services.AddScoped<ITwoFactorService, TwoFactorService>();
+builder.Services.AddScoped<ILoginEmailOtpService, LoginEmailOtpService>();
 builder.Services.AddScoped<IEzofisAuthService, EzofisAuthService>();
 builder.Services.AddScoped<SaaSApp.Users.Application.Contracts.IUserTenantRoleSync, UserTenantRoleSync>();
 
@@ -386,7 +387,7 @@ if (hangfireEnabled)
         IgnoreAntiforgeryToken = true
     });
 
-    var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
+    var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", false);
     try
     {
         if (emailIngestHangfire)
