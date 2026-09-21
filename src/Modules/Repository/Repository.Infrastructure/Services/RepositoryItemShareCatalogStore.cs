@@ -64,6 +64,19 @@ internal static class RepositoryItemShareCatalogStore
 
             ALTER TABLE catalog."RepositoryItemShares"
                 ADD COLUMN IF NOT EXISTS "Action" integer NOT NULL DEFAULT 0;
+
+            ALTER TABLE catalog."RepositoryItemShares"
+                ADD COLUMN IF NOT EXISTS "ShareKind" varchar(32) NOT NULL DEFAULT 'Item';
+
+            ALTER TABLE catalog."RepositoryItemShares"
+                ADD COLUMN IF NOT EXISTS "FiltersJson" text NULL;
+
+            ALTER TABLE catalog."RepositoryItemShares"
+                ADD COLUMN IF NOT EXISTS "SourceDashboardId" uuid NULL;
+
+            -- Filter / dashboard shares have no single item; keep existing item shares non-null.
+            ALTER TABLE catalog."RepositoryItemShares"
+                ALTER COLUMN "SourceItemId" DROP NOT NULL;
             """;
 
         foreach (var sql in new[] { ensureSchemaSql, createTableSql })

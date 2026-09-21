@@ -387,7 +387,7 @@ if (hangfireEnabled)
         IgnoreAntiforgeryToken = true
     });
 
-    var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", true);
+    var emailIngestHangfire = app.Configuration.GetValue("EmailIngest:HangfireEnabled", false);
     try
     {
         if (emailIngestHangfire)
