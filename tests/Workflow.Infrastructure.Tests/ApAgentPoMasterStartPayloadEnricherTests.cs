@@ -158,6 +158,55 @@ public sealed class ApAgentPoMasterStartPayloadEnricherTests
         Assert.Equal(MasterFormId.ToString("D"), formId);
     }
 
+    [Fact]
+    public void TryReadPoMaster_FromApAgentBlock_InternalForm_UsesBlockFormIdNotInvoiceForm()
+    {
+        const string invoiceFormId = "6e45749f-c65d-4f28-9e0f-f22fdde4cb03";
+        const string poMasterFormId = "1e16dd88-28b9-4da4-b577-eb0ec6d4d621";
+        var workflowJson = $$"""
+            {
+              "Settings": {
+                "General": { "InitiateUsing": { "Type": "DOCUMENT_FORM", "FormId": "{{invoiceFormId}}" } }
+              },
+              "Blocks": [
+                {
+                  "type": "AP_AGENT",
+                  "settings": {
+                    "label": "AP AGENT 1",
+                    "formId": "{{poMasterFormId}}",
+                    "poMasterSourceType": "internal",
+                    "resource": "FORM",
+                    "apAgent": {
+                      "formId": "{{poMasterFormId}}",
+                      "resource": "FORM",
+                      "connectorId": ""
+                    }
+                  }
+                }
+              ]
+            }
+            """;
+
+        Assert.True(WorkflowApAgentJson.TryReadPoMaster(
+            workflowJson,
+            out var source,
+            out var connectorId,
+            out var formId));
+
+        Assert.Equal(EmailIngestMasterSources.InternalForm, source);
+        Assert.Equal(poMasterFormId, formId);
+        Assert.Null(connectorId);
+        Assert.NotEqual(invoiceFormId, formId);
+
+        var payload = BasePayload();
+        payload["formId"] = invoiceFormId;
+        ApAgentPoMasterStartPayloadEnricher.Enrich(payload, source, connectorId, formId);
+
+        Assert.Equal(EmailIngestMasterSources.InternalForm, payload["master_source"]);
+        Assert.Equal(poMasterFormId, payload["master_form_id"]);
+        Assert.Equal(invoiceFormId, payload["formId"]);
+    }
+
     private static Dictionary<string, object?> BasePayload() => new()
     {
         ["tenantId"] = Guid.NewGuid().ToString("D"),
