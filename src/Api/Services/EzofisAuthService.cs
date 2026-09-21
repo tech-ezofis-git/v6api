@@ -16,6 +16,8 @@ namespace SaaSApp.Api.Services;
 public sealed class EzofisAuthService : IEzofisAuthService
 {
     private const string PendingLoginCacheKeyPrefix = "2fa_login_";
+    private const string MfaMethodEmailOtp = "Email OTP";
+    private const string MfaMethodAuthenticatorOtp = "Authenticator OTP";
     private static readonly TimeSpan PendingLoginExpiry = TimeSpan.FromMinutes(5);
     private static readonly TimeSpan AccessTokenExpiry = TimeSpan.FromDays(1);
 
@@ -24,8 +26,15 @@ public sealed class EzofisAuthService : IEzofisAuthService
     private readonly IRepositoryItemShareService _shareService;
     private readonly IRepositorySignRequestService _signRequestService;
     private readonly ITwoFactorService _twoFactorService;
+    private readonly ILoginEmailOtpService _loginEmailOtp;
     private readonly IMemoryCache _cache;
     private readonly IConfiguration _configuration;
+
+    private sealed record PendingTwoFactorLogin(
+        string UserId,
+        Guid TenantId,
+        string Method,
+        string? EmailOtp);
 
     public EzofisAuthService(
         IUserRepository userRepository,
@@ -33,6 +42,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
         IRepositoryItemShareService shareService,
         IRepositorySignRequestService signRequestService,
         ITwoFactorService twoFactorService,
+        ILoginEmailOtpService loginEmailOtp,
         IMemoryCache cache,
         IConfiguration configuration)
     {
@@ -41,6 +51,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
         _shareService = shareService;
         _signRequestService = signRequestService;
         _twoFactorService = twoFactorService;
+        _loginEmailOtp = loginEmailOtp;
         _cache = cache;
         _configuration = configuration;
     }
@@ -84,9 +95,29 @@ public sealed class EzofisAuthService : IEzofisAuthService
 
         if (user.TwoFactorAuthentication)
         {
+            var method = ResolveMfaMethod(user);
             var tempToken = Guid.NewGuid().ToString("N");
-            _cache.Set(PendingLoginCacheKeyPrefix + tempToken, (user.Id.ToString(), tenantId), PendingLoginExpiry);
-            return new LoginRequiresTwoFactor(tempToken, tenantId, user.Id, (int)PendingLoginExpiry.TotalSeconds);
+            string? emailOtp = null;
+            string? message = null;
+
+            if (string.Equals(method, MfaMethodEmailOtp, StringComparison.OrdinalIgnoreCase))
+            {
+                emailOtp = await _loginEmailOtp.SendLoginOtpAsync(user.Email, user.DisplayName, cancellationToken);
+                message = "OTP sent to email";
+            }
+
+            _cache.Set(
+                PendingLoginCacheKeyPrefix + tempToken,
+                new PendingTwoFactorLogin(user.Id.ToString(), tenantId, method, emailOtp),
+                PendingLoginExpiry);
+
+            return new LoginRequiresTwoFactor(
+                tempToken,
+                tenantId,
+                user.Id,
+                (int)PendingLoginExpiry.TotalSeconds,
+                method,
+                message);
         }
 
         return BuildLoginSuccess(user, tenantId);
@@ -281,11 +312,23 @@ public sealed class EzofisAuthService : IEzofisAuthService
         if (string.IsNullOrEmpty(tempToken) || string.IsNullOrEmpty(code))
             throw new ArgumentException("TempToken and code are required.");
 
-        var cached = _cache.Get<(string UserId, Guid TenantId)>(PendingLoginCacheKeyPrefix + tempToken);
-        if (cached == default)
+        var cached = _cache.Get<PendingTwoFactorLogin>(PendingLoginCacheKeyPrefix + tempToken);
+        if (cached is null)
             throw new UnauthorizedAccessException("Session expired. Please login again.");
 
-        if (!await _twoFactorService.VerifyAsync(cached.UserId, code, cancellationToken))
+        var codeTrimmed = code.Trim().Replace(" ", "", StringComparison.Ordinal);
+        var verified = false;
+        if (string.Equals(cached.Method, MfaMethodEmailOtp, StringComparison.OrdinalIgnoreCase))
+        {
+            verified = !string.IsNullOrEmpty(cached.EmailOtp)
+                && string.Equals(cached.EmailOtp, codeTrimmed, StringComparison.Ordinal);
+        }
+        else
+        {
+            verified = await _twoFactorService.VerifyAsync(cached.UserId, codeTrimmed, cancellationToken);
+        }
+
+        if (!verified)
             throw new UnauthorizedAccessException("Invalid verification code.");
 
         _cache.Remove(PendingLoginCacheKeyPrefix + tempToken);
@@ -295,6 +338,21 @@ public sealed class EzofisAuthService : IEzofisAuthService
             throw new UnauthorizedAccessException("User not found.");
 
         return BuildLoginSuccess(user, cached.TenantId);
+    }
+
+    private static string ResolveMfaMethod(SaaSApp.Users.Domain.Entities.User user)
+    {
+        var method = user.MfaMethods?.Trim();
+        if (string.Equals(method, MfaMethodEmailOtp, StringComparison.OrdinalIgnoreCase))
+            return MfaMethodEmailOtp;
+        if (string.Equals(method, MfaMethodAuthenticatorOtp, StringComparison.OrdinalIgnoreCase))
+            return MfaMethodAuthenticatorOtp;
+
+        // Legacy: MFA flag on with no method — email OTP when no authenticator secret is stored.
+        if (string.IsNullOrWhiteSpace(user.TotpSecretEncrypted))
+            return MfaMethodEmailOtp;
+
+        return MfaMethodAuthenticatorOtp;
     }
 
     public async Task<LoginResult> SocialLoginAsync(

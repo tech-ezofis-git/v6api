@@ -25,7 +25,7 @@ public sealed class LoginController : ControllerBase
         _logger = logger;
     }
 
-    /// <summary>Login with email and password. If 2FA enabled, returns tempToken; call POST /2fa/complete with code.</summary>
+    /// <summary>Login with email and password. If 2FA enabled, returns tempToken (and sends email OTP when MFA method is Email OTP); call POST /2fa/complete with code.</summary>
     [HttpPost("ezofis/login")]
     [ProducesResponseType(typeof(LoginSuccess), StatusCodes.Status200OK)]
     [ProducesResponseType(typeof(LoginRequiresTwoFactor), StatusCodes.Status200OK)]
@@ -58,7 +58,7 @@ public sealed class LoginController : ControllerBase
         }
     }
 
-    /// <summary>Complete login after 2FA. Use tempToken from login response and TOTP code from authenticator app.</summary>
+    /// <summary>Complete login after 2FA. Use tempToken from login response and code from email OTP or authenticator app.</summary>
     [HttpPost("2fa/complete")]
     [ProducesResponseType(typeof(LoginSuccess), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
@@ -250,7 +250,7 @@ public sealed class LoginController : ControllerBase
 /// <summary>Email and password for Ezofis login. Requires X-Tenant-Id header.</summary>
 public record LoginRequest(string Email, string Password);
 
-/// <summary>TempToken from login response when 2FA required; Code from authenticator app. Requires X-Tenant-Id header.</summary>
+/// <summary>TempToken from login response when 2FA required; Code from email OTP or authenticator app. Requires X-Tenant-Id header.</summary>
 public record CompleteTwoFactorRequest(string TempToken, string Code);
 
 /// <summary>Social login: email + provider (google or microsoft). Requires X-Tenant-Id header. No password.</summary>
