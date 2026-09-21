@@ -1,11 +1,10 @@
 # Share + Email OTP — Frontend guide
 
 **Audience:** Frontend  
-**Date:** 21 Sep 2026
+**Date:** 21 Sep 2026  
+**Base path:** `https://cloud.ezofis.com/api`
 
-Three share types use the **same guest invite login**. Email OTP is a separate login step when the user’s MFA method is `Email OTP`.
-
-Base path examples: `https://demo.ezofis.com/v6api` or `https://cloud.ezofis.com/api`.
+Filter share and dashboard share use the **same guest invite login**. Email OTP is a separate login step when MFA method is `Email OTP`.
 
 ---
 
@@ -35,49 +34,32 @@ Guest invite URL (emailed and returned as `shareUrl`):
 
 ---
 
-## 2. Share types
+## 2. What is new
 
-| Kind | Who creates it | What the guest sees |
-|------|----------------|---------------------|
-| `Item` | One document | Only that file (+ their uploads if Can Edit) |
-| `Filter` | A filter on one repository | Live list of documents matching that filter. New matching files appear automatically. Other files stay hidden. |
-| `Dashboard` | One saved dashboard | That dashboard, and documents in **that dashboard’s repository** (live, including new files). Not other repositories. |
+| Kind | API | Guest sees |
+|------|-----|------------|
+| `Filter` | `POST /api/repositories/{repositoryId}/share-filter` | Live documents matching the shared filter in that repository. New matching files appear automatically. |
+| `Dashboard` | `POST /api/dashboard/share` | That dashboard + documents in that dashboard’s repository (live). |
 
-All three return `shareKind` (`Item` / `Filter` / `Dashboard`).
-
----
-
-## 3. File share (existing)
-
-```http
-POST /api/repositories/{repositoryId}/items/{itemId}/share
-```
-
-```json
-{
-  "email": "guest@example.com",
-  "message": "Please review",
-  "action": 0
-}
-```
-
-After login, open that item with `?shareToken=` (or header `X-Share-Token`).  
-Item list is limited to that one file.
+Both return `shareKind` (`Filter` or `Dashboard`).
 
 ---
 
-## 4. Filter share (new)
+## 3. Filter share
 
 Sharer is already looking at a filtered list, for example:
 
-`GET /api/repositories/{repositoryId}/items?Filters={"Supplier":"APC-T001"}`
+```http
+GET https://cloud.ezofis.com/api/repositories/{repositoryId}/items?Filters={"Supplier":"APC-T001"}
+```
 
 Invite with the **same filter JSON**:
 
 ```http
-POST /api/repositories/{repositoryId}/share-filter
+POST https://cloud.ezofis.com/api/repositories/{repositoryId}/share-filter
 Authorization: Bearer <sharer-jwt>
 X-Tenant-Id: <tenant>
+Content-Type: application/json
 ```
 
 ```json
@@ -105,37 +87,65 @@ Multiple values are allowed: `"filters": { "Status": ["Verifier", "Approved"] }`
 | `requiresPasswordSetup` | Show set-password |
 | `allowedAuthMethods` | `password_setup`, `google`, `microsoft`, or `password_login` |
 
-### Guest
+### Guest flow
 
-1. `GET /api/repositories/share/{shareToken}/preview` (anonymous)  
-   `shareKind` is `Filter`. `sourceItemId` is null. Show repository name + filters, not one file.
-2. If `isnew=true`: `POST /api/auth/share/set-password`  
-   `{ "shareToken", "email", "password" }`  
-   or `POST /api/auth/share/social-login` `{ "shareToken", "email", "provider": "google"|"microsoft" }`
-3. If `isnew=false`: normal `POST /api/auth/ezofis/login` with `X-Tenant-Id` = `sourceTenantId`
-4. List (filters are **forced** by the share; do not let the guest widen them):
+1. Preview (anonymous):
 
 ```http
-GET /api/repositories/{sourceRepositoryId}/items?shareToken={token}&Page=1&PageSize=50
+GET https://cloud.ezofis.com/api/repositories/share/{shareToken}/preview
+```
+
+`shareKind` is `Filter`. `sourceItemId` is null. Show repository name + filters.
+
+2. If `isnew=true`:
+
+```http
+POST https://cloud.ezofis.com/api/auth/share/set-password
+```
+
+```json
+{ "shareToken": "...", "email": "guest@example.com", "password": "..." }
+```
+
+or social:
+
+```http
+POST https://cloud.ezofis.com/api/auth/share/social-login
+```
+
+```json
+{ "shareToken": "...", "email": "guest@example.com", "provider": "google" }
+```
+
+3. If `isnew=false`: normal login with `X-Tenant-Id` = `sourceTenantId`.
+
+4. List items (filters are **forced** by the share; guest must not widen them):
+
+```http
+GET https://cloud.ezofis.com/api/repositories/{sourceRepositoryId}/items?shareToken={token}&Page=1&PageSize=50
 Authorization: Bearer <guest-jwt>
 X-Tenant-Id: {sourceTenantId}
 ```
 
-5. Open / download a row only if it is in that list (`GET .../items/{itemId}/file?shareToken=`).
+5. Open / download a row from that list:
+
+```http
+GET https://cloud.ezofis.com/api/repositories/{sourceRepositoryId}/items/{itemId}/file?shareToken={token}
+```
 
 New documents that match the filter show up on the next list call. Documents that do not match return 403.
 
 ---
 
-## 5. Dashboard share (new)
+## 4. Dashboard share
 
-Dashboard must already be saved (`POST /api/dashboard/schema/save`).  
-Saved schema now includes `id` — store it if you have it. You can also share by repository (and optional workflow).
+Dashboard must already be saved. Saved schema includes `id`. You can share by `repository_id` (and optional `workflow_id` / `dashboard_id`).
 
 ```http
-POST /api/dashboard/share
+POST https://cloud.ezofis.com/api/dashboard/share
 Authorization: Bearer <sharer-jwt>
 X-Tenant-Id: <tenant>
+Content-Type: application/json
 ```
 
 ```json
@@ -151,20 +161,20 @@ Also accepted: `workflow_id`, `dashboard_id` (or camelCase `repositoryId`, `work
 
 **Response (201):** `shareKind` = `"Dashboard"`, plus `shareUrl`, `shareToken`, `sourceRepositoryId`, `sourceDashboardId`, `sourceWorkflowId`, `sourceTenantId`.
 
-### Guest
+### Guest flow
 
 Same sign-in as filter share (`preview` → set-password / login). Preview `fileName` is `"Dashboard"`.
 
-Then:
-
-**Dashboard HTML** (same API the app already uses):
+**Dashboard HTML:**
 
 ```http
-POST /api/dashboard/data?shareToken={token}
+POST https://cloud.ezofis.com/api/dashboard/data?shareToken={token}
 Authorization: Bearer <guest-jwt>
 X-Tenant-Id: {sourceTenantId}
 Content-Type: application/json
+```
 
+```json
 {
   "repository_id": "{sourceRepositoryId}",
   "workflow_id": "{sourceWorkflowId or omit}"
@@ -176,7 +186,7 @@ The API locks tenant/repository to the share. Do not send another repository.
 **Documents of that dashboard’s repository:**
 
 ```http
-GET /api/repositories/{sourceRepositoryId}/items?shareToken={token}&Page=1&PageSize=50
+GET https://cloud.ezofis.com/api/repositories/{sourceRepositoryId}/items?shareToken={token}&Page=1&PageSize=50
 Authorization: Bearer <guest-jwt>
 X-Tenant-Id: {sourceTenantId}
 ```
@@ -185,33 +195,19 @@ Guest sees current files and new files in **that repository only**.
 
 ---
 
-## 6. Shared with me / revoke
+## 5. Email OTP login
 
-```http
-GET /api/repositories/shared-with-me
-```
-
-Each row has `shareKind`, `shareToken`, `sourceRepositoryId`, `sourceItemId` (null for filter/dashboard), `filtersJson`, `sourceDashboardId`.
-
-```http
-DELETE /api/repositories/share/{shareId}
-```
-
-Sharer only. 204 when revoked.
-
----
-
-## 7. Email OTP login
-
-Used when the user has 2FA on and MFA method is **`Email OTP`** (not the authenticator app).
+Used when the user has 2FA on and MFA method is **`Email OTP`**.
 
 ### Step 1 — login
 
 ```http
-POST /api/auth/ezofis/login
+POST https://cloud.ezofis.com/api/auth/ezofis/login
 X-Tenant-Id: <tenant>
 Content-Type: application/json
+```
 
+```json
 { "email": "user@example.com", "password": "..." }
 ```
 
@@ -228,38 +224,33 @@ If 2FA is required, HTTP 200 body (no access token yet):
 }
 ```
 
-| `method` | UI |
-|----------|----|
-| `Email OTP` | Show “OTP sent to email” and a code box. API already emailed the code. |
-| `Authenticator OTP` | Existing authenticator screen. `message` is null. |
+When `method` is `Email OTP`, show “OTP sent to email” and a code box. The API already emailed the code.
 
 Do **not** treat `tempToken` as a failed password. Password was accepted; 2FA is next.
 
 ### Step 2 — verify
 
 ```http
-POST /api/auth/2fa/complete
+POST https://cloud.ezofis.com/api/auth/2fa/complete
 X-Tenant-Id: <tenant>
 Content-Type: application/json
+```
 
+```json
 { "tempToken": "<from login>", "code": "123456" }
 ```
 
-Success: same login success as today (`accessToken`, `tokenType`, `expiresIn`).  
+Success: `accessToken`, `tokenType`, `expiresIn`.  
 Wrong/expired code: 401.
 
 `tempToken` is short-lived. If it expires, call login again (a new email OTP is sent).
 
-Share-invite set-password / social-login is unchanged and does not use this OTP step unless that account also has 2FA on the normal login path.
-
 ---
 
-## 8. Frontend checklist
+## 6. Frontend checklist
 
-- [ ] File share still opens one document
 - [ ] Filter share sends the current `Filters` object to `POST .../share-filter`
 - [ ] Guest filter page lists with `shareToken` and does not offer other repositories or other filter values
 - [ ] Dashboard share calls `POST /api/dashboard/share` with the dashboard repository id
 - [ ] Guest dashboard calls `POST /api/dashboard/data` and repository items with the same `shareToken`
 - [ ] Login: if `method` is `Email OTP`, show `message` (“OTP sent to email”) and complete with `tempToken` + code
-- [ ] Login: if `method` is `Authenticator OTP`, keep the existing authenticator UI
