@@ -78,6 +78,9 @@ public sealed class CatalogDbContext : DbContext
             entity.Property(e => e.AutoProvisionGuest);
             entity.Property(e => e.WorkflowInstanceId);
             entity.Property(e => e.Action);
+            entity.Property(e => e.ShareKind).HasMaxLength(32);
+            entity.Property(e => e.FiltersJson);
+            entity.Property(e => e.SourceDashboardId);
         });
 
         modelBuilder.Entity<CreditMaster>(entity =>

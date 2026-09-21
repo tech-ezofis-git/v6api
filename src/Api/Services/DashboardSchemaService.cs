@@ -19,6 +19,11 @@ public interface IDashboardSchemaService
         Guid? workflowId,
         CancellationToken cancellationToken = default);
 
+    Task<DashboardSchemaSnapshotDto?> GetByIdAsync(
+        Guid tenantId,
+        Guid dashboardId,
+        CancellationToken cancellationToken = default);
+
     Task SaveHtmlAsync(
         SaveDashboardHtmlRequest request,
         CancellationToken cancellationToken = default);
@@ -43,6 +48,7 @@ public sealed record SaveDashboardHtmlRequest(
     string DashboardHtml);
 
 public sealed record DashboardSchemaSnapshotDto(
+    Guid Id,
     Guid TenantId,
     Guid? RepositoryId,
     Guid? WorkflowId,
@@ -244,6 +250,25 @@ public sealed class DashboardSchemaService : IDashboardSchemaService
         return row == null ? null : Map(row);
     }
 
+    public async Task<DashboardSchemaSnapshotDto?> GetByIdAsync(
+        Guid tenantId,
+        Guid dashboardId,
+        CancellationToken cancellationToken = default)
+    {
+        if (tenantId == Guid.Empty || dashboardId == Guid.Empty)
+            return null;
+
+        await EnsureSchemaAsync(cancellationToken);
+        await using var db = await _dbFactory.CreateDbContextAsync(cancellationToken);
+
+        var row = await db.DashboardSchemaSnapshots
+            .AsNoTracking()
+            .Where(s => s.Id == dashboardId && s.TenantId == tenantId && !s.IsDeleted)
+            .FirstOrDefaultAsync(cancellationToken);
+
+        return row == null ? null : Map(row);
+    }
+
     public async Task<DashboardHtmlSnapshotDto?> GetHtmlAsync(
         Guid tenantId,
         Guid? repositoryId,
@@ -305,6 +330,7 @@ public sealed class DashboardSchemaService : IDashboardSchemaService
 
     private static DashboardSchemaSnapshotDto Map(DashboardSchemaSnapshot row) =>
         new(
+            row.Id,
             row.TenantId,
             row.RepositoryId,
             row.WorkflowId,

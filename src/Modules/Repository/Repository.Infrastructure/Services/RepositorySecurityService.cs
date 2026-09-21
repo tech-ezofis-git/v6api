@@ -393,6 +393,236 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         }
     }
 
+    public async Task EnsureShareRecipientFilterAccessAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid recipientUserId,
+        IReadOnlyDictionary<string, IReadOnlyList<string>> filters,
+        bool canUpload,
+        Guid? sharedByUserId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (recipientUserId == Guid.Empty)
+            throw new ArgumentException("Recipient user id is required.");
+        if (filters == null || filters.Count == 0)
+            throw new ArgumentException("At least one filter field is required for filter share.");
+
+        await EnsureSchemaAsync(cancellationToken);
+        await EnsureRepositoryExistsAsync(repositoryId, tenantId, cancellationToken);
+
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
+        await connection.OpenAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            await using (var upsert = new NpgsqlCommand("""
+                INSERT INTO repository."ShareRecipients" ("Id", "RepositoryId", "UserId", "CanUpload", "CreatedAtUtc", "CreatedBy", "IsDeleted")
+                VALUES (@Id, @RepositoryId, @UserId, @CanUpload, now(), @CreatedBy, false)
+                ON CONFLICT ("RepositoryId", "UserId") DO UPDATE SET
+                    "CanUpload" = (EXCLUDED."CanUpload" OR repository."ShareRecipients"."CanUpload"),
+                    "IsDeleted" = false,
+                    "ModifiedAtUtc" = now()
+                """, connection, tx))
+            {
+                upsert.Parameters.AddWithValue("@Id", Guid.NewGuid());
+                upsert.Parameters.AddWithValue("@RepositoryId", repositoryId);
+                upsert.Parameters.AddWithValue("@UserId", recipientUserId);
+                upsert.Parameters.AddWithValue("@CanUpload", canUpload);
+                upsert.Parameters.AddWithValue("@CreatedBy", (object?)sharedByUserId ?? DBNull.Value);
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            foreach (var conditionSet in ExpandFilterGrantConditionSets(filters))
+            {
+                await EnsureShareGrantRuleFromConditionsAsync(
+                    connection, tx, repositoryId, recipientUserId, conditionSet, matchMode: "all", sharedByUserId, cancellationToken);
+            }
+
+            if (canUpload)
+            {
+                await EnsureShareGrantRuleAsync(
+                    connection, tx, repositoryId, recipientUserId, "CreatedBy", recipientUserId.ToString("D"), sharedByUserId, cancellationToken);
+            }
+
+            await tx.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    public async Task EnsureShareRecipientRepositoryAccessAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid recipientUserId,
+        bool canUpload,
+        Guid? sharedByUserId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (recipientUserId == Guid.Empty)
+            throw new ArgumentException("Recipient user id is required.");
+
+        await EnsureSchemaAsync(cancellationToken);
+        await EnsureRepositoryExistsAsync(repositoryId, tenantId, cancellationToken);
+
+        await using var connection = new NpgsqlConnection(RequireConnectionString());
+        await connection.OpenAsync(cancellationToken);
+        await using var tx = await connection.BeginTransactionAsync(cancellationToken);
+
+        try
+        {
+            await using (var upsert = new NpgsqlCommand("""
+                INSERT INTO repository."ShareRecipients"
+                    ("Id", "RepositoryId", "UserId", "CanUpload", "CanViewAllDocuments", "CreatedAtUtc", "CreatedBy", "IsDeleted")
+                VALUES
+                    (@Id, @RepositoryId, @UserId, @CanUpload, true, now(), @CreatedBy, false)
+                ON CONFLICT ("RepositoryId", "UserId") DO UPDATE SET
+                    "CanUpload" = (EXCLUDED."CanUpload" OR repository."ShareRecipients"."CanUpload"),
+                    "CanViewAllDocuments" = true,
+                    "IsDeleted" = false,
+                    "ModifiedAtUtc" = now()
+                """, connection, tx))
+            {
+                upsert.Parameters.AddWithValue("@Id", Guid.NewGuid());
+                upsert.Parameters.AddWithValue("@RepositoryId", repositoryId);
+                upsert.Parameters.AddWithValue("@UserId", recipientUserId);
+                upsert.Parameters.AddWithValue("@CanUpload", canUpload);
+                upsert.Parameters.AddWithValue("@CreatedBy", (object?)sharedByUserId ?? DBNull.Value);
+                await upsert.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (canUpload)
+            {
+                await EnsureShareGrantRuleAsync(
+                    connection, tx, repositoryId, recipientUserId, "CreatedBy", recipientUserId.ToString("D"), sharedByUserId, cancellationToken);
+            }
+
+            await tx.CommitAsync(cancellationToken);
+        }
+        catch
+        {
+            await tx.RollbackAsync(cancellationToken);
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Expands multi-value filters into AND condition sets.
+    /// Single values stay one set; multi-value fields become a cartesian product so
+    /// <c>{"Supplier":["A","B"],"Status":"Open"}</c> yields two all-match rules.
+    /// </summary>
+    private static IReadOnlyList<IReadOnlyList<(string Field, string Value)>> ExpandFilterGrantConditionSets(
+        IReadOnlyDictionary<string, IReadOnlyList<string>> filters)
+    {
+        var fields = filters
+            .Where(kv => kv.Value is { Count: > 0 } && !string.IsNullOrWhiteSpace(kv.Key))
+            .Select(kv => (
+                Field: kv.Key.Trim(),
+                Values: kv.Value.Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList()))
+            .Where(x => x.Values.Count > 0)
+            .ToList();
+
+        if (fields.Count == 0)
+            return Array.Empty<IReadOnlyList<(string, string)>>();
+
+        IEnumerable<IReadOnlyList<(string Field, string Value)>> sets =
+            new[] { (IReadOnlyList<(string, string)>)Array.Empty<(string, string)>() };
+
+        foreach (var field in fields)
+        {
+            sets = sets.SelectMany(existing =>
+                field.Values.Select(value =>
+                {
+                    var next = new List<(string, string)>(existing.Count + 1);
+                    next.AddRange(existing);
+                    next.Add((field.Field, value));
+                    return (IReadOnlyList<(string, string)>)next;
+                }));
+        }
+
+        return sets.ToList();
+    }
+
+    private static async Task EnsureShareGrantRuleFromConditionsAsync(
+        NpgsqlConnection connection,
+        NpgsqlTransaction tx,
+        Guid repositoryId,
+        Guid recipientUserId,
+        IReadOnlyList<(string Field, string Value)> conditions,
+        string matchMode,
+        Guid? sharedByUserId,
+        CancellationToken cancellationToken)
+    {
+        if (conditions.Count == 0)
+            return;
+
+        await using (var find = new NpgsqlCommand("""
+            SELECT r."Id", r."ConditionsJson", r."MatchMode"
+            FROM repository."DocumentSecurityRules" r
+            INNER JOIN repository."DocumentSecurityPrincipals" p ON p."RuleId" = r."Id"
+            WHERE r."RepositoryId" = @RepositoryId
+              AND r."IsDeleted" = false
+              AND r."Source" = 'Share'
+              AND r."Action" = 'grant'
+              AND p."PrincipalType" = 'User'
+              AND p."PrincipalId" = @UserId
+            """, connection, tx))
+        {
+            find.Parameters.AddWithValue("@RepositoryId", repositoryId);
+            find.Parameters.AddWithValue("@UserId", recipientUserId);
+            await using var reader = await find.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var conditionsJson = reader.IsDBNull(1) ? "[]" : reader.GetString(1);
+                var existingMatch = reader.IsDBNull(2) ? "all" : reader.GetString(2);
+                var existing = ParseConditions(conditionsJson);
+                if (!string.Equals(existingMatch, matchMode, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (existing.Count != conditions.Count)
+                    continue;
+                var same = conditions.All(c =>
+                    existing.Any(e =>
+                        string.Equals(e.Field, c.Field, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(e.Value, c.Value, StringComparison.OrdinalIgnoreCase)
+                        && string.Equals(e.Op ?? "equals", "equals", StringComparison.OrdinalIgnoreCase)));
+                if (same)
+                    return;
+            }
+        }
+
+        var ruleId = Guid.NewGuid();
+        var conditionsPayload = JsonSerializer.Serialize(
+            conditions.Select(c => new { field = c.Field, op = "equals", value = c.Value }).ToArray());
+
+        await using (var insert = new NpgsqlCommand("""
+            INSERT INTO repository."DocumentSecurityRules"
+                ("Id", "RepositoryId", "Action", "MatchMode", "ConditionsJson", "SortOrder", "CreatedAtUtc", "CreatedBy", "IsDeleted", "Source")
+            VALUES
+                (@Id, @RepositoryId, 'grant', @MatchMode, @ConditionsJson, 0, now(), @CreatedBy, false, 'Share')
+            """, connection, tx))
+        {
+            insert.Parameters.AddWithValue("@Id", ruleId);
+            insert.Parameters.AddWithValue("@RepositoryId", repositoryId);
+            insert.Parameters.AddWithValue("@MatchMode", matchMode);
+            insert.Parameters.AddWithValue("@ConditionsJson", conditionsPayload);
+            insert.Parameters.AddWithValue("@CreatedBy", (object?)sharedByUserId ?? DBNull.Value);
+            await insert.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        await InsertPrincipalsAsync(
+            connection,
+            tx,
+            "DocumentSecurityPrincipals",
+            "RuleId",
+            ruleId,
+            new[] { recipientUserId },
+            Array.Empty<Guid>(),
+            cancellationToken);
+    }
+
     public async Task<bool> CanAccessRepositoryAsync(
         Guid repositoryId,
         Guid tenantId,
@@ -484,13 +714,17 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         if (hide.Count > 0)
             return false;
 
-        // File-invite guests: only shared file + their uploaded files (grant rules), never open-all.
+        // File-invite guests: only shared file + their uploaded files (grant rules), never open-all —
+        // unless dashboard/repo share granted CanViewAllDocuments.
         var shareAccess = await GetShareRecipientAccessAsync(repositoryId, userId, cancellationToken);
         if (shareAccess != null)
         {
             if (!string.Equals(permission, RepositorySecurityPermissions.View, StringComparison.OrdinalIgnoreCase)
                 && !string.Equals(permission, RepositorySecurityPermissions.Download, StringComparison.OrdinalIgnoreCase))
                 return false;
+
+            if (shareAccess.CanViewAllDocuments)
+                return true;
 
             return docs.Rules.Any(r =>
                 string.Equals(r.Action, RepositorySecurityActions.Grant, StringComparison.OrdinalIgnoreCase)
@@ -1014,7 +1248,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         }
     }
 
-    private sealed record ShareRecipientAccess(bool CanUpload);
+    private sealed record ShareRecipientAccess(bool CanUpload, bool CanViewAllDocuments);
 
     private async Task<ShareRecipientAccess?> GetShareRecipientAccessAsync(
         Guid repositoryId,
@@ -1024,7 +1258,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         await using var connection = new NpgsqlConnection(RequireConnectionString());
         await connection.OpenAsync(cancellationToken);
         await using var cmd = new NpgsqlCommand("""
-            SELECT "CanUpload"
+            SELECT "CanUpload", COALESCE("CanViewAllDocuments", false)
             FROM repository."ShareRecipients"
             WHERE "RepositoryId" = @RepositoryId
               AND "UserId" = @UserId
@@ -1032,10 +1266,12 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             """, connection);
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@UserId", userId);
-        var scalar = await cmd.ExecuteScalarAsync(cancellationToken);
-        if (scalar is null || scalar is DBNull)
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        if (!await reader.ReadAsync(cancellationToken))
             return null;
-        return new ShareRecipientAccess(Convert.ToBoolean(scalar, CultureInfo.InvariantCulture));
+        return new ShareRecipientAccess(
+            reader.GetBoolean(0),
+            reader.GetBoolean(1));
     }
 
     private static async Task EnsureShareGrantRuleAsync(
@@ -1199,5 +1435,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         );
         CREATE UNIQUE INDEX IF NOT EXISTS "IX_ShareRecipients_Repo_User"
             ON repository."ShareRecipients" ("RepositoryId", "UserId");
+        ALTER TABLE repository."ShareRecipients"
+            ADD COLUMN IF NOT EXISTS "CanViewAllDocuments" boolean NOT NULL DEFAULT false;
         """;
 }

@@ -13,8 +13,12 @@ public sealed class RepositoryShareContext
 
     public Guid SourceTenantId => Access.SourceTenantId;
     public Guid SourceRepositoryId => Access.SourceRepositoryId;
-    public Guid SourceItemId => Access.SourceItemId;
+    public Guid? SourceItemId => Access.SourceItemId;
     public bool ReadOnly => Access.ReadOnly;
+    public string? FiltersJson => Access.FiltersJson;
+    public bool IsFilterShare => Access.IsFilterShare;
+    public bool IsDashboardShare => Access.IsDashboardShare;
+    public Guid? SourceDashboardId => Access.SourceDashboardId;
 
     public static bool TryGet(HttpContext httpContext, out RepositoryShareContext? context)
     {
