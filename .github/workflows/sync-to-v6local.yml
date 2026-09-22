@@ -1,8 +1,12 @@
 name: Sync to v6local (api/)
 
 # Every push to main mirrors this repository into the api/ folder of
-# tech-ezofis-git/v6local. Commits from any author (e.g. arasu@ezofis.com)
-# that land on main are copied there automatically.
+# tech-ezofis-git/v6local.
+#
+# Uses MONOREPO_SYNC_TOKEN (same secret that successfully syncs ezofis-app-v6).
+# Requires a classic PAT with `repo` scope, or a fine-grained PAT with
+# Contents: Read and Write on tech-ezofis-git/v6local.
+# Missing access makes checkout return HTTP 404 "Not Found".
 
 on:
   push:
@@ -19,12 +23,35 @@ jobs:
         with:
           path: source
 
+      - name: Verify sync token can see v6local
+        env:
+          GH_TOKEN: ${{ secrets.MONOREPO_SYNC_TOKEN }}
+        run: |
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::error::MONOREPO_SYNC_TOKEN is not set in repo Actions secrets."
+            exit 1
+          fi
+          code=$(curl -sS -o /tmp/repo.json -w "%{http_code}" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            "https://api.github.com/repos/tech-ezofis-git/v6local")
+          echo "GET tech-ezofis-git/v6local => HTTP ${code}"
+          if [ "$code" != "200" ]; then
+            echo "::error::MONOREPO_SYNC_TOKEN cannot access tech-ezofis-git/v6local (HTTP ${code})."
+            echo "Grant the PAT Contents Read/Write on v6local (or use a classic PAT with repo scope)."
+            echo "GitHub returns 404 when the token lacks access to a private repo."
+            cat /tmp/repo.json || true
+            exit 1
+          fi
+
       - name: Checkout v6local (target monorepo)
         uses: actions/checkout@v4
         with:
           repository: tech-ezofis-git/v6local
-          token: ${{ secrets.V6LOCAL_SYNC_TOKEN }}
+          token: ${{ secrets.MONOREPO_SYNC_TOKEN }}
           path: monorepo
+          persist-credentials: true
 
       - name: Mirror into api/
         run: |
