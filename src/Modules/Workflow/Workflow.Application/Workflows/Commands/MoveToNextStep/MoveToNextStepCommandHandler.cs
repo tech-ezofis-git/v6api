@@ -268,7 +268,15 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         var workflowCompleted = legacySync.WorkflowCompleted;
         WorkflowPdfGenerationResult? generatedPdf = null;
 
-        if (legacySync.Status == LegacyTransactionSyncStatus.ReviewUpdated)
+        if (legacySync.Status == LegacyTransactionSyncStatus.Forwarded)
+        {
+            // Reassign only — do not complete the step or route to END.
+            if (legacySync.NextActivityUserId is Guid forwardedTo && forwardedTo != Guid.Empty)
+                instance.Reassign(forwardedTo);
+            await _repository.UpdateInstanceAsync(instance, cancellationToken);
+            await _unitOfWork.SaveChangesAsync(cancellationToken);
+        }
+        else if (legacySync.Status == LegacyTransactionSyncStatus.ReviewUpdated)
         {
             // Generate PDF when leaving this step — including when this move completes the workflow.
             generatedPdf = await _pdfGeneration.TryGenerateOnStepCompleteAsync(
@@ -361,6 +369,8 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             LegacyTransactionSyncStatus.StepInserted => $"Step {targetDefinitionStep.Order} inserted in transaction table.",
             LegacyTransactionSyncStatus.StepAlreadyThere => "Step is already there.",
             LegacyTransactionSyncStatus.ReviewAlreadyUpdated => "Review is already updated.",
+            LegacyTransactionSyncStatus.Forwarded =>
+                "Forwarded to user; step remains open.",
             LegacyTransactionSyncStatus.ReviewUpdated when workflowCompleted =>
                 "Review updated; workflow completed.",
             LegacyTransactionSyncStatus.ReviewUpdated when legacySync.NextTransactionId.HasValue =>

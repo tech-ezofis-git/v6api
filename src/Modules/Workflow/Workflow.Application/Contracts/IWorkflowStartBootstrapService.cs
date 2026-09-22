@@ -13,7 +13,12 @@ public interface IWorkflowStartBootstrapService
         CancellationToken cancellationToken = default);
 }
 
-/// <summary>Stage row to archive on workflow start. <see cref="FileId"/> is the stage id. <see cref="FieldId"/> is the form column that receives the archived itemId.</summary>
+/// <summary>
+/// Stage row to archive on workflow start, or an already-archived item to link.
+/// When <see cref="ItemId"/> is set, that archive item is attached (FileId optional).
+/// When only <see cref="FileId"/> is set, it is treated as a stage id to promote.
+/// <see cref="FieldId"/> is the form column that receives the archived itemId.
+/// </summary>
 public sealed record StartWorkflowStagedFileRef(
     Guid RepositoryId,
     Guid FileId,

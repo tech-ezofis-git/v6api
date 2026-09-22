@@ -12,7 +12,8 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 /// <summary>
 /// move-next transaction rules:
 /// - review empty/null: insert step row if missing; if exists return StepAlreadyThere
-/// - review provided: update review on existing open row; if review already set return ReviewAlreadyUpdated;
+/// - review Forward (+ activityUserId): reassign open step to that user; do not complete or route
+/// - other review: update review on existing open row; if review already set return ReviewAlreadyUpdated;
 ///   on successful review update insert next step row (review null, actionStatus 0)
 /// </summary>
 public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransactionSyncService
@@ -147,6 +148,48 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                     openNextId,
                     null,
                     WorkflowCompleted: false);
+            }
+
+            // Forward = reassign current open step (not a designer ProceedAction).
+            if (IsForwardReview(review))
+            {
+                if (activityUserId is not Guid forwardTo || forwardTo == Guid.Empty)
+                    throw new InvalidOperationException(
+                        "Forward requires activityUserId (target tenant user guid).");
+
+                await ReassignOpenTransactionAsync(
+                    connection,
+                    transactionTable,
+                    existingRow.Id,
+                    forwardTo,
+                    userId,
+                    cancellationToken);
+
+                // Recipient: Inbox + Submit. Forwarder: Sent (visible until completed).
+                await _mailboxSync.SyncTransactionRowAsync(
+                    workflowId,
+                    existingRow.Id,
+                    connection,
+                    mailboxForm,
+                    cancellationToken,
+                    inboxAction: 1,
+                    ownerMailboxCopy: MailboxOwnerCopyKind.Sent);
+
+                _logger.LogInformation(
+                    "Forwarded open activity {ActivityId} transaction {TransactionId} to user {AssigneeUserId}",
+                    txActivityId,
+                    existingRow.Id,
+                    forwardTo);
+
+                return new WorkflowLegacyTransactionSyncResult(
+                    LegacyTransactionSyncStatus.Forwarded,
+                    workflowInstanceId,
+                    existingRow.Id,
+                    null,
+                    null,
+                    WorkflowCompleted: false,
+                    NextActivityUserId: forwardTo,
+                    NextCreatedByUserId: userId);
             }
 
             await UpdateReviewAsync(
@@ -367,6 +410,36 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
 
     internal static bool IsEndReview(string? review) =>
         string.Equals(review?.Trim(), EndStageType, StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsForwardReview(string? review) =>
+        string.Equals(review?.Trim(), "Forward", StringComparison.OrdinalIgnoreCase);
+
+    private static async Task ReassignOpenTransactionAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        int transactionId,
+        Guid activityUserId,
+        Guid modifiedByUserId,
+        CancellationToken cancellationToken)
+    {
+        var sql = $@"
+UPDATE {transactionTable}
+SET activity_user_id = @ActivityUserId,
+    modified_at = now(),
+    modified_by = @ModifiedBy
+WHERE id = @Id
+  AND is_deleted = false
+  AND action_status = @ActionStatusOpen
+  AND (review IS NULL OR BTRIM(review) = '');";
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@ActivityUserId", activityUserId);
+        cmd.Parameters.AddWithValue("@ModifiedBy", modifiedByUserId);
+        cmd.Parameters.AddWithValue("@Id", transactionId);
+        cmd.Parameters.AddWithValue("@ActionStatusOpen", ActionStatusOpen);
+        var updated = await cmd.ExecuteNonQueryAsync(cancellationToken);
+        if (updated == 0)
+            throw new InvalidOperationException("Cannot forward: open transaction was not found or already completed.");
+    }
 
     private sealed record TransactionRow(int Id, string? Review, int ActionStatus);
 

@@ -150,6 +150,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             instance.TenantId,
             workflow.RepositoryId,
             cancellationToken);
+        repositoryGuid = PreferCallerRepositoryId(request.StagedFiles, repositoryGuid);
 
         string? blobPath = null;
         Guid? repositoryItemId = null;
@@ -298,6 +299,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             instance.TenantId,
             workflow.RepositoryId,
             cancellationToken);
+        repositoryGuid = PreferCallerRepositoryId(request.StagedFiles, repositoryGuid);
 
         var formEntryItemId = await InsertFormEntryAsync(
             connectionString,
@@ -581,6 +583,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
     /// <summary>
     /// Promote staged fileIds, or link an already-archived itemId, then write WorkflowAttachments + processAddon.
     /// A missing stage row must not fail ticket create.
+    /// When <see cref="StartWorkflowStagedFileRef.ItemId"/> is set, links that archive item (Document Approval /
+    /// raise-from-repository) and does not require a stage <see cref="StartWorkflowStagedFileRef.FileId"/>.
     /// </summary>
     private async Task<(Guid? RepositoryItemId, string? BlobPath)> ArchiveStagedFilesAsync(
         WorkflowStartBootstrapRequest request,
@@ -600,7 +604,49 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         var archivedStagedFiles = new List<(StartWorkflowStagedFileRef Staged, Guid ItemId)>();
         foreach (var staged in request.StagedFiles)
         {
-            if (staged.RepositoryId == Guid.Empty || staged.FileId == Guid.Empty)
+            if (staged.RepositoryId == Guid.Empty)
+                continue;
+
+            // Existing archive item — use supplied repositoryId + itemId (do not use workflow.RepositoryId).
+            if (staged.ItemId is Guid existingItemId && existingItemId != Guid.Empty)
+            {
+                var attached = await _attachmentArchive.AttachExistingArchiveItemAsync(
+                    instance.TenantId,
+                    workflow.Id,
+                    instance.Id,
+                    staged.RepositoryId,
+                    existingItemId,
+                    staged.FileName,
+                    currentTransactionId,
+                    userId,
+                    cancellationToken);
+
+                if (attached == null)
+                {
+                    _logger.LogWarning(
+                        "Archive item {ItemId} in repository {RepositoryId} was not attached on workflow {WorkflowId}: item not found.",
+                        existingItemId,
+                        staged.RepositoryId,
+                        workflow.Id);
+                    continue;
+                }
+
+                _logger.LogInformation(
+                    "Attached existing archive item {ItemId} from repository {RepositoryId} for workflow {WorkflowId}. Attachment {AttachmentId}, processAddon {ProcessAddonId}.",
+                    attached.ItemId,
+                    staged.RepositoryId,
+                    workflow.Id,
+                    attached.AttachmentId,
+                    attached.ProcessAddonId);
+
+                var bindRef = staged with { FileId = existingItemId };
+                archivedStagedFiles.Add((bindRef, attached.ItemId));
+                repositoryItemId ??= attached.ItemId;
+                blobPath ??= attached.FilePath;
+                continue;
+            }
+
+            if (staged.FileId == Guid.Empty)
                 continue;
 
             // fileId is the stage row. Archive it from stage data, then link the new itemId.
@@ -1035,6 +1081,20 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             return unchecked((int)u);
 
         return 0;
+    }
+
+    /// <summary>
+    /// Raise-from-repository: when the caller supplies repositoryId on staged/existing files,
+    /// use that instead of workflow InitiateUsing.RepositoryId (which may be empty).
+    /// </summary>
+    private static Guid? PreferCallerRepositoryId(
+        IReadOnlyList<StartWorkflowStagedFileRef>? stagedFiles,
+        Guid? workflowRepositoryId)
+    {
+        var caller = stagedFiles?
+            .Select(s => s.RepositoryId)
+            .FirstOrDefault(id => id != Guid.Empty);
+        return caller is Guid id && id != Guid.Empty ? id : workflowRepositoryId;
     }
 
     private static async Task<Guid?> ResolveRepositoryGuidAsync(
