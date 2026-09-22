@@ -1,8 +1,8 @@
 namespace SaaSApp.SharedKernel.Options;
 
 /// <summary>
-/// Shared Python agents <c>/chat</c> endpoint. All intents (<c>ap</c>, <c>ocr</c>, <c>summary</c>, <c>insight</c>)
-/// POST to the same URL; the <c>intent</c> field selects the handler.
+/// Shared Python agents <c>/chat</c> endpoint. Intents (<c>ap</c>, <c>ocr</c>, <c>summary</c>,
+/// <c>insight</c>, <c>dashboard</c>, …) POST to the same URL; <c>intent</c> selects the handler.
 /// </summary>
 public sealed class AgentsChatOptions
 {

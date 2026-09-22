@@ -3,7 +3,10 @@ using System.Text.Json.Serialization;
 
 namespace SaaSApp.Workflow.Application.Contracts;
 
-/// <summary>POST /dashboard/schema body. Wire names match the Python API (snake_case); camelCase aliases are accepted.</summary>
+/// <summary>
+/// Body for V6 <c>POST /api/dashboard/schema</c>. Proxied to agents <c>/chat</c>
+/// with <c>intent=dashboard</c> and <c>payload.phase=schema</c>.
+/// </summary>
 public class DashboardSchemaRequest
 {
     [JsonPropertyName("session_id")]
@@ -50,7 +53,10 @@ public class DashboardSchemaRequest
     }
 }
 
-/// <summary>POST /prompts body — suggest a natural-language dashboard message.</summary>
+/// <summary>
+/// Body for V6 <c>POST /api/dashboard/prompts</c>. Proxied to agents <c>/chat</c>
+/// with <c>intent=dashboard</c> and <c>payload.phase=prompts</c>.
+/// </summary>
 public sealed class DashboardPromptRequest
 {
     [JsonPropertyName("session_id")]
@@ -122,7 +128,10 @@ public sealed class DashboardPromptRequest
     }
 }
 
-/// <summary>POST /dashboard/data body — schema payload plus edited dashboard_json.</summary>
+/// <summary>
+/// Body for V6 <c>POST /api/dashboard/data</c>. Proxied to agents <c>/chat</c>
+/// with <c>intent=dashboard</c> and <c>payload.phase=data</c> (+ <c>dashboard_json</c>).
+/// </summary>
 public sealed class DashboardDataRequest : DashboardSchemaRequest
 {
     [JsonPropertyName("dashboard_json")]
