@@ -183,6 +183,98 @@ public sealed class UploadAndIndexController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Bulk upload: stage all files immediately (shared fields applied), queue Hangfire OCR, return jobId.
+    /// Poll GET /api/uploadAndIndex/bulkUpload/jobs/{jobId} for OCR status.
+    /// List staged files with POST index/all; export/archive with PUT index/{id}.
+    /// </summary>
+    [HttpPost("/api/uploadAndIndex/bulkUpload")]
+    [DisableRequestSizeLimit]
+    [RequestFormLimits(MultipartBodyLengthLimit = 524_288_000)]
+    [ProducesResponseType(typeof(BulkUploadResult), StatusCodes.Status202Accepted)]
+    public async Task<IActionResult> BulkUpload(
+        [FromForm] List<IFormFile>? files,
+        [FromForm] string? repositoryId,
+        [FromForm] List<string>? fields,
+        [FromForm] string? pageNo,
+        [FromForm] string? ocrType,
+        [FromForm] string? validateType,
+        CancellationToken cancellationToken)
+    {
+        var uploadFiles = (files ?? new List<IFormFile>())
+            .Where(f => f is { Length: > 0 })
+            .ToList();
+
+        if (uploadFiles.Count == 0)
+            return BadRequest(new { error = "At least one file is required." });
+
+        if (!TryParseRepositoryId(repositoryId, out var repoId))
+            return BadRequest(new { error = "repositoryId is required (GUID)." });
+
+        var tenantId = RequireTenantId();
+        var sharedFieldsJson = ResolveFieldsFormInput(fields);
+        var userId = GetUserId();
+        pageNo = NormalizeOcrOption(pageNo);
+        ocrType = NormalizeOcrOption(ocrType);
+        validateType = NormalizeOcrOption(validateType);
+
+        var opened = new List<(Stream Stream, string FileName, string? ContentType, long FileSize)>();
+        try
+        {
+            foreach (var file in uploadFiles)
+            {
+                var stream = file.OpenReadStream();
+                opened.Add((
+                    stream,
+                    ResolveUploadFileName(null, file.FileName),
+                    file.ContentType,
+                    file.Length));
+            }
+
+            var result = await _uploadIndex.BulkUploadAsync(
+                repoId,
+                tenantId,
+                opened,
+                sharedFieldsJson,
+                pageNo,
+                ocrType,
+                validateType,
+                userId,
+                cancellationToken);
+
+            return Accepted(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        finally
+        {
+            foreach (var (stream, _, _, _) in opened)
+                await stream.DisposeAsync();
+        }
+    }
+
+    /// <summary>Poll Hangfire + stage-row OCR status for a bulk upload job.</summary>
+    [HttpGet("/api/uploadAndIndex/bulkUpload/jobs/{jobId}")]
+    [ProducesResponseType(typeof(BulkUploadJobStatusResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> BulkUploadJobStatus(string jobId, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(jobId))
+            return BadRequest(new { error = "jobId is required." });
+
+        var tenantId = RequireTenantId();
+        var result = await _uploadIndex.GetBulkUploadJobStatusAsync(jobId, tenantId, cancellationToken);
+        return result == null
+            ? NotFound(new { error = "Job not found." })
+            : Ok(result);
+    }
+
     /// <summary>v5: POST api/uploadAndIndex/load/{id} — load staged file for indexing UI.</summary>
     [HttpPost("/api/uploadAndIndex/load/{id}")]
     [ProducesResponseType(typeof(UploadIndexLoadResult), StatusCodes.Status200OK)]
@@ -197,10 +289,10 @@ public sealed class UploadAndIndexController : ControllerBase
         return result == null ? NotFound(new { error = "File not found." }) : Ok(result);
     }
 
-    /// <summary>v5: PUT api/uploadAndIndex/index/{id} — save fields and queue V6 archive (Hangfire).</summary>
+    /// <summary>v5: PUT api/uploadAndIndex/index/{id} — save fields and archive immediately (sync, no Hangfire).</summary>
     [HttpPut("/api/uploadAndIndex/index/{id}")]
     [Consumes("application/json")]
-    [ProducesResponseType(typeof(UploadIndexArchiveQueuedResult), StatusCodes.Status202Accepted)]
+    [ProducesResponseType(typeof(UploadIndexArchiveQueuedResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Index(string id, [FromBody] JsonElement body, CancellationToken cancellationToken)
     {
@@ -227,7 +319,7 @@ public sealed class UploadAndIndexController : ControllerBase
             if (result == null)
                 return NotFound(new { error = "Index record not found." });
 
-            return Accepted(result);
+            return Ok(result);
         }
         catch (InvalidOperationException ex)
         {
@@ -316,6 +408,15 @@ public sealed class UploadAndIndexController : ControllerBase
 
         var stem = Path.GetFileNameWithoutExtension(name.Trim());
         return stem.Equals("string", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>Swagger defaults pageNo/ocrType/validateType to literal "string" — treat as unset.</summary>
+    private static string? NormalizeOcrOption(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var trimmed = value.Trim();
+        return trimmed.Equals("string", StringComparison.OrdinalIgnoreCase) ? null : trimmed;
     }
 
     /// <summary>

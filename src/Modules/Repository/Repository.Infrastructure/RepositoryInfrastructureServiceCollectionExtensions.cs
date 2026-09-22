@@ -47,6 +47,7 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
         services.AddScoped<IRepositorySecurityService, RepositorySecurityService>();
         services.AddScoped<IRepositorySignRequestService, RepositorySignRequestService>();
         services.AddScoped<ArchiveStageItemJob>();
+        services.AddScoped<BulkUploadOcrJob>();
         return services;
     }
 }

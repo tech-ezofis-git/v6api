@@ -68,4 +68,38 @@ public interface IRepositoryUploadIndexService
         Guid tenantId,
         UploadIndexListRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Bulk upload: stage all files to monitor + stage table with shared fields, then queue Hangfire OCR.
+    /// Returns immediately with jobId — poll <see cref="GetBulkUploadJobStatusAsync"/>.
+    /// Files stay in stage until export (PUT index/{id}).
+    /// </summary>
+    Task<BulkUploadResult> BulkUploadAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        IReadOnlyList<(Stream Stream, string FileName, string? ContentType, long FileSize)> files,
+        string? sharedFieldsJson,
+        string? pageNo,
+        string? ocrType,
+        string? validateType,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Run OCR for one staged bulk-upload file (called by Hangfire job).</summary>
+    Task ProcessBulkOcrForStageAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid stageId,
+        string? sharedFieldsJson,
+        string? pageNo,
+        string? ocrType,
+        string? validateType,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Hangfire + stage-row status for a bulk OCR job.</summary>
+    Task<BulkUploadJobStatusResult?> GetBulkUploadJobStatusAsync(
+        string jobId,
+        Guid tenantId,
+        CancellationToken cancellationToken = default);
 }
