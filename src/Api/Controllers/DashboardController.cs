@@ -49,9 +49,9 @@ public sealed class DashboardController : ControllerBase
     /// (<c>dashboard_result</c> with <c>data: null</c>). No numeric values.
     /// </summary>
     /// <remarks>
-    /// Python: <c>POST {ApiBaseUrl}/dashboard/schema</c>.
+    /// Proxies agents <c>POST {Agents:ChatUrl}</c> with <c>intent=dashboard</c>, <c>payload.phase=schema</c>.
     /// Required: <c>session_id</c>, <c>tenant_id</c> (filled from the current tenant when omitted),
-    /// and one of <c>repository_id</c> or <c>workflow_id</c>.
+    /// and one of <c>repository_id</c> or <c>workflow_id</c>. Prefer <c>message</c> from the prompts phase.
     /// </remarks>
     [HttpPost("schema")]
     [Produces("application/json")]
@@ -84,8 +84,8 @@ public sealed class DashboardController : ControllerBase
 
     /// <summary>
     /// Suggest a natural-language dashboard prompt from repository/workflow metadata.
-    /// Proxies Python <c>POST {ApiBaseUrl}/prompts</c>. Use the returned <c>prompt</c>
-    /// as <c>message</c> on <c>POST /api/dashboard/schema</c>.
+    /// Proxies agents <c>POST {Agents:ChatUrl}</c> with <c>intent=dashboard</c>, <c>payload.phase=prompts</c>.
+    /// Use the returned <c>dashboard_result.prompt</c> as <c>message</c> on <c>POST /api/dashboard/schema</c>.
     /// </summary>
     [HttpPost("prompts")]
     [Produces("application/json")]
@@ -190,8 +190,9 @@ public sealed class DashboardController : ControllerBase
     }
 
     /// <summary>
-    /// Fetch dashboard HTML from Python using saved schema (or pass dashboard_json).
-    /// session_id is optional. Does not persist HTML — call POST /data/save to store it.
+    /// Fetch dashboard HTML via agents <c>intent=dashboard</c>, <c>payload.phase=data</c>
+    /// (saved schema or pass <c>dashboard_json</c>). session_id is optional.
+    /// Does not persist HTML — call POST /data/save to store it.
     /// </summary>
     [HttpPost("data")]
     [Produces("text/html", "application/json")]
