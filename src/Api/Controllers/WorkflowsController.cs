@@ -6,6 +6,7 @@ using SaaSApp.Api.Services;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Security;
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using System.Security.Claims;
 using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Infrastructure.Services;
@@ -1111,6 +1112,53 @@ public sealed class WorkflowsController : ControllerBase
             cancellationToken);
     }
 
+    /// <summary>
+    /// Raise a ticket from a repository archive file (Document Approval / any workflow with empty repository config).
+    /// Uses the supplied <c>repositoryId</c> + <c>itemId</c> (not workflow InitiateUsing.RepositoryId).
+    /// Optional <c>formData</c> populates the ticket form like normal start. Ticket appears in Inbox/Sent/Completed.
+    /// </summary>
+    [HttpPost("{id:guid}/raise-ticket")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(StartWorkflowCommandResult), StatusCodes.Status201Created)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> RaiseTicketFromRepository(
+        Guid id,
+        [FromBody] RaiseTicketFromRepositoryRequest? request,
+        CancellationToken cancellationToken)
+    {
+        request ??= new RaiseTicketFromRepositoryRequest();
+        if (request.RepositoryId == Guid.Empty)
+            return BadRequest(new { error = "repositoryId is required." });
+        if (request.ItemId == Guid.Empty)
+            return BadRequest(new { error = "itemId is required." });
+
+        var parsedForm = ParseStartFormData(request.FormData);
+        var stagedFiles = new List<StartWorkflowStagedFileRef>
+        {
+            new(
+                request.RepositoryId,
+                FileId: Guid.Empty,
+                FormJsonId: request.FormJsonId,
+                ItemId: request.ItemId,
+                FileName: request.FileName,
+                FieldId: request.FieldId)
+        };
+
+        return await ExecuteStartAsync(
+            id,
+            new StartWorkflowCommand(
+                id,
+                request.Context,
+                request.EnvType,
+                Attachment: null,
+                TriggerApAgentPythonJob: false,
+                Skills: null,
+                parsedForm.Fields,
+                parsedForm.LineItemsJson,
+                stagedFiles),
+            cancellationToken);
+    }
+
     private async Task<IReadOnlyList<WorkflowStepItem>?> LoadWorkflowStepsForStartAsync(
         Guid workflowId,
         CancellationToken cancellationToken)
@@ -1184,29 +1232,34 @@ public sealed class WorkflowsController : ControllerBase
                     continue;
                 if (!TryReadGuid(item, "repositoryId", out var repoId) && !TryReadGuid(item, "RepositoryId", out repoId))
                     continue;
-                if (!TryReadGuid(item, "fileId", out var fileId) && !TryReadGuid(item, "FileId", out fileId))
+
+                TryReadGuid(item, "fileId", out var fileId);
+                if (fileId == Guid.Empty)
+                    TryReadGuid(item, "FileId", out fileId);
+
+                TryReadGuid(item, "itemId", out var itemId);
+                if (itemId == Guid.Empty)
+                    TryReadGuid(item, "ItemId", out itemId);
+
+                // Need either a stage fileId or an existing archive itemId.
+                if (repoId == Guid.Empty || (fileId == Guid.Empty && itemId == Guid.Empty))
                     continue;
-                if (repoId != Guid.Empty && fileId != Guid.Empty)
-                {
-                    var formJsonId = ReadOptionalString(item, "formJsonId")
-                        ?? ReadOptionalString(item, "FormJsonId")
-                        ?? ReadOptionalString(item, "jsonId")
-                        ?? ReadOptionalString(item, "JsonId");
-                    var fieldId = ReadOptionalString(item, "fieldId")
-                        ?? ReadOptionalString(item, "FieldId");
-                    TryReadGuid(item, "itemId", out var itemId);
-                    if (itemId == Guid.Empty)
-                        TryReadGuid(item, "ItemId", out itemId);
-                    var fileName = ReadOptionalString(item, "fileName")
-                        ?? ReadOptionalString(item, "FileName");
-                    list.Add(new StartWorkflowStagedFileRef(
-                        repoId,
-                        fileId,
-                        formJsonId,
-                        itemId == Guid.Empty ? null : itemId,
-                        fileName,
-                        fieldId));
-                }
+
+                var formJsonId = ReadOptionalString(item, "formJsonId")
+                    ?? ReadOptionalString(item, "FormJsonId")
+                    ?? ReadOptionalString(item, "jsonId")
+                    ?? ReadOptionalString(item, "JsonId");
+                var fieldId = ReadOptionalString(item, "fieldId")
+                    ?? ReadOptionalString(item, "FieldId");
+                var fileName = ReadOptionalString(item, "fileName")
+                    ?? ReadOptionalString(item, "FileName");
+                list.Add(new StartWorkflowStagedFileRef(
+                    repoId,
+                    fileId,
+                    formJsonId,
+                    itemId == Guid.Empty ? null : itemId,
+                    fileName,
+                    fieldId));
             }
         }
 
@@ -2402,6 +2455,37 @@ public record StartWorkflowRequest(
     IReadOnlyList<string>? Skills = null,
     JsonElement? FormData = null,
     IReadOnlyList<StartWorkflowStagedFileRef>? StagedFiles = null);
+
+/// <summary>
+/// Raise ticket from a repository archive file. Repository comes from the body — not workflow form config.
+/// </summary>
+public sealed class RaiseTicketFromRepositoryRequest
+{
+    [JsonPropertyName("repositoryId")]
+    public Guid RepositoryId { get; set; }
+
+    [JsonPropertyName("itemId")]
+    public Guid ItemId { get; set; }
+
+    [JsonPropertyName("formData")]
+    public JsonElement? FormData { get; set; }
+
+    [JsonPropertyName("context")]
+    public string? Context { get; set; }
+
+    [JsonPropertyName("envType")]
+    public string? EnvType { get; set; }
+
+    [JsonPropertyName("fileName")]
+    public string? FileName { get; set; }
+
+    /// <summary>Optional ezfb FILE field id to receive the itemId.</summary>
+    [JsonPropertyName("fieldId")]
+    public string? FieldId { get; set; }
+
+    [JsonPropertyName("formJsonId")]
+    public string? FormJsonId { get; set; }
+}
 
 /// <summary>Request to set SLA policy for a workflow.</summary>
 public record SetWorkflowSlaRequest(SlaPriority Priority, int ResponseTimeMinutes, int ResolutionTimeMinutes, int? EscalationTimeMinutes = null, Guid? EscalateToUserId = null, string? EscalateToRole = null, bool SendNotificationOnBreach = true, string? NotificationEmails = null);

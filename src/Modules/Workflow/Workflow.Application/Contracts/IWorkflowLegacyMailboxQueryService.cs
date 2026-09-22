@@ -72,7 +72,20 @@ public sealed record LegacyMailboxRowDto(
     string? AgentResponse = null,
     string? AgentHtml = null,
     /// <summary>1 = show verify/approve buttons; 0 = hide. Default 1.</summary>
-    int Action = 1);
+    int Action = 1,
+    /// <summary>
+    /// Archive item for <see cref="RepositoryId"/> + <see cref="ItemId"/> (file metadata + repo field columns).
+    /// Null when ids are missing or the item is not found.
+    /// </summary>
+    LegacyMailboxRepositoryItemDto? RepositoryItem = null);
+
+/// <summary>Repository archive item snapshot returned on mailbox rows (raise-ticket / attached file).</summary>
+public sealed record LegacyMailboxRepositoryItemDto(
+    string? FileName,
+    string? FilePath,
+    string? FileType,
+    int? FileSize,
+    IReadOnlyDictionary<string, object?> Fields);
 
 public sealed record LegacyMailboxInstanceCountRequest(
     Guid WorkflowId,

@@ -35,7 +35,9 @@ public enum LegacyTransactionSyncStatus
     StepInserted,
     StepAlreadyThere,
     ReviewUpdated,
-    ReviewAlreadyUpdated
+    ReviewAlreadyUpdated,
+    /// <summary>Open step reassigned to another user (Forward); step not completed.</summary>
+    Forwarded
 }
 
 public sealed record WorkflowLegacyTransactionSyncResult(

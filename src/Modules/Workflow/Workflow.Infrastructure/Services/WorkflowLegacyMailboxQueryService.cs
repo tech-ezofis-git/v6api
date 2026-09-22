@@ -1,4 +1,5 @@
 using Npgsql;
+using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
@@ -16,13 +17,16 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
 
     private readonly ITenantContext _tenantContext;
     private readonly IWorkflowEzfbFormDataLoader _formDataLoader;
+    private readonly IRepositoryItemQueryService _repositoryItems;
 
     public WorkflowLegacyMailboxQueryService(
         ITenantContext tenantContext,
-        IWorkflowEzfbFormDataLoader formDataLoader)
+        IWorkflowEzfbFormDataLoader formDataLoader,
+        IRepositoryItemQueryService repositoryItems)
     {
         _tenantContext = tenantContext;
         _formDataLoader = formDataLoader;
+        _repositoryItems = repositoryItems;
     }
 
     public async Task<LegacyMailboxListResult> ListAsync(
@@ -76,6 +80,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         {
             var items = await ReadListPageAsync(connection, dataSql, parameters, offset, pageSize, cancellationToken);
             await EnrichFormDataAsync(items, cancellationToken);
+            await EnrichRepositoryItemAsync(items, cancellationToken);
             return new LegacyMailboxListResult(items, -1, page, pageSize, TableExists: true);
         }
 
@@ -83,6 +88,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var totalCount = await ExecuteCountAsync(connection, countSql, parameters, cancellationToken);
         var pageItems = await ReadListPageAsync(connection, dataSql, parameters, offset, pageSize, cancellationToken);
         await EnrichFormDataAsync(pageItems, cancellationToken);
+        await EnrichRepositoryItemAsync(pageItems, cancellationToken);
 
         return new LegacyMailboxListResult(pageItems, totalCount, page, pageSize, TableExists: true);
     }
@@ -104,6 +110,63 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
                 continue;
 
             items[i] = row with { FormData = loaded };
+        }
+    }
+
+    private async Task EnrichRepositoryItemAsync(IList<LegacyMailboxRowDto> items, CancellationToken cancellationToken)
+    {
+        if (_tenantContext.TenantId is not Guid tenantId || tenantId == Guid.Empty)
+            return;
+
+        var cache = new Dictionary<(Guid RepoId, Guid ItemId), LegacyMailboxRepositoryItemDto?>();
+
+        for (var i = 0; i < items.Count; i++)
+        {
+            var row = items[i];
+            if (string.IsNullOrWhiteSpace(row.RepositoryId) || string.IsNullOrWhiteSpace(row.ItemId))
+                continue;
+            if (!Guid.TryParse(row.RepositoryId, out var repoId) || repoId == Guid.Empty)
+                continue;
+            if (!Guid.TryParse(row.ItemId, out var itemId) || itemId == Guid.Empty)
+                continue;
+
+            var key = (repoId, itemId);
+            if (!cache.TryGetValue(key, out var snapshot))
+            {
+                snapshot = await LoadRepositoryItemSnapshotAsync(tenantId, repoId, itemId, cancellationToken);
+                cache[key] = snapshot;
+            }
+
+            if (snapshot is null)
+                continue;
+
+            items[i] = row with { RepositoryItem = snapshot };
+        }
+    }
+
+    private async Task<LegacyMailboxRepositoryItemDto?> LoadRepositoryItemSnapshotAsync(
+        Guid tenantId,
+        Guid repositoryId,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var detail = await _repositoryItems.GetItemAsync(repositoryId, tenantId, itemId, cancellationToken);
+            if (detail is null)
+                return null;
+
+            return new LegacyMailboxRepositoryItemDto(
+                detail.FileName,
+                detail.FilePath,
+                detail.FileType,
+                detail.FileSize,
+                detail.Fields);
+        }
+        catch
+        {
+            // Missing repo / deleted item must not break mailbox list.
+            return null;
         }
     }
 

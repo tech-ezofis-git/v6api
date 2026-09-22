@@ -45,7 +45,8 @@ public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyn
         Guid workflowId,
         int transactionRowId,
         CancellationToken cancellationToken = default,
-        int? inboxAction = null)
+        int? inboxAction = null,
+        MailboxOwnerCopyKind ownerMailboxCopy = MailboxOwnerCopyKind.Inbox)
     {
         var connectionString = _tenantContext.ConnectionString;
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -53,7 +54,8 @@ public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyn
 
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-        await SyncTransactionRowAsync(workflowId, transactionRowId, connection, formOverride: null, cancellationToken, inboxAction);
+        await SyncTransactionRowAsync(
+            workflowId, transactionRowId, connection, formOverride: null, cancellationToken, inboxAction, ownerMailboxCopy);
     }
 
     public async Task SyncInstanceEndTransactionsAsync(
@@ -77,10 +79,12 @@ public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyn
         NpgsqlConnection connection,
         MailboxFormSnapshot? formOverride = null,
         CancellationToken cancellationToken = default,
-        int? inboxAction = null)
+        int? inboxAction = null,
+        MailboxOwnerCopyKind ownerMailboxCopy = MailboxOwnerCopyKind.Inbox)
     {
         await EnsureMailboxTablesOnOpenConnectionAsync(workflowId, connection, cancellationToken);
-        await SyncTransactionRowCoreAsync(workflowId, transactionRowId, connection, formOverride, cancellationToken, inboxAction);
+        await SyncTransactionRowCoreAsync(
+            workflowId, transactionRowId, connection, formOverride, cancellationToken, inboxAction, ownerMailboxCopy);
     }
 
     public async Task SyncInstanceEndTransactionsAsync(
@@ -129,7 +133,8 @@ WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false AND UPPE
         NpgsqlConnection connection,
         MailboxFormSnapshot? formOverride,
         CancellationToken cancellationToken,
-        int? inboxAction = null)
+        int? inboxAction = null,
+        MailboxOwnerCopyKind ownerMailboxCopy = MailboxOwnerCopyKind.Inbox)
     {
         var suffix = workflowId.ToString("N")[..8];
         var workflowIdCompact = workflowId.ToString("N");
@@ -208,6 +213,22 @@ WHERE t.id = @TransactionRowId;";
                 ? inboxTable
                 : sentTable;
 
+        // Before moving to Completed, remember who already could see this ticket (Inbox/Sent)
+        // so the forwarder (and others) land in Completed instead of disappearing.
+        List<string>? completedWatcherUserIds = null;
+        if (targetTable == completedTable)
+        {
+            completedWatcherUserIds = await ListMailboxUserIdsForInstanceAsync(
+                connection,
+                workflowIdValue,
+                workflowIdCompact,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                inboxTable,
+                sentTable,
+                cancellationToken);
+        }
+
         // Keep mailbox aligned with workflow state: no stale inbox after approve; no inbox/sent after complete.
         if (targetTable == sentTable)
             await DeleteMailboxRowsForInstanceAsync(connection, workflowIdValue, workflowIdCompact, workflowInstanceId, workflowInstanceIdStr, inboxTable, cancellationToken);
@@ -230,13 +251,15 @@ WHERE t.id = @TransactionRowId;";
                 assigneeId,
                 cancellationToken);
 
-        // Share-file: keep sharer (ModifiedBy) on inbox while guest (ActivityUserId) holds the open task.
+        // Share-file: clear owner's Sent when they stay on Inbox with the guest.
+        // Forward (Sent copy): do not clear owner's Sent here — insert below recreates it.
         if (targetTable == inboxTable
             && modifiedByUserId is Guid shareOwnerId
             && shareOwnerId != Guid.Empty
             && activityUserId is Guid guestId
             && guestId != Guid.Empty
-            && shareOwnerId != guestId)
+            && shareOwnerId != guestId
+            && ownerMailboxCopy == MailboxOwnerCopyKind.Inbox)
         {
             await DeleteSentRowsForInstanceAndUserAsync(
                 connection,
@@ -246,6 +269,34 @@ WHERE t.id = @TransactionRowId;";
                 workflowInstanceIdStr,
                 sentTable,
                 shareOwnerId,
+                cancellationToken);
+        }
+        else if (targetTable == inboxTable
+            && modifiedByUserId is Guid forwarderId
+            && forwarderId != Guid.Empty
+            && activityUserId is Guid assigneeOnly
+            && assigneeOnly != Guid.Empty
+            && forwarderId != assigneeOnly
+            && ownerMailboxCopy == MailboxOwnerCopyKind.None)
+        {
+            // Explicit hide for forwarder (unused by Forward path; kept for share edge cases).
+            await DeleteMailboxRowsForInstanceAndUserAsync(
+                connection,
+                workflowIdValue,
+                workflowIdCompact,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                inboxTable,
+                forwarderId,
+                cancellationToken);
+            await DeleteMailboxRowsForInstanceAndUserAsync(
+                connection,
+                workflowIdValue,
+                workflowIdCompact,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                sentTable,
+                forwarderId,
                 cancellationToken);
         }
 
@@ -295,9 +346,35 @@ INSERT INTO {targetTable}
             && ownerCcId != Guid.Empty
             && activityUserId is Guid openAssigneeId
             && openAssigneeId != Guid.Empty
-            && ownerCcId != openAssigneeId)
+            && ownerCcId != openAssigneeId
+            && ownerMailboxCopy != MailboxOwnerCopyKind.None)
         {
-            await using var ccCmd = new NpgsqlCommand(insertSql, connection);
+            var ownerTable = ownerMailboxCopy == MailboxOwnerCopyKind.Sent ? sentTable : inboxTable;
+            var ownerAction = ownerMailboxCopy == MailboxOwnerCopyKind.Sent ? 0 : resolvedAction;
+
+            if (ownerMailboxCopy == MailboxOwnerCopyKind.Sent)
+            {
+                await DeleteMailboxRowsForInstanceAndUserAsync(
+                    connection,
+                    workflowIdValue,
+                    workflowIdCompact,
+                    workflowInstanceId,
+                    workflowInstanceIdStr,
+                    inboxTable,
+                    ownerCcId,
+                    cancellationToken);
+            }
+
+            var ownerInsertSql = $@"
+INSERT INTO {ownerTable}
+    (user_id, group_id, workflow_id, name, workflow_instance_id, reference_number, created_at_utc, started_at_utc, completed_at_utc, context,
+     transaction_id, activity_id, rule_id, stage_type, stage, review,
+     transaction_created_at, transaction_created_by, transaction_created_by_email,
+     transaction_modified_at, transaction_modified_by, activity_user_email,
+     repository_id, item_id, form_id, form_entry_id, form_data, ""action"")
+{sourceSql};";
+
+            await using var ccCmd = new NpgsqlCommand(ownerInsertSql, connection);
             ccCmd.Parameters.AddWithValue("@WorkflowGuid", workflowId);
             ccCmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
             ccCmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
@@ -305,7 +382,7 @@ INSERT INTO {targetTable}
             ccCmd.Parameters.AddWithValue("@TransactionRowId", transactionRowId);
             ccCmd.Parameters.AddWithValue("@TxGuidStr", txIdStr);
             ccCmd.Parameters.AddWithValue("@OverrideUserId", ownerCcId.ToString("D"));
-            ccCmd.Parameters.AddWithValue("@Action", resolvedAction);
+            ccCmd.Parameters.AddWithValue("@Action", ownerAction);
             ccCmd.Parameters.AddWithValue("@RepositoryId", (object?)extras.RepositoryId?.ToString("D") ?? DBNull.Value);
             ccCmd.Parameters.AddWithValue("@ItemId", (object?)extras.ItemId?.ToString("D") ?? DBNull.Value);
             ccCmd.Parameters.AddWithValue("@FormId", (object?)extras.FormId ?? DBNull.Value);
@@ -314,7 +391,7 @@ INSERT INTO {targetTable}
             await ccCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
-        // Submitter/initiator is not the next assignee: they stay in sent, not inbox.
+        // Submitter/initiator is not the next assignee: remove from Inbox (Forward puts them on Sent above).
         if (targetTable == inboxTable
             && createdByUserId is Guid submitterId
             && submitterId != Guid.Empty
@@ -331,7 +408,161 @@ INSERT INTO {targetTable}
                 inboxTable,
                 submitterId,
                 cancellationToken);
+
+            // If submitter is the forwarder, they already got Sent via ownerMailboxCopy.Sent.
+            // If not, and they have no Sent copy yet, keep visibility on Sent.
+            if (ownerMailboxCopy != MailboxOwnerCopyKind.Sent
+                || modifiedByUserId != submitterId)
+            {
+                await EnsureUserMailboxCopyAsync(
+                    connection,
+                    sentTable,
+                    sourceSql,
+                    workflowId,
+                    workflowIdValue,
+                    workflowInstanceId,
+                    workflowInstanceIdStr,
+                    transactionRowId,
+                    txIdStr,
+                    submitterId.ToString("D"),
+                    action: 0,
+                    extras,
+                    cancellationToken);
+            }
         }
+
+        // After Submit (open step → Sent): keep forwarder on Sent until Completed.
+        if (targetTable == sentTable
+            && modifiedByUserId is Guid priorActorId
+            && priorActorId != Guid.Empty
+            && activityUserId is Guid completerId
+            && completerId != Guid.Empty
+            && priorActorId != completerId)
+        {
+            await EnsureUserMailboxCopyAsync(
+                connection,
+                sentTable,
+                sourceSql,
+                workflowId,
+                workflowIdValue,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                transactionRowId,
+                txIdStr,
+                priorActorId.ToString("D"),
+                action: 0,
+                extras,
+                cancellationToken);
+        }
+
+        // Completed: restore every prior Inbox/Sent watcher onto Completed.
+        if (targetTable == completedTable && completedWatcherUserIds is { Count: > 0 })
+        {
+            var primaryUser = activityUserId?.ToString("D");
+            foreach (var watcher in completedWatcherUserIds)
+            {
+                if (string.IsNullOrWhiteSpace(watcher))
+                    continue;
+                if (primaryUser != null
+                    && string.Equals(watcher, primaryUser, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                await EnsureUserMailboxCopyAsync(
+                    connection,
+                    completedTable,
+                    sourceSql,
+                    workflowId,
+                    workflowIdValue,
+                    workflowInstanceId,
+                    workflowInstanceIdStr,
+                    transactionRowId,
+                    txIdStr,
+                    watcher,
+                    action: 0,
+                    extras,
+                    cancellationToken);
+            }
+        }
+    }
+
+    private static async Task EnsureUserMailboxCopyAsync(
+        NpgsqlConnection connection,
+        string tableFull,
+        string sourceSql,
+        Guid workflowId,
+        string workflowIdValue,
+        Guid workflowInstanceId,
+        string workflowInstanceIdStr,
+        int transactionRowId,
+        string txIdStr,
+        string overrideUserId,
+        int action,
+        MailboxExtraData extras,
+        CancellationToken cancellationToken)
+    {
+        var insertSql = $@"
+INSERT INTO {tableFull}
+    (user_id, group_id, workflow_id, name, workflow_instance_id, reference_number, created_at_utc, started_at_utc, completed_at_utc, context,
+     transaction_id, activity_id, rule_id, stage_type, stage, review,
+     transaction_created_at, transaction_created_by, transaction_created_by_email,
+     transaction_modified_at, transaction_modified_by, activity_user_email,
+     repository_id, item_id, form_id, form_entry_id, form_data, ""action"")
+{sourceSql};";
+
+        await using var cmd = new NpgsqlCommand(insertSql, connection);
+        cmd.Parameters.AddWithValue("@WorkflowGuid", workflowId);
+        cmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceIdStr", workflowInstanceIdStr);
+        cmd.Parameters.AddWithValue("@TransactionRowId", transactionRowId);
+        cmd.Parameters.AddWithValue("@TxGuidStr", txIdStr);
+        cmd.Parameters.AddWithValue("@OverrideUserId", overrideUserId);
+        cmd.Parameters.AddWithValue("@Action", action);
+        cmd.Parameters.AddWithValue("@RepositoryId", (object?)extras.RepositoryId?.ToString("D") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ItemId", (object?)extras.ItemId?.ToString("D") ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@FormId", (object?)extras.FormId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@FormEntryId", (object?)extras.FormEntryId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@FormData", (object?)extras.FormData ?? DBNull.Value);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<List<string>> ListMailboxUserIdsForInstanceAsync(
+        NpgsqlConnection connection,
+        string workflowIdValue,
+        string workflowTableKey,
+        Guid workflowInstanceId,
+        string workflowInstanceIdStr,
+        string inboxTable,
+        string sentTable,
+        CancellationToken cancellationToken)
+    {
+        var sql = $"""
+SELECT DISTINCT user_id
+FROM (
+    SELECT user_id FROM {inboxTable}
+    WHERE (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
+      AND (workflow_instance_id = @WorkflowInstanceIdStr OR {TryCastUuid("workflow_instance_id")} = @WorkflowInstanceId)
+    UNION
+    SELECT user_id FROM {sentTable}
+    WHERE (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
+      AND (workflow_instance_id = @WorkflowInstanceIdStr OR {TryCastUuid("workflow_instance_id")} = @WorkflowInstanceId)
+) u
+WHERE user_id IS NOT NULL AND BTRIM(user_id) <> '';
+""";
+        var users = new List<string>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
+        cmd.Parameters.AddWithValue("@WorkflowTableKey", workflowTableKey);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceIdStr", workflowInstanceIdStr);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0))
+                users.Add(reader.GetString(0));
+        }
+
+        return users;
     }
 
     private static string BuildMailboxSourceSelect(string transactionTable, string instancesTable)
