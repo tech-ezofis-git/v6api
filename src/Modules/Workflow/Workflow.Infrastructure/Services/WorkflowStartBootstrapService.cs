@@ -351,7 +351,16 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         {
             WorkflowStepTransitionHelper.CompleteStepInstance(instance, startStep.Id, userId);
             if (nextDefinitionStep != null && !reviewSync.WorkflowCompleted)
+            {
                 WorkflowStepTransitionHelper.StartStepInstance(instance, nextDefinitionStep.Id);
+                // Prefer form First Approver (returned as NextActivityUserId) over the raiser.
+                if (reviewSync.NextActivityUserId is Guid nextAssignee
+                    && nextAssignee != Guid.Empty
+                    && nextAssignee != userId)
+                {
+                    instance.Reassign(nextAssignee);
+                }
+            }
             await _repository.UpdateInstanceAsync(instance, cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }

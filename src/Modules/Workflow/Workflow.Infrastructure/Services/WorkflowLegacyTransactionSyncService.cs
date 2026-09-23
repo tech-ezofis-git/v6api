@@ -268,10 +268,12 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                 if (nextExists == null)
                 {
                     var (nextActivityUserId, nextCreatedByUserId) = await ResolveNextStepAssigneeAsync(
+                        connection,
                         workflowInstanceId,
                         nextStep,
                         resolvedActivityUserId,
                         userId,
+                        mailboxForm,
                         cancellationToken);
 
                     (nextTransactionId, nextTransactionGuid) = await InsertOpenTransactionForDefinitionStepAsync(
@@ -547,19 +549,47 @@ WHERE id = @WorkflowInstanceId;";
     }
 
     /// <summary>
-    /// After a workflow inbox share, return the next open step to the sharer (not the guest).
-    /// Uses SharedByUserId as both assignee and CreatedBy so the guest does not keep inbox via CreatedBy.
+    /// Resolve who owns the newly opened next step.
+    /// Priority: step approvers → form First Approver → share owner → fallback (often the actor).
     /// </summary>
     private async Task<(Guid ActivityUserId, Guid CreatedByUserId)> ResolveNextStepAssigneeAsync(
+        NpgsqlConnection connection,
         Guid workflowInstanceId,
         WorkflowStep nextStep,
         Guid resolvedActivityUserId,
         Guid currentUserId,
+        MailboxFormSnapshot? mailboxForm,
         CancellationToken cancellationToken)
     {
         var approvers = nextStep.GetApproverIds();
         if (approvers.Count > 0)
             return (approvers[0], currentUserId);
+
+        // Document Approval / Manual User often has no AssignedToUserId — take First Approver from form.
+        try
+        {
+            var fromForm = await WorkflowFormAssigneeResolver.TryResolveFromFormAsync(
+                connection,
+                mailboxForm?.FormId,
+                mailboxForm?.FormDataJson,
+                cancellationToken);
+            if (fromForm is Guid formAssignee && formAssignee != Guid.Empty)
+            {
+                _logger.LogInformation(
+                    "Assigning workflow instance {InstanceId} next step '{StepName}' to form First Approver {AssigneeUserId}",
+                    workflowInstanceId,
+                    nextStep.Name,
+                    formAssignee);
+                return (formAssignee, currentUserId);
+            }
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Failed to resolve First Approver from form for instance {InstanceId}; continuing assignee fallback",
+                workflowInstanceId);
+        }
 
         try
         {
