@@ -102,4 +102,13 @@ public interface IRepositoryUploadIndexService
         string jobId,
         Guid tenantId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// First active bulk OCR Hangfire job for this tenant (Processing, then Enqueued).
+    /// Optional <paramref name="repositoryId"/> filters to one repository.
+    /// </summary>
+    Task<BulkUploadJobStatusResult?> GetActiveBulkUploadJobStatusAsync(
+        Guid tenantId,
+        Guid? repositoryId = null,
+        CancellationToken cancellationToken = default);
 }

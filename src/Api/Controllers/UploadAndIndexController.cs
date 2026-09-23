@@ -259,7 +259,31 @@ public sealed class UploadAndIndexController : ControllerBase
         }
     }
 
-    /// <summary>Poll Hangfire + stage-row OCR status for a bulk upload job.</summary>
+    /// <summary>
+    /// First active bulk OCR job for the current tenant (Processing first, then Enqueued).
+    /// Optional query <c>repositoryId</c> limits to that repository.
+    /// </summary>
+    [HttpGet("/api/uploadAndIndex/bulkUpload/jobs/active")]
+    [ProducesResponseType(typeof(BulkUploadJobStatusResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ActiveBulkUploadJob(
+        [FromQuery] Guid? repositoryId,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = RequireTenantId();
+        var result = await _uploadIndex.GetActiveBulkUploadJobStatusAsync(
+            tenantId,
+            repositoryId,
+            cancellationToken);
+        return result == null
+            ? NotFound(new { error = "No active bulk upload OCR job for this tenant." })
+            : Ok(result);
+    }
+
+    /// <summary>
+    /// Poll Hangfire + per-file OCR / index status for a bulk upload job.
+    /// Returns which files are pending OCR, OCR-complete (ready to export), failed, or already indexed.
+    /// </summary>
     [HttpGet("/api/uploadAndIndex/bulkUpload/jobs/{jobId}")]
     [ProducesResponseType(typeof(BulkUploadJobStatusResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]

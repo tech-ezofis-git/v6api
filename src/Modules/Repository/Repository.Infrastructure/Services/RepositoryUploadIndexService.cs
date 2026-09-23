@@ -830,25 +830,43 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
                             stageId.ToString("D"),
                             string.Empty,
                             "Missing",
-                            "Stage row not found."));
+                            "Stage row not found.",
+                            Phase: "Missing",
+                            OcrCompleted: false,
+                            Indexed: false,
+                            Completed: false));
                         continue;
                     }
 
                     var status = row.Status ?? row.StageStatus ?? "Unknown";
+                    var promotedId = row.PromotedItemId is Guid p && p != Guid.Empty
+                        ? p.ToString("D")
+                        : null;
+                    var (phase, ocrDone, isIndexed) = ClassifyBulkFilePhase(status, promotedId);
+
                     files.Add(new BulkUploadFileStatusItem(
                         stageId.ToString("D"),
                         row.FileName ?? string.Empty,
-                        status));
+                        status,
+                        Error: phase == "OcrFailed" ? status : null,
+                        Phase: phase,
+                        OcrCompleted: ocrDone,
+                        Indexed: isIndexed,
+                        Completed: isIndexed,
+                        PromotedItemId: promotedId));
                 }
             }
         }
 
-        var ocrCompleted = files.Count(f =>
-            string.Equals(f.Status, "OCR", StringComparison.OrdinalIgnoreCase));
+        var ocrReadyToIndex = files.Count(f => f.OcrCompleted && !f.Indexed);
         var ocrFailed = files.Count(f =>
-            f.Status.Contains("Fail", StringComparison.OrdinalIgnoreCase)
-            || string.Equals(f.Status, "Missing", StringComparison.OrdinalIgnoreCase));
-        var ocrPending = files.Count - ocrCompleted - ocrFailed;
+            string.Equals(f.Phase, "OcrFailed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(f.Phase, "Missing", StringComparison.OrdinalIgnoreCase));
+        var indexedCount = files.Count(f => f.Indexed);
+        // Pending = not OCR-success yet and not failed/missing (still waiting on Hangfire OCR).
+        var ocrPending = files.Count(f =>
+            string.Equals(f.Phase, "PendingOcr", StringComparison.OrdinalIgnoreCase));
+        var notCompleted = files.Count(f => !f.Completed);
 
         var terminal = string.Equals(hangfireState, "Succeeded", StringComparison.OrdinalIgnoreCase)
             || string.Equals(hangfireState, "Failed", StringComparison.OrdinalIgnoreCase)
@@ -865,9 +883,128 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             errorMessage,
             repositoryId,
             files,
-            ocrCompleted,
-            Math.Max(0, ocrPending),
-            ocrFailed);
+            OcrCompleted: files.Count(f => f.OcrCompleted),
+            OcrPending: Math.Max(0, ocrPending),
+            OcrFailed: ocrFailed,
+            Indexed: indexedCount,
+            ReadyToIndex: ocrReadyToIndex,
+            NotCompleted: notCompleted);
+    }
+
+    public async Task<BulkUploadJobStatusResult?> GetActiveBulkUploadJobStatusAsync(
+        Guid tenantId,
+        Guid? repositoryId = null,
+        CancellationToken cancellationToken = default)
+    {
+        var activeJobId = TryFindFirstActiveBulkOcrJobId(tenantId, repositoryId);
+        if (string.IsNullOrWhiteSpace(activeJobId))
+            return null;
+
+        return await GetBulkUploadJobStatusAsync(activeJobId, tenantId, cancellationToken);
+    }
+
+    /// <summary>
+    /// Scan Hangfire Processing then Enqueued for the first <see cref="BulkUploadOcrJob"/>
+    /// matching tenant (and optional repository).
+    /// </summary>
+    private static string? TryFindFirstActiveBulkOcrJobId(Guid tenantId, Guid? repositoryId)
+    {
+        try
+        {
+            foreach (var jobId in EnumerateActiveBulkOcrJobIds())
+            {
+                var args = TryGetBulkOcrJobArgs(jobId);
+                if (args == null)
+                    continue;
+                if (args.TenantId != tenantId)
+                    continue;
+                if (repositoryId is Guid repoFilter && repoFilter != Guid.Empty && args.RepositoryId != repoFilter)
+                    continue;
+                return jobId;
+            }
+        }
+        catch
+        {
+            // Hangfire storage may be unavailable.
+        }
+
+        return null;
+    }
+
+    private static IEnumerable<string> EnumerateActiveBulkOcrJobIds()
+    {
+        var monitor = JobStorage.Current.GetMonitoringApi();
+
+        // Prefer jobs already running, then queue order (from=0 is the head of the queue).
+        foreach (var pair in monitor.ProcessingJobs(0, 200))
+        {
+            if (IsBulkUploadOcrJob(pair.Value?.Job))
+                yield return pair.Key;
+        }
+
+        var queues = monitor.Queues();
+        if (queues != null)
+        {
+            foreach (var queue in queues)
+            {
+                var name = string.IsNullOrWhiteSpace(queue.Name) ? "default" : queue.Name;
+                foreach (var pair in monitor.EnqueuedJobs(name, 0, 200))
+                {
+                    if (IsBulkUploadOcrJob(pair.Value?.Job))
+                        yield return pair.Key;
+                }
+            }
+        }
+
+        foreach (var pair in monitor.ScheduledJobs(0, 100))
+        {
+            if (IsBulkUploadOcrJob(pair.Value?.Job))
+                yield return pair.Key;
+        }
+    }
+
+    private static bool IsBulkUploadOcrJob(Hangfire.Common.Job? job)
+    {
+        if (job?.Type == null || string.IsNullOrWhiteSpace(job.Method?.Name))
+            return false;
+
+        if (!string.Equals(job.Method.Name, nameof(BulkUploadOcrJob.Execute), StringComparison.Ordinal))
+            return false;
+
+        return typeof(BulkUploadOcrJob).IsAssignableFrom(job.Type)
+            || string.Equals(job.Type.Name, nameof(BulkUploadOcrJob), StringComparison.Ordinal);
+    }
+
+    /// <summary>
+    /// Map stage status + promoted item into a stable UI phase.
+    /// Indexed = exported via PUT index/{id} (promoted_item_id set).
+    /// </summary>
+    private static (string Phase, bool OcrCompleted, bool Indexed) ClassifyBulkFilePhase(
+        string status,
+        string? promotedItemId)
+    {
+        if (!string.IsNullOrWhiteSpace(promotedItemId))
+            return ("Indexed", true, true);
+
+        if (status.Contains("Fail", StringComparison.OrdinalIgnoreCase))
+            return ("OcrFailed", false, false);
+
+        if (string.Equals(status, "OCR", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "Indexing", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "Archiving", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "Indexed", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(status, "Archived", StringComparison.OrdinalIgnoreCase))
+        {
+            // Indexing/Archiving without promoted id = OCR done, export in progress or ready.
+            var indexedByStatus =
+                string.Equals(status, "Indexed", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(status, "Archived", StringComparison.OrdinalIgnoreCase);
+            return indexedByStatus
+                ? ("Indexed", true, true)
+                : ("OcrCompleted", true, false);
+        }
+
+        return ("PendingOcr", false, false);
     }
 
     private static string? ResolveHangfireState(string jobId)
