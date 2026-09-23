@@ -1096,6 +1096,8 @@ public sealed class WorkflowsController : ControllerBase
         var stagedFiles = request?.StagedFiles;
         var workflowSteps = await LoadWorkflowStepsForStartAsync(id, cancellationToken);
         var hasApAgent = HasDedicatedApAgentStep(workflowSteps);
+        var hasFile = request?.Attachment is { Content.Length: > 0 }
+            || HasStartStagedFile(stagedFiles);
 
         return await ExecuteStartAsync(
             id,
@@ -1104,7 +1106,7 @@ public sealed class WorkflowsController : ControllerBase
                 request?.Context,
                 request?.EnvType,
                 request?.Attachment,
-                TriggerApAgentPythonJob: hasApAgent && request?.Attachment is { Content.Length: > 0 },
+                TriggerApAgentPythonJob: hasApAgent && hasFile,
                 Skills: request?.Skills,
                 parsedForm.Fields,
                 parsedForm.LineItemsJson,
@@ -1143,6 +1145,9 @@ public sealed class WorkflowsController : ControllerBase
                 FileName: request.FileName,
                 FieldId: request.FieldId)
         };
+        var workflowSteps = await LoadWorkflowStepsForStartAsync(id, cancellationToken);
+        // Raise-ticket always has an archive file; enqueue AP Agent only for AP_AGENT workflows.
+        var triggerApAgent = HasDedicatedApAgentStep(workflowSteps);
 
         return await ExecuteStartAsync(
             id,
@@ -1151,7 +1156,7 @@ public sealed class WorkflowsController : ControllerBase
                 request.Context,
                 request.EnvType,
                 Attachment: null,
-                TriggerApAgentPythonJob: false,
+                TriggerApAgentPythonJob: triggerApAgent,
                 Skills: null,
                 parsedForm.Fields,
                 parsedForm.LineItemsJson,
@@ -1171,6 +1176,11 @@ public sealed class WorkflowsController : ControllerBase
         steps?.Any(s =>
             string.Equals(s.StageType, "AP_AGENT", StringComparison.OrdinalIgnoreCase)
             || string.Equals(s.Name, "Ap Agent", StringComparison.OrdinalIgnoreCase)) == true;
+
+    private static bool HasStartStagedFile(IReadOnlyList<StartWorkflowStagedFileRef>? stagedFiles) =>
+        stagedFiles?.Any(s =>
+            s.FileId != Guid.Empty
+            || (s.ItemId is Guid itemId && itemId != Guid.Empty)) == true;
 
     private static (IReadOnlyDictionary<string, string>? Fields, string? LineItemsJson) ParseStartFormData(string? formDataJson)
     {

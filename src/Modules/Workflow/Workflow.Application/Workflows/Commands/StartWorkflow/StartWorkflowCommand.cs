@@ -10,8 +10,9 @@ public record StartWorkflowCommand(
     string? EnvType = null,
     StartWorkflowAttachmentPayload? Attachment = null,
     /// <summary>
-    /// Explicit opt-in to enqueue AP Agent. When the workflow has a dedicated AP_AGENT step and
-    /// bootstrap produced form payload, Core enqueues regardless of this flag so tickets are not stranded.
+    /// Opt-in to enqueue the AP Agent Hangfire job after start.
+    /// Controllers set this when the workflow has a dedicated AP_AGENT step and a file is attached
+    /// (multipart file, staged fileIds, or raise-ticket itemId). Ignored when false.
     /// </summary>
     bool TriggerApAgentPythonJob = false,
     IReadOnlyList<string>? Skills = null,
