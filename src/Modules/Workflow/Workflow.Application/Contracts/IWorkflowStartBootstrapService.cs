@@ -15,8 +15,9 @@ public interface IWorkflowStartBootstrapService
 
 /// <summary>
 /// Stage row to archive on workflow start, or an already-archived item to link.
-/// When <see cref="ItemId"/> is set, that archive item is attached (FileId optional).
-/// When only <see cref="FileId"/> is set, it is treated as a stage id to promote.
+/// Prefer <see cref="FileId"/> only for normal start/json (stage id from uploadWithOcr / bulkUpload).
+/// Set <see cref="ItemId"/> only for an already-archived repository item (raise-from-repository).
+/// If <see cref="ItemId"/> is set but that archive row is missing, start falls back to promoting <see cref="FileId"/>.
 /// <see cref="FieldId"/> is the form column that receives the archived itemId.
 /// </summary>
 public sealed record StartWorkflowStagedFileRef(

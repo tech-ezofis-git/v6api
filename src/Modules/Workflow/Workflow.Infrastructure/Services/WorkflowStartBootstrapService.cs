@@ -616,7 +616,9 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             if (staged.RepositoryId == Guid.Empty)
                 continue;
 
-            // Existing archive item — use supplied repositoryId + itemId (do not use workflow.RepositoryId).
+            // Existing archive item (Document Approval / raise-from-repository).
+            // Normal start/json often sends fileId = stage id and wrongly sets itemId to the same
+            // GUID — AttachExisting fails, so fall through to PromoteFromStage(fileId).
             if (staged.ItemId is Guid existingItemId && existingItemId != Guid.Empty)
             {
                 var attached = await _attachmentArchive.AttachExistingArchiveItemAsync(
@@ -630,29 +632,28 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                     userId,
                     cancellationToken);
 
-                if (attached == null)
+                if (attached != null)
                 {
-                    _logger.LogWarning(
-                        "Archive item {ItemId} in repository {RepositoryId} was not attached on workflow {WorkflowId}: item not found.",
-                        existingItemId,
+                    _logger.LogInformation(
+                        "Attached existing archive item {ItemId} from repository {RepositoryId} for workflow {WorkflowId}. Attachment {AttachmentId}, processAddon {ProcessAddonId}.",
+                        attached.ItemId,
                         staged.RepositoryId,
-                        workflow.Id);
+                        workflow.Id,
+                        attached.AttachmentId,
+                        attached.ProcessAddonId);
+
+                    var bindRef = staged with { FileId = existingItemId };
+                    archivedStagedFiles.Add((bindRef, attached.ItemId));
+                    repositoryItemId ??= attached.ItemId;
+                    blobPath ??= attached.FilePath;
                     continue;
                 }
 
-                _logger.LogInformation(
-                    "Attached existing archive item {ItemId} from repository {RepositoryId} for workflow {WorkflowId}. Attachment {AttachmentId}, processAddon {ProcessAddonId}.",
-                    attached.ItemId,
+                _logger.LogWarning(
+                    "Archive item {ItemId} in repository {RepositoryId} was not found on workflow {WorkflowId}; will try stage promote if fileId is set.",
+                    existingItemId,
                     staged.RepositoryId,
-                    workflow.Id,
-                    attached.AttachmentId,
-                    attached.ProcessAddonId);
-
-                var bindRef = staged with { FileId = existingItemId };
-                archivedStagedFiles.Add((bindRef, attached.ItemId));
-                repositoryItemId ??= attached.ItemId;
-                blobPath ??= attached.FilePath;
-                continue;
+                    workflow.Id);
             }
 
             if (staged.FileId == Guid.Empty)

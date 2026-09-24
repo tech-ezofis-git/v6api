@@ -210,21 +210,21 @@ public sealed class UserTenantRegistry : IUserTenantRegistry
         switch (answer.ValueKind)
         {
             case JsonValueKind.String:
-                if (string.IsNullOrWhiteSpace(answer.GetString()))
-                    throw new ArgumentException("Each answer string must be non-empty.", paramName);
+            case JsonValueKind.Null:
+            case JsonValueKind.Undefined:
+                // Skip sends an empty answer; store it and do not fail.
                 return;
             case JsonValueKind.Array:
-                if (answer.GetArrayLength() == 0)
-                    throw new ArgumentException("Each answer array must contain at least one value.", paramName);
-
                 foreach (var item in answer.EnumerateArray())
                 {
-                    if (item.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(item.GetString()))
-                        throw new ArgumentException("Answer arrays must contain only non-empty string values.", paramName);
+                    if (item.ValueKind == JsonValueKind.Null || item.ValueKind == JsonValueKind.Undefined)
+                        continue;
+                    if (item.ValueKind != JsonValueKind.String)
+                        throw new ArgumentException("Answer arrays must contain only string values.", paramName);
                 }
                 return;
             default:
-                throw new ArgumentException("Each answer must be either a string or an array of strings.", paramName);
+                throw new ArgumentException("Each answer must be a string, an array of strings, or empty when skipped.", paramName);
         }
     }
 }

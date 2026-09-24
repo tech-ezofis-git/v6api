@@ -154,8 +154,20 @@ internal static class TenantSchemaEnsureHelper
             connectionString,
             """
             SELECT 1
-            FROM users."Roles"
-            WHERE "Name" = 'Admin' AND "IsDeleted" = false
+            FROM users."Roles" r
+            WHERE r."Name" = 'Admin' AND r."IsDeleted" = false
+              AND EXISTS (
+                    SELECT 1 FROM users."RolePermissions" p
+                    WHERE p."RoleId" = r."Id" AND lower(p."PermissionKey") = 'folder')
+              AND EXISTS (
+                    SELECT 1 FROM users."RolePermissions" p
+                    WHERE p."RoleId" = r."Id" AND lower(p."PermissionKey") = 'settings')
+              AND EXISTS (
+                    SELECT 1 FROM information_schema.tables
+                    WHERE table_schema = 'users' AND table_name = 'RoleMenus')
+              AND EXISTS (
+                    SELECT 1 FROM users."RoleMenus" rm
+                    WHERE rm."RoleId" = r."Id")
             """,
             applySchema,
             cancellationToken);
