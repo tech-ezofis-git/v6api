@@ -133,6 +133,17 @@ public static class UsersSchemaEnsurer
            OR users."PermissionCategories"."Name" <> EXCLUDED."Name"
            OR users."PermissionCategories"."SortOrder" <> EXCLUDED."SortOrder"
            OR users."PermissionCategories"."IsActive" <> true;
+
+        INSERT INTO users."PermissionCategories" ("Id", "Key", "Name", "SortOrder", "IsActive")
+        VALUES
+            ('a1000001-0000-4000-8000-000000000009'::uuid, 'form', 'Form', 7, true),
+            ('a1000001-0000-4000-8000-00000000000a'::uuid, 'folder-create', 'Folder Create', 8, true),
+            ('a1000001-0000-4000-8000-00000000000b'::uuid, 'portal', 'Portal', 9, true),
+            ('a1000001-0000-4000-8000-00000000000c'::uuid, 'report-builder', 'Report Builder', 10, true)
+        ON CONFLICT ("Key") DO UPDATE SET
+            "Name" = EXCLUDED."Name",
+            "SortOrder" = EXCLUDED."SortOrder",
+            "IsActive" = true;
         """;
 
     public static async Task EnsurePermissionCategoriesAsync(
@@ -170,6 +181,8 @@ public static class UsersSchemaEnsurer
 
         CREATE UNIQUE INDEX IF NOT EXISTS "IX_Menus_Key" ON users."Menus" ("Key");
 
+        DELETE FROM users."Menus" WHERE lower("Key") = 'folder-creation';
+
         INSERT INTO users."Menus" ("Id", "Key", "Label", "RoutePath", "SortOrder", "IsSystem", "IsDeleted", "CreatedAtUtc")
         VALUES
             ('b2000001-0000-4000-8000-000000000001'::uuid, 'dashboard', 'Dashboard', '/dashboard', 1, true, false, '2025-07-02T00:00:00'::timestamptz),
@@ -177,7 +190,11 @@ public static class UsersSchemaEnsurer
             ('b2000001-0000-4000-8000-000000000003'::uuid, 'ocr-review', 'OCR.Review', '/ocr-review', 3, true, false, '2025-07-02T00:00:00'::timestamptz),
             ('b2000001-0000-4000-8000-000000000004'::uuid, 'processed-invoices', 'Processed Invoices', '/processed-invoices', 4, true, false, '2025-07-02T00:00:00'::timestamptz),
             ('b2000001-0000-4000-8000-000000000005'::uuid, 'approval-queue', 'Approval Queue', '/approval-queue', 5, true, false, '2025-07-02T00:00:00'::timestamptz),
-            ('b2000001-0000-4000-8000-000000000006'::uuid, 'vendors', 'Vendors', '/vendors', 6, true, false, '2025-07-02T00:00:00'::timestamptz)
+            ('b2000001-0000-4000-8000-000000000006'::uuid, 'vendors', 'Vendors', '/vendors', 6, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000007'::uuid, 'folder-create', 'Folder Create', '/folder-creation', 7, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000008'::uuid, 'report-builder', 'Report Builder', '/report-builder', 8, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-000000000009'::uuid, 'form', 'Form', '/form', 9, true, false, '2025-07-02T00:00:00'::timestamptz),
+            ('b2000001-0000-4000-8000-00000000000a'::uuid, 'portal', 'Portal', '/portal', 10, true, false, '2025-07-02T00:00:00'::timestamptz)
         ON CONFLICT ("Key") DO NOTHING;
         """;
 

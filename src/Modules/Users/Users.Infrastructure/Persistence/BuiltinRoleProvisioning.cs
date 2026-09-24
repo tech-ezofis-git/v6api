@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using SaaSApp.Users.Application.Contracts;
+using SaaSApp.Users.Domain;
 using SaaSApp.Users.Domain.Entities;
 
 namespace SaaSApp.Users.Infrastructure.Persistence;
@@ -49,6 +50,9 @@ public sealed class BuiltinRoleProvisioning : IBuiltinRoleProvisioning
         CancellationToken cancellationToken)
     {
         var (adminRole, tenantUserRole) = await EnsureRolesExistAsync(context, tenantId, cancellationToken);
+        await UsersSchemaEnsurer.EnsureRoleMenusTablesAsync(context, cancellationToken);
+        await EnsureRoleMenusAsync(context, tenantId, adminRole.Id, cancellationToken);
+        await EnsureRoleMenusAsync(context, tenantId, tenantUserRole.Id, cancellationToken);
         await SyncAllMembershipsAsync(context, tenantId, adminRole.Id, tenantUserRole.Id, cancellationToken);
     }
 
@@ -87,6 +91,14 @@ public sealed class BuiltinRoleProvisioning : IBuiltinRoleProvisioning
             .Select(c => c.Key)
             .ToListAsync(cancellationToken);
 
+        // Always include folder, settings (configuration), and the other sidebar categories
+        // even if the catalog query is empty on a brand-new tenant.
+        foreach (var (_, key, _, _) in PermissionCategoryDefaults.All)
+        {
+            if (!categoryKeys.Contains(key, StringComparer.OrdinalIgnoreCase))
+                categoryKeys.Add(key);
+        }
+
         var existing = await context.Roles
             .Include(r => r.Permissions)
             .FirstOrDefaultAsync(r => r.Name == roleName, cancellationToken);
@@ -119,6 +131,50 @@ public sealed class BuiltinRoleProvisioning : IBuiltinRoleProvisioning
         var missing = categoryKeys.Where(k => !existing.Contains(k)).ToList();
         if (missing.Count > 0)
             role.AssignPermissions(missing);
+    }
+
+    /// <summary>
+    /// Link every sidebar menu onto the builtin role. Dashboard is the default landing page
+    /// when the role has none yet. Does not remove menus an admin already customized.
+    /// </summary>
+    private static async Task EnsureRoleMenusAsync(
+        UsersDbContext context,
+        Guid tenantId,
+        Guid roleId,
+        CancellationToken cancellationToken)
+    {
+        var menus = await context.Menus
+            .AsNoTracking()
+            .OrderBy(m => m.SortOrder)
+            .ThenBy(m => m.Key)
+            .Select(m => new { m.Id, m.Key })
+            .ToListAsync(cancellationToken);
+
+        if (menus.Count == 0)
+            return;
+
+        var existing = await context.RoleMenus
+            .Where(rm => rm.RoleId == roleId)
+            .Select(rm => new { rm.MenuId, rm.IsDefaultLanding })
+            .ToListAsync(cancellationToken);
+
+        var existingIds = existing.Select(rm => rm.MenuId).ToHashSet();
+        var hasDefault = existing.Any(rm => rm.IsDefaultLanding);
+
+        foreach (var menu in menus)
+        {
+            if (!existingIds.Add(menu.Id))
+                continue;
+
+            var isDefault = !hasDefault
+                && string.Equals(menu.Key, "dashboard", StringComparison.OrdinalIgnoreCase);
+            if (isDefault)
+                hasDefault = true;
+
+            await context.RoleMenus.AddAsync(
+                RoleMenu.Create(tenantId, roleId, menu.Id, isDefault),
+                cancellationToken);
+        }
     }
 
     private static async Task SyncAllMembershipsAsync(
