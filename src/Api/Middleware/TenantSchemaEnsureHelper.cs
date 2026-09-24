@@ -84,7 +84,7 @@ internal static class TenantSchemaEnsureHelper
         CancellationToken cancellationToken) =>
         EnsureOnceAsync(
             tenantId,
-            // v2: require the full default catalog, not merely that the table exists.
+            // Require the full default catalog, including form, folder-create, portal, and report-builder.
             "users-permission-categories-v3",
             connectionString,
             """
@@ -164,7 +164,7 @@ internal static class TenantSchemaEnsureHelper
 
     /// <summary>
     /// Seeds Admin/TenantUser roles and backfills any missing active permission categories and sidebar menus.
-    /// Skips only when both builtins grant every active category and Admin has every seeded menu, including folder creation and report builder.
+    /// Skips only when both builtins grant every active category and Admin has every seeded menu, including form, folder-create, portal, and report-builder.
     /// </summary>
     public static Task EnsureBuiltinRolesAsync(
         Guid tenantId,
