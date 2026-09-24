@@ -313,6 +313,44 @@ public sealed class UploadAndIndexController : ControllerBase
         return result == null ? NotFound(new { error = "File not found." }) : Ok(result);
     }
 
+    /// <summary>
+    /// IndexFilesDownload — view or download a staged (monitor) index file by <c>fileId</c>.
+    /// <c>?disposition=inline</c> (default) = view; <c>attachment</c> = download.
+    /// After export use <c>GET /api/repositories/{repositoryId}/items/{itemId}/file</c>.
+    /// </summary>
+    [HttpGet("/api/uploadAndIndex/files/{fileId:guid}")]
+    [EndpointName("IndexFilesDownload")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> IndexFilesDownload(
+        Guid fileId,
+        [FromQuery] string disposition = "inline",
+        CancellationToken cancellationToken = default)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var content = await _uploadIndex.OpenStageFileAsync(fileId, tenantId, cancellationToken);
+            if (content == null)
+                return NotFound(new { error = "Stage file not found." });
+
+            var inline = string.Equals(disposition, "inline", StringComparison.OrdinalIgnoreCase);
+            return new FileStreamResult(content.Stream, content.ContentType)
+            {
+                FileDownloadName = inline ? null : content.FileName,
+                EnableRangeProcessing = true
+            };
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (FileNotFoundException)
+        {
+            return NotFound(new { error = "Stage file blob not found." });
+        }
+    }
+
     /// <summary>v5: PUT api/uploadAndIndex/index/{id} — save fields and archive immediately (sync, no Hangfire).</summary>
     [HttpPut("/api/uploadAndIndex/index/{id}")]
     [Consumes("application/json")]

@@ -57,6 +57,12 @@ public interface IRepositoryUploadIndexService
         Guid tenantId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Open staged monitor file stream for view/download (by stage fileId).</summary>
+    Task<RepositoryItemFileContent?> OpenStageFileAsync(
+        Guid stageId,
+        Guid tenantId,
+        CancellationToken cancellationToken = default);
+
     Task<UploadIndexArchiveQueuedResult?> QueueArchiveAsync(
         Guid stageId,
         Guid tenantId,

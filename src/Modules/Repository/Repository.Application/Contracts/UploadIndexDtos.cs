@@ -94,7 +94,26 @@ public sealed record UploadIndexListItem(
     string? RepositoryName,
     long Size,
     string? CreatedAt,
-    string? PromotedItemId);
+    string? PromotedItemId,
+    /// <summary>Stage file id (same as <see cref="Id"/>).</summary>
+    string? FileId = null,
+    /// <summary>Archive item id after export (same as <see cref="PromotedItemId"/>).</summary>
+    string? ItemId = null,
+    string? StageStatus = null,
+    string? FileType = null,
+    /// <summary>Monitor/storage relative path for the staged file.</summary>
+    string? FilePath = null,
+    IReadOnlyList<UploadIndexFieldDto>? Fields = null,
+    /// <summary>Inline view URL for stage monitor file (fileId).</summary>
+    string? FileUrl = null,
+    /// <summary>Download URL for stage monitor file (fileId).</summary>
+    string? DownloadUrl = null,
+    /// <summary>Inline view URL for archive item (itemId), when indexed.</summary>
+    string? ItemFileUrl = null,
+    /// <summary>Download URL for archive item (itemId), when indexed.</summary>
+    string? ItemDownloadUrl = null,
+    /// <summary>True when promoted/archived (<see cref="ItemId"/> set).</summary>
+    bool IsIndexed = false);
 
 public sealed record UploadIndexListResult(
     IReadOnlyList<UploadIndexListItem> Items,
