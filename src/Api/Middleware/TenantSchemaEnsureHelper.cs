@@ -84,9 +84,24 @@ internal static class TenantSchemaEnsureHelper
         CancellationToken cancellationToken) =>
         EnsureOnceAsync(
             tenantId,
-            "users-permission-categories",
+            // v2: require the full default catalog, not merely that the table exists.
+            "users-permission-categories-v3",
             connectionString,
-            "SELECT 1 FROM information_schema.tables WHERE table_name = 'PermissionCategories' AND table_schema = 'users'",
+            """
+            SELECT 1
+            WHERE (
+                SELECT COUNT(*)
+                FROM users."PermissionCategories"
+                WHERE "IsActive" = true
+                  AND lower("Key") IN ('dashboard', 'workflow', 'folder', 'task', 'workspace', 'settings', 'form', 'folder-create', 'portal', 'report-builder')
+            ) >= 10
+            AND EXISTS (
+                SELECT 1 FROM users."PermissionCategories"
+                WHERE lower("Key") = 'folder-create' AND "Name" = 'Folder Create')
+            AND EXISTS (
+                SELECT 1 FROM users."PermissionCategories"
+                WHERE lower("Key") = 'report-builder' AND "Name" = 'Report Builder')
+            """,
             applySchema,
             cancellationToken);
 
@@ -97,9 +112,17 @@ internal static class TenantSchemaEnsureHelper
         CancellationToken cancellationToken) =>
         EnsureOnceAsync(
             tenantId,
-            "users-menus",
+            "users-menus-v2",
             connectionString,
-            "SELECT 1 FROM information_schema.tables WHERE table_name = 'Menus' AND table_schema = 'users'",
+            """
+            SELECT 1
+            WHERE (
+                SELECT COUNT(*)
+                FROM users."Menus"
+                WHERE "IsDeleted" = false
+                  AND lower("Key") IN ('form', 'folder-create', 'portal', 'report-builder')
+            ) >= 4
+            """,
             applySchema,
             cancellationToken);
 
@@ -140,8 +163,8 @@ internal static class TenantSchemaEnsureHelper
             cancellationToken);
 
     /// <summary>
-    /// Seeds Admin/TenantUser roles once per tenant when the Admin role row is missing.
-    /// Marker does not skip when Roles table exists but builtins were never seeded.
+    /// Seeds Admin/TenantUser roles and backfills any missing active permission categories and sidebar menus.
+    /// Skips only when both builtins grant every active category and Admin has every seeded menu, including folder creation and report builder.
     /// </summary>
     public static Task EnsureBuiltinRolesAsync(
         Guid tenantId,
@@ -150,24 +173,92 @@ internal static class TenantSchemaEnsureHelper
         CancellationToken cancellationToken) =>
         EnsureOnceAsync(
             tenantId,
-            "users-builtin-roles",
+            "users-builtin-roles-v4",
             connectionString,
             """
             SELECT 1
-            FROM users."Roles" r
-            WHERE r."Name" = 'Admin' AND r."IsDeleted" = false
-              AND EXISTS (
-                    SELECT 1 FROM users."RolePermissions" p
-                    WHERE p."RoleId" = r."Id" AND lower(p."PermissionKey") = 'folder')
-              AND EXISTS (
-                    SELECT 1 FROM users."RolePermissions" p
-                    WHERE p."RoleId" = r."Id" AND lower(p."PermissionKey") = 'settings')
-              AND EXISTS (
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = 'users' AND table_name = 'RoleMenus')
-              AND EXISTS (
-                    SELECT 1 FROM users."RoleMenus" rm
-                    WHERE rm."RoleId" = r."Id")
+            WHERE EXISTS (
+                SELECT 1 FROM users."Roles" r
+                WHERE r."Name" = 'Admin' AND r."IsDeleted" = false
+            )
+            AND EXISTS (
+                SELECT 1 FROM users."Roles" r
+                WHERE r."Name" = 'TenantUser' AND r."IsDeleted" = false
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM users."PermissionCategories" pc
+                WHERE pc."IsActive" = true
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM users."Roles" r
+                      INNER JOIN users."RolePermissions" rp ON rp."RoleId" = r."Id"
+                      WHERE r."Name" = 'Admin'
+                        AND r."IsDeleted" = false
+                        AND lower(rp."PermissionKey") = lower(pc."Key")
+                  )
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM users."PermissionCategories" pc
+                WHERE pc."IsActive" = true
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM users."Roles" r
+                      INNER JOIN users."RolePermissions" rp ON rp."RoleId" = r."Id"
+                      WHERE r."Name" = 'TenantUser'
+                        AND r."IsDeleted" = false
+                        AND lower(rp."PermissionKey") = lower(pc."Key")
+                  )
+            )
+            AND EXISTS (
+                SELECT 1 FROM information_schema.tables
+                WHERE table_schema = 'users' AND table_name = 'RoleMenus')
+            AND (
+                SELECT COUNT(*)
+                FROM users."Menus" m
+                INNER JOIN users."RoleMenus" rm ON rm."MenuId" = m."Id"
+                INNER JOIN users."Roles" r ON r."Id" = rm."RoleId"
+                WHERE r."Name" = 'Admin'
+                  AND r."IsDeleted" = false
+                  AND m."IsDeleted" = false
+            ) >= (
+                SELECT COUNT(*)
+                FROM users."Menus"
+                WHERE "IsDeleted" = false
+            )
+            AND EXISTS (
+                SELECT 1
+                FROM users."Menus" m
+                INNER JOIN users."RoleMenus" rm ON rm."MenuId" = m."Id"
+                INNER JOIN users."Roles" r ON r."Id" = rm."RoleId"
+                WHERE r."Name" = 'Admin'
+                  AND r."IsDeleted" = false
+                  AND lower(m."Key") = 'folder-create')
+            AND EXISTS (
+                SELECT 1
+                FROM users."Menus" m
+                INNER JOIN users."RoleMenus" rm ON rm."MenuId" = m."Id"
+                INNER JOIN users."Roles" r ON r."Id" = rm."RoleId"
+                WHERE r."Name" = 'Admin'
+                  AND r."IsDeleted" = false
+                  AND lower(m."Key") = 'report-builder')
+            AND EXISTS (
+                SELECT 1
+                FROM users."Menus" m
+                INNER JOIN users."RoleMenus" rm ON rm."MenuId" = m."Id"
+                INNER JOIN users."Roles" r ON r."Id" = rm."RoleId"
+                WHERE r."Name" = 'Admin'
+                  AND r."IsDeleted" = false
+                  AND lower(m."Key") = 'form')
+            AND EXISTS (
+                SELECT 1
+                FROM users."Menus" m
+                INNER JOIN users."RoleMenus" rm ON rm."MenuId" = m."Id"
+                INNER JOIN users."Roles" r ON r."Id" = rm."RoleId"
+                WHERE r."Name" = 'Admin'
+                  AND r."IsDeleted" = false
+                  AND lower(m."Key") = 'portal')
             """,
             applySchema,
             cancellationToken);
