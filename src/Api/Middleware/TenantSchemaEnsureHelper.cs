@@ -84,9 +84,18 @@ internal static class TenantSchemaEnsureHelper
         CancellationToken cancellationToken) =>
         EnsureOnceAsync(
             tenantId,
-            "users-permission-categories",
+            // v2: require the full default catalog, not merely that the table exists.
+            "users-permission-categories-v2",
             connectionString,
-            "SELECT 1 FROM information_schema.tables WHERE table_name = 'PermissionCategories' AND table_schema = 'users'",
+            """
+            SELECT 1
+            WHERE (
+                SELECT COUNT(*)
+                FROM users."PermissionCategories"
+                WHERE "IsActive" = true
+                  AND lower("Key") IN ('dashboard', 'workflow', 'folder', 'task', 'workspace', 'settings')
+            ) >= 6
+            """,
             applySchema,
             cancellationToken);
 
@@ -140,8 +149,9 @@ internal static class TenantSchemaEnsureHelper
             cancellationToken);
 
     /// <summary>
-    /// Seeds Admin/TenantUser roles once per tenant when the Admin role row is missing.
-    /// Marker does not skip when Roles table exists but builtins were never seeded.
+    /// Seeds Admin/TenantUser roles and backfills any missing active permission categories.
+    /// Skips only when both builtins exist and each already grants every active category
+    /// (avoids leaving Admin stuck with only dashboard/folder/settings in the UI).
     /// </summary>
     public static Task EnsureBuiltinRolesAsync(
         Guid tenantId,
@@ -150,12 +160,45 @@ internal static class TenantSchemaEnsureHelper
         CancellationToken cancellationToken) =>
         EnsureOnceAsync(
             tenantId,
-            "users-builtin-roles",
+            // v2: Admin row alone is not enough — grants must cover the full category catalog.
+            "users-builtin-roles-v2",
             connectionString,
             """
             SELECT 1
-            FROM users."Roles"
-            WHERE "Name" = 'Admin' AND "IsDeleted" = false
+            WHERE EXISTS (
+                SELECT 1 FROM users."Roles" r
+                WHERE r."Name" = 'Admin' AND r."IsDeleted" = false
+            )
+            AND EXISTS (
+                SELECT 1 FROM users."Roles" r
+                WHERE r."Name" = 'TenantUser' AND r."IsDeleted" = false
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM users."PermissionCategories" pc
+                WHERE pc."IsActive" = true
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM users."Roles" r
+                      INNER JOIN users."RolePermissions" rp ON rp."RoleId" = r."Id"
+                      WHERE r."Name" = 'Admin'
+                        AND r."IsDeleted" = false
+                        AND lower(rp."PermissionKey") = lower(pc."Key")
+                  )
+            )
+            AND NOT EXISTS (
+                SELECT 1
+                FROM users."PermissionCategories" pc
+                WHERE pc."IsActive" = true
+                  AND NOT EXISTS (
+                      SELECT 1
+                      FROM users."Roles" r
+                      INNER JOIN users."RolePermissions" rp ON rp."RoleId" = r."Id"
+                      WHERE r."Name" = 'TenantUser'
+                        AND r."IsDeleted" = false
+                        AND lower(rp."PermissionKey") = lower(pc."Key")
+                  )
+            )
             """,
             applySchema,
             cancellationToken);

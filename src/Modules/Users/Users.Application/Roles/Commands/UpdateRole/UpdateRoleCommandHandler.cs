@@ -104,7 +104,22 @@ public sealed class UpdateRoleCommandHandler : IRequestHandler<UpdateRoleCommand
             if (categoryKeys.Count == 0)
                 return Fail("At least one permission is required.");
 
-            role.ReplacePermissions(categoryKeys);
+            // Built-in Admin/TenantUser always keep the full active catalog so the sidebar
+            // cannot lose Workflow/Task/Workspace after a partial Roles save.
+            if (isBuiltin)
+            {
+                var allActive = await _categoryRepository.ListActiveAsync(cancellationToken);
+                var merged = allActive
+                    .Select(c => c.Key)
+                    .Concat(categoryKeys)
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+                role.ReplacePermissions(merged);
+            }
+            else
+            {
+                role.ReplacePermissions(categoryKeys);
+            }
         }
 
         return new UpdateRoleCommandResult(Success: true, StatusCode: 204);
