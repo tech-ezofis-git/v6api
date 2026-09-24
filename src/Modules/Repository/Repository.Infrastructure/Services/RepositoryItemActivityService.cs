@@ -70,6 +70,11 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         Guid? linkedInstanceId = null;
         Guid? linkedWorkflowId = null;
         string? linkedReference = null;
+        string? currentStage = null;
+        string? ticketStatus = null;
+        string? assigneeEmail = null;
+        IReadOnlyList<RepositoryItemTicketHistoryStepDto> ticketHistory =
+            Array.Empty<RepositoryItemTicketHistoryStepDto>();
 
         if (fields != null)
         {
@@ -87,6 +92,16 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             }
         }
 
+        // Raise-ticket attach may have written process_addon / attachments without setting
+        // items.workflow_instance_id — recover the link so timeline still shows the ticket.
+        if (linkedInstanceId is null)
+        {
+            linkedInstanceId = await FindLinkedInstanceIdByItemAsync(connection, itemId, cancellationToken);
+            if (linkedInstanceId is Guid recoveredId)
+                await TryBackfillItemWorkflowInstanceIdAsync(
+                    connection, repositoryId, tenantId, itemId, recoveredId, cancellationToken);
+        }
+
         var events = new List<RepositoryItemTimelineEventDto>();
         if (fields != null)
             events.AddRange(RepositoryItemTimelineDeriver.Derive(fields, createdByName));
@@ -99,6 +114,10 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             events.AddRange(workflowEvents.Events);
             linkedWorkflowId = workflowEvents.WorkflowId;
             linkedReference = workflowEvents.ReferenceNumber;
+            currentStage = workflowEvents.CurrentStage;
+            ticketStatus = workflowEvents.TicketStatus;
+            assigneeEmail = workflowEvents.AssigneeEmail;
+            ticketHistory = workflowEvents.TicketHistory;
         }
 
         events.AddRange(await LoadSignRequestTimelineEventsAsync(
@@ -108,17 +127,49 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             connection, repositoryId, tenantId, itemId, cancellationToken));
 
         events = await ResolveActorNamesAsync(connection, events, cancellationToken);
-        events = events
+        events = DeduplicateTimelineEvents(events)
             .OrderBy(e => e.CreatedAtUtc)
             .ThenBy(e => e.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+        var hasTicket = linkedInstanceId is Guid linked && linked != Guid.Empty;
         return new RepositoryItemTimelineResultDto(
             events,
             events.Count,
             linkedInstanceId,
             linkedWorkflowId,
-            linkedReference);
+            linkedReference,
+            HasTicket: hasTicket,
+            CurrentStage: currentStage,
+            TicketStatus: ticketStatus ?? (hasTicket ? currentStage : null),
+            AssigneeEmail: assigneeEmail,
+            TicketHistory: hasTicket ? ticketHistory : null);
+    }
+
+    public async Task<RepositoryItemTicketResultDto?> GetTicketAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken = default)
+    {
+        var timeline = await GetTimelineAsync(repositoryId, tenantId, itemId, cancellationToken);
+        if (timeline == null)
+            return null;
+
+        if (!timeline.HasTicket || timeline.LinkedWorkflowInstanceId is not Guid instanceId)
+            return new RepositoryItemTicketResultDto(itemId, HasTicket: false);
+
+        return new RepositoryItemTicketResultDto(
+            itemId,
+            HasTicket: true,
+            new RepositoryItemTicketSummaryDto(
+                instanceId,
+                timeline.LinkedWorkflowId,
+                timeline.LinkedWorkflowReferenceNumber,
+                timeline.CurrentStage,
+                timeline.TicketStatus,
+                timeline.AssigneeEmail,
+                timeline.TicketHistory ?? Array.Empty<RepositoryItemTicketHistoryStepDto>()));
     }
 
     public async Task<RepositoryItemTimelineEventDto?> AddTimelineEventAsync(
@@ -201,6 +252,82 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             actorUserId,
             createdBy,
             cancellationToken);
+
+    public async Task LinkItemToWorkflowInstanceAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        Guid workflowInstanceId,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workflowInstanceId == Guid.Empty || itemId == Guid.Empty)
+            return;
+
+        try
+        {
+            var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+            if (repo != null && RepositorySqlHelper.IsValidItemsTableName(repo.ItemsTableName))
+            {
+                await using var connection = new NpgsqlConnection(RequireConnectionString());
+                await connection.OpenAsync(cancellationToken);
+
+                var columns = await RepositoryItemTableColumns.LoadAsync(
+                    connection, repo.ItemsTableName, cancellationToken);
+                if (RepositoryItemTableColumns.Has(columns, "WorkflowInstanceId"))
+                {
+                    var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
+                    var setParts = new List<string> { "workflow_instance_id = @InstanceId" };
+                    if (RepositoryItemTableColumns.Has(columns, "ModifiedAtUtc"))
+                        setParts.Add("modified_at_utc = now()");
+                    if (RepositoryItemTableColumns.Has(columns, "ModifiedBy") && userId is Guid modBy)
+                        setParts.Add("modified_by = @ModifiedBy");
+
+                    var sql = $"""
+                        UPDATE {table}
+                        SET {string.Join(", ", setParts)}
+                        WHERE id = @ItemId
+                          AND repository_id = @RepositoryId
+                          AND tenant_id = @TenantId
+                          AND is_deleted = false;
+                        """;
+
+                    await using var cmd = new NpgsqlCommand(sql, connection);
+                    cmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
+                    cmd.Parameters.AddWithValue("@ItemId", itemId);
+                    cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
+                    cmd.Parameters.AddWithValue("@TenantId", tenantId);
+                    if (RepositoryItemTableColumns.Has(columns, "ModifiedBy") && userId is Guid modifiedBy)
+                        cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
+                    await cmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+            }
+        }
+        catch
+        {
+            // Best-effort link for timeline UX.
+        }
+
+        try
+        {
+            await RecordTimelineEventAsync(
+                repositoryId,
+                tenantId,
+                itemId,
+                "workflow",
+                "Request initiated for this file",
+                workflowInstanceId.ToString("D"),
+                "User",
+                null,
+                userId,
+                userId,
+                cancellationToken);
+        }
+        catch
+        {
+            // Timeline table may be missing on older tenants.
+        }
+    }
 
     public async Task<RepositoryItemCommentsResultDto?> GetCommentsAsync(
         Guid repositoryId,
@@ -428,13 +555,21 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         return map;
     }
 
-    private static async Task<(IReadOnlyList<RepositoryItemTimelineEventDto> Events, Guid? WorkflowId, string? ReferenceNumber)> LoadWorkflowHistoryEventsAsync(
+    private static async Task<(
+        IReadOnlyList<RepositoryItemTimelineEventDto> Events,
+        Guid? WorkflowId,
+        string? ReferenceNumber,
+        string? CurrentStage,
+        string? TicketStatus,
+        string? AssigneeEmail,
+        IReadOnlyList<RepositoryItemTicketHistoryStepDto> TicketHistory)> LoadWorkflowHistoryEventsAsync(
         NpgsqlConnection connection,
         Guid workflowInstanceId,
         CancellationToken cancellationToken)
     {
+        var emptyHistory = Array.Empty<RepositoryItemTicketHistoryStepDto>();
         if (!await WorkflowTableExistsAsync(connection, "WorkflowInstanceLookup", cancellationToken))
-            return (Array.Empty<RepositoryItemTimelineEventDto>(), null, null);
+            return (Array.Empty<RepositoryItemTimelineEventDto>(), null, null, null, null, null, emptyHistory);
 
         Guid? workflowId = null;
         string? referenceNumber = null;
@@ -450,7 +585,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             lookupCmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
             await using var lookupReader = await lookupCmd.ExecuteReaderAsync(cancellationToken);
             if (!await lookupReader.ReadAsync(cancellationToken))
-                return (Array.Empty<RepositoryItemTimelineEventDto>(), null, null);
+                return (Array.Empty<RepositoryItemTimelineEventDto>(), null, null, null, null, null, emptyHistory);
             workflowId = lookupReader.GetGuid(0);
             workflowName = lookupReader.IsDBNull(1) ? null : lookupReader.GetString(1);
         }
@@ -477,7 +612,7 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         referenceNumber ??= workflowName;
         var txTable = $"transaction_{suffix}";
         if (!await WorkflowTableExistsAsync(connection, txTable, cancellationToken))
-            return (Array.Empty<RepositoryItemTimelineEventDto>(), workflowId, referenceNumber);
+            return (Array.Empty<RepositoryItemTimelineEventDto>(), workflowId, referenceNumber, null, null, null, emptyHistory);
 
         var sql = $"""
             SELECT id, stage_name, stage_type, review, action_status, activity_user_id, created_by, modified_by, created_at, modified_at
@@ -514,8 +649,15 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
         var names = await RepositoryUserNameResolver.ResolveDisplayNamesAsync(connection, userIds, cancellationToken);
 
         var events = new List<RepositoryItemTimelineEventDto>();
+        var history = new List<RepositoryItemTicketHistoryStepDto>();
+        string? currentStage = null;
+        string? ticketStatus = null;
+        string? assigneeEmail = null;
+        var sequence = 0;
+
         foreach (var row in rows)
         {
+            sequence++;
             var stage = string.IsNullOrWhiteSpace(row.StageName) ? row.StageType : row.StageName;
             stage = string.IsNullOrWhiteSpace(stage) ? "Stage" : stage.Trim();
             var performerId = row.ModifiedBy ?? row.ActivityUserId ?? row.CreatedBy;
@@ -523,38 +665,28 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
             if (string.IsNullOrWhiteSpace(performerName))
                 performerName = "System";
 
-            string title;
-            string? description = null;
-            var when = row.ModifiedAt ?? row.CreatedAt;
+            string? assigneeName = null;
+            if (row.ActivityUserId is Guid assignee && names.TryGetValue(assignee, out var resolvedAssignee))
+                assigneeName = resolvedAssignee;
 
-            if (string.Equals(row.StageType, "END", StringComparison.OrdinalIgnoreCase))
+            var (title, description, milestone, when) = MapWorkflowHistoryTitle(
+                sequence,
+                stage,
+                row.StageType,
+                row.Review,
+                row.ActionStatus,
+                assigneeName,
+                row.CreatedAt,
+                row.ModifiedAt);
+
+            if (row.ActionStatus == 0
+                && !string.Equals(row.StageType, "END", StringComparison.OrdinalIgnoreCase))
             {
-                title = "Workflow completed";
-                description = string.IsNullOrWhiteSpace(row.Review) ? null : row.Review;
-            }
-            else if (!string.IsNullOrWhiteSpace(row.Review))
-            {
-                var review = row.Review.Trim();
-                if (review.Contains("approv", StringComparison.OrdinalIgnoreCase))
-                    title = $"{stage} approval granted";
-                else if (review.Contains("verif", StringComparison.OrdinalIgnoreCase))
-                    title = $"{stage} verified";
-                else if (review.Contains("reject", StringComparison.OrdinalIgnoreCase)
-                         || review.Contains("escalat", StringComparison.OrdinalIgnoreCase))
-                    title = $"{stage}: {review}";
-                else
-                    title = $"{stage} — {review}";
-                description = review;
-            }
-            else if (row.ActionStatus == 0)
-            {
-                title = $"Pending — {stage}";
-                if (row.ActivityUserId is Guid assignee && names.TryGetValue(assignee, out var assigneeName))
-                    description = $"Assigned to {assigneeName}";
-            }
-            else
-            {
-                title = $"Moved to {stage}";
+                currentStage = stage;
+                ticketStatus = title.StartsWith("Pending", StringComparison.OrdinalIgnoreCase)
+                    ? title
+                    : $"Pending — {stage}";
+                assigneeEmail = assigneeName;
             }
 
             events.Add(new RepositoryItemTimelineEventDto(
@@ -566,9 +698,219 @@ public sealed class RepositoryItemActivityService : IRepositoryItemActivityServi
                 performerName,
                 when,
                 IsDerived: true));
+
+            history.Add(new RepositoryItemTicketHistoryStepDto(
+                sequence,
+                title,
+                description,
+                stage,
+                performerName,
+                when,
+                milestone,
+                row.ActionStatus));
         }
 
-        return (events, workflowId, referenceNumber);
+        if (string.IsNullOrWhiteSpace(ticketStatus) && history.Count > 0)
+        {
+            var last = history[^1];
+            ticketStatus = last.Title;
+            currentStage ??= last.StageName;
+        }
+
+        return (events, workflowId, referenceNumber, currentStage, ticketStatus, assigneeEmail, history);
+    }
+
+    private static (string Title, string? Description, string Milestone, DateTime When) MapWorkflowHistoryTitle(
+        int sequence,
+        string stage,
+        string? stageType,
+        string? review,
+        int actionStatus,
+        string? assigneeName,
+        DateTime createdAt,
+        DateTime? modifiedAt)
+    {
+        var when = modifiedAt ?? createdAt;
+
+        if (string.Equals(stageType, "END", StringComparison.OrdinalIgnoreCase))
+        {
+            return ("Workflow completed",
+                string.IsNullOrWhiteSpace(review) ? null : review.Trim(),
+                "completed",
+                when);
+        }
+
+        if (!string.IsNullOrWhiteSpace(review))
+        {
+            var reviewText = review.Trim();
+            if (string.Equals(reviewText, "Forward", StringComparison.OrdinalIgnoreCase))
+            {
+                var toUser = string.IsNullOrWhiteSpace(assigneeName) ? "user" : assigneeName;
+                return ("Forwarded", $"Forwarded to {toUser}", "forwarded", when);
+            }
+
+            if (reviewText.Contains("approv", StringComparison.OrdinalIgnoreCase)
+                || string.Equals(reviewText, "APPROVED", StringComparison.OrdinalIgnoreCase))
+            {
+                return ("Approved", reviewText, "approved", when);
+            }
+
+            if (reviewText.Contains("verif", StringComparison.OrdinalIgnoreCase))
+                return ("Verified", reviewText, "verified", when);
+
+            if (reviewText.Contains("reject", StringComparison.OrdinalIgnoreCase)
+                || reviewText.Contains("escalat", StringComparison.OrdinalIgnoreCase))
+            {
+                return ($"{stage}: {reviewText}", reviewText, "submitted", when);
+            }
+
+            return ($"Submitted — {stage}", reviewText, "submitted", when);
+        }
+
+        if (actionStatus == 0)
+        {
+            if (sequence == 1)
+            {
+                return (
+                    "Request initiated for this file",
+                    string.IsNullOrWhiteSpace(assigneeName) ? $"Opened at {stage}" : $"Assigned to {assigneeName}",
+                    "start",
+                    createdAt);
+            }
+
+            var pendingDesc = string.IsNullOrWhiteSpace(assigneeName) ? null : $"Assigned to {assigneeName}";
+            return ($"Pending — {stage}", pendingDesc, "pending", createdAt);
+        }
+
+        if (sequence == 1)
+        {
+            return (
+                "Request initiated for this file",
+                $"Moved to {stage}",
+                "start",
+                createdAt);
+        }
+
+        return ($"Moved to {stage}", null, "moved", when);
+    }
+
+    /// <summary>
+    /// Prefer stored "Request initiated" over derived duplicate from WorkflowInstanceId column.
+    /// </summary>
+    private static List<RepositoryItemTimelineEventDto> DeduplicateTimelineEvents(
+        List<RepositoryItemTimelineEventDto> events)
+    {
+        var hasStoredInitiate = events.Any(e =>
+            !e.IsDerived
+            && e.Title.Contains("Request initiated", StringComparison.OrdinalIgnoreCase));
+
+        if (!hasStoredInitiate)
+            return events;
+
+        return events
+            .Where(e => !(e.IsDerived
+                && e.Title.Contains("Request initiated", StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+    }
+
+    private static async Task<Guid?> FindLinkedInstanceIdByItemAsync(
+        NpgsqlConnection connection,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        // Prefer process_addon_* (raise-ticket link), then workflow_attachments_*.
+        const string tablesSql = """
+            SELECT table_name
+            FROM information_schema.tables
+            WHERE table_schema = 'workflow'
+              AND (table_name LIKE 'process_addon_%' OR table_name LIKE 'workflow_attachments_%')
+            ORDER BY CASE WHEN table_name LIKE 'process_addon_%' THEN 0 ELSE 1 END, table_name;
+            """;
+
+        var tables = new List<string>();
+        await using (var cmd = new NpgsqlCommand(tablesSql, connection))
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+                tables.Add(reader.GetString(0));
+        }
+
+        foreach (var table in tables)
+        {
+            var isProcessAddon = table.StartsWith("process_addon_", StringComparison.OrdinalIgnoreCase);
+            var sql = isProcessAddon
+                ? $"""
+                    SELECT process_id
+                    FROM workflow.{table}
+                    WHERE item_id = @ItemId AND is_deleted = false
+                    ORDER BY created_at DESC
+                    LIMIT 1;
+                    """
+                : $"""
+                    SELECT workflow_instance_id
+                    FROM workflow.{table}
+                    WHERE item_id = @ItemId AND is_deleted = false
+                    ORDER BY created_at_utc DESC
+                    LIMIT 1;
+                    """;
+
+            try
+            {
+                await using var findCmd = new NpgsqlCommand(sql, connection);
+                findCmd.Parameters.AddWithValue("@ItemId", itemId);
+                var result = await findCmd.ExecuteScalarAsync(cancellationToken);
+                if (result is Guid id && id != Guid.Empty)
+                    return id;
+            }
+            catch (PostgresException)
+            {
+                // Table shape may differ across tenants; skip and try next.
+            }
+        }
+
+        return null;
+    }
+
+    private async Task TryBackfillItemWorkflowInstanceIdAsync(
+        NpgsqlConnection connection,
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        Guid workflowInstanceId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+            if (repo == null || !RepositorySqlHelper.IsValidItemsTableName(repo.ItemsTableName))
+                return;
+
+            var columns = await RepositoryItemTableColumns.LoadAsync(connection, repo.ItemsTableName, cancellationToken);
+            if (!RepositoryItemTableColumns.Has(columns, "WorkflowInstanceId"))
+                return;
+
+            var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
+            var sql = $"""
+                UPDATE {table}
+                SET workflow_instance_id = @InstanceId, modified_at_utc = now()
+                WHERE id = @ItemId
+                  AND repository_id = @RepositoryId
+                  AND tenant_id = @TenantId
+                  AND is_deleted = false
+                  AND (workflow_instance_id IS NULL OR workflow_instance_id = '00000000-0000-0000-0000-000000000000'::uuid);
+                """;
+
+            await using var cmd = new NpgsqlCommand(sql, connection);
+            cmd.Parameters.AddWithValue("@InstanceId", workflowInstanceId);
+            cmd.Parameters.AddWithValue("@ItemId", itemId);
+            cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
+            cmd.Parameters.AddWithValue("@TenantId", tenantId);
+            await cmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+        catch
+        {
+            // Best-effort backfill; timeline still works from recovered instance id.
+        }
     }
 
     private static async Task<IReadOnlyList<RepositoryItemTimelineEventDto>> LoadSignRequestTimelineEventsAsync(

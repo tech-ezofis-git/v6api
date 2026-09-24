@@ -22,6 +22,15 @@ public static class RepositoryFileNameHelper
         var mimeExt = ExtensionFromContentType(contentType);
         if (IsRealFileExtension(existingExt))
         {
+            // Prefer filename when it is a known Office/PDF extension and mime disagrees
+            // (e.g. Word bytes uploaded with wrong application/pdf Content-Type).
+            if (!string.IsNullOrEmpty(mimeExt)
+                && !ExtensionsMatch(existingExt, mimeExt)
+                && !ShouldPreferContentTypeOverFileName(existingExt, mimeExt))
+            {
+                return name;
+            }
+
             if (!string.IsNullOrEmpty(mimeExt) && !ExtensionsMatch(existingExt, mimeExt))
             {
                 var stem = Path.GetFileNameWithoutExtension(name);
@@ -83,6 +92,23 @@ public static class RepositoryFileNameHelper
             ".tif" => ".tiff",
             _ => ext.Trim().ToLowerInvariant()
         };
+
+    private static bool ShouldPreferContentTypeOverFileName(string fileExt, string mimeExt)
+    {
+        // Image/PDF bytes mislabeled with a wrong extension (e.g. scan.png saved as *.pdf).
+        var file = NormalizeExtension(fileExt);
+        var mime = NormalizeExtension(mimeExt);
+        if (IsImageOrPdfExtension(mime) && !IsOfficeExtension(file))
+            return true;
+
+        return false;
+    }
+
+    private static bool IsImageOrPdfExtension(string ext) =>
+        ext is ".pdf" or ".png" or ".jpg" or ".jpeg" or ".tif" or ".tiff" or ".bmp" or ".webp" or ".gif" or ".img";
+
+    private static bool IsOfficeExtension(string ext) =>
+        ext is ".doc" or ".docx" or ".xls" or ".xlsx" or ".ppt" or ".pptx";
 
     private static bool IsRealFileExtension(string? ext)
     {

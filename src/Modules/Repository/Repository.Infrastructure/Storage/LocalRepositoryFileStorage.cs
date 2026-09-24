@@ -53,6 +53,37 @@ internal sealed class LocalRepositoryFileStorage : IRepositoryFileStorage
         return Task.FromResult(stream);
     }
 
+    public Task DeleteAsync(
+        Guid tenantId,
+        string relativePath,
+        string storageProviderCode,
+        CancellationToken cancellationToken = default)
+    {
+        if (!IsLocalProvider(storageProviderCode))
+            throw new NotSupportedException($"Storage provider '{storageProviderCode}' file delete is not implemented.");
+
+        if (string.IsNullOrWhiteSpace(relativePath))
+            return Task.CompletedTask;
+
+        var fullPath = GetFullPath(tenantId, relativePath);
+        if (File.Exists(fullPath))
+            File.Delete(fullPath);
+
+        // Best-effort: remove empty monitor timestamp folder.
+        try
+        {
+            var dir = Path.GetDirectoryName(fullPath);
+            if (!string.IsNullOrEmpty(dir) && Directory.Exists(dir) && !Directory.EnumerateFileSystemEntries(dir).Any())
+                Directory.Delete(dir);
+        }
+        catch (IOException)
+        {
+            // ignore
+        }
+
+        return Task.CompletedTask;
+    }
+
     public bool CanRead(string storageProviderCode) => IsLocalProvider(storageProviderCode);
 
     private string GetFullPath(Guid tenantId, string relativePath)

@@ -157,6 +157,17 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                     throw new InvalidOperationException(
                         "Forward requires activityUserId (target tenant user guid).");
 
+                // Closed Forward marker so history shows each reassignment; open step stays open.
+                await InsertForwardHistoryTransactionAsync(
+                    connection,
+                    transactionTable,
+                    workflowInstanceId,
+                    targetStep,
+                    txActivityId,
+                    forwardTo,
+                    userId,
+                    cancellationToken);
+
                 await ReassignOpenTransactionAsync(
                     connection,
                     transactionTable,
@@ -415,6 +426,47 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
 
     internal static bool IsForwardReview(string? review) =>
         string.Equals(review?.Trim(), "Forward", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Inserts a closed Forward audit row (unique activity_id) so history lists each forward
+    /// without closing the open step (review must stay empty on the open row).
+    /// </summary>
+    private static async Task InsertForwardHistoryTransactionAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        Guid workflowInstanceId,
+        WorkflowStep step,
+        string openActivityId,
+        Guid forwardedToUserId,
+        Guid forwardedByUserId,
+        CancellationToken cancellationToken)
+    {
+        // Keep under varchar(128): base activity + marker + short guid.
+        var marker = Guid.NewGuid().ToString("N")[..12];
+        var fwdActivityId = $"{openActivityId}#fwd#{marker}";
+        if (fwdActivityId.Length > 128)
+            fwdActivityId = $"fwd#{marker}";
+
+        var sql = $@"
+INSERT INTO {transactionTable}
+    (workflow_instance_id, activity_id, rule_id, stage_type, stage_name, review, action_status,
+     activity_user_id, created_at, created_by, modified_at, modified_by, is_deleted, transaction_guid)
+VALUES
+    (@WorkflowInstanceId, @ActivityId, NULL, @StageType, @StageName, @Review, @ActionStatus,
+     @ActivityUserId, now(), @CreatedBy, now(), @ModifiedBy, false, gen_random_uuid());";
+
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        cmd.Parameters.AddWithValue("@ActivityId", fwdActivityId);
+        cmd.Parameters.AddWithValue("@StageType", (object?)ResolveTransactionStageType(step) ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@StageName", step.Name);
+        cmd.Parameters.AddWithValue("@Review", "Forward");
+        cmd.Parameters.AddWithValue("@ActionStatus", ActionStatusCompleted);
+        cmd.Parameters.AddWithValue("@ActivityUserId", forwardedToUserId);
+        cmd.Parameters.AddWithValue("@CreatedBy", forwardedByUserId);
+        cmd.Parameters.AddWithValue("@ModifiedBy", forwardedByUserId);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
 
     private static async Task ReassignOpenTransactionAsync(
         NpgsqlConnection connection,

@@ -341,12 +341,44 @@ public sealed record RepositoryItemTimelineEventDto(
     DateTime CreatedAtUtc,
     bool IsDerived = false);
 
+/// <summary>One step in the ticket history shown when opening a raise-ticket file.</summary>
+public sealed record RepositoryItemTicketHistoryStepDto(
+    int Sequence,
+    string Title,
+    string? Description,
+    string? StageName,
+    string? ActorName,
+    DateTime OccurredAtUtc,
+    string? Milestone = null,
+    int? ActionStatus = null);
+
+/// <summary>Ticket raised against a repository file (raise-ticket / workflow link).</summary>
+public sealed record RepositoryItemTicketSummaryDto(
+    Guid WorkflowInstanceId,
+    Guid? WorkflowId,
+    string? ReferenceNumber,
+    string? CurrentStage,
+    string? TicketStatus,
+    string? AssigneeEmail,
+    IReadOnlyList<RepositoryItemTicketHistoryStepDto> History);
+
+/// <summary>Response for GET .../items/{itemId}/ticket.</summary>
+public sealed record RepositoryItemTicketResultDto(
+    Guid ItemId,
+    bool HasTicket,
+    RepositoryItemTicketSummaryDto? Ticket = null);
+
 public sealed record RepositoryItemTimelineResultDto(
     IReadOnlyList<RepositoryItemTimelineEventDto> Events,
     int TotalCount,
     Guid? LinkedWorkflowInstanceId = null,
     Guid? LinkedWorkflowId = null,
-    string? LinkedWorkflowReferenceNumber = null);
+    string? LinkedWorkflowReferenceNumber = null,
+    bool HasTicket = false,
+    string? CurrentStage = null,
+    string? TicketStatus = null,
+    string? AssigneeEmail = null,
+    IReadOnlyList<RepositoryItemTicketHistoryStepDto>? TicketHistory = null);
 
 public sealed record AddRepositoryItemTimelineEventRequest(
     string Title,

@@ -27,8 +27,8 @@ public sealed record WorkflowInstanceHistoryResult(
     IReadOnlyList<WorkflowInstanceHistoryFlowDto> Flows);
 
 /// <summary>
-/// One flow step from a transaction row. <see cref="Action"/>: move (opened stage), submit (review), complete (END).
-/// <see cref="Milestone"/>: start | ap_agent | verified | approved | completed | moved | submitted.
+/// One flow step from a transaction row. <see cref="Action"/>: move (opened stage), submit (review), forward, complete (END).
+/// <see cref="Milestone"/>: start | ap_agent | verified | approved | forwarded | completed | moved | submitted.
 /// </summary>
 public sealed record WorkflowInstanceHistoryFlowDto(
     int Sequence,

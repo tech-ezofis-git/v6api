@@ -18,6 +18,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IWorkflowMoveNotificationService _moveNotifications;
     private readonly IHanaCloudPurchaseOrderService _hanaPurchaseOrders;
     private readonly IWorkflowJsonStorageService _workflowJsonStorage;
+    private readonly IWorkflowSecurityService _workflowSecurity;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
 
@@ -32,6 +33,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IWorkflowMoveNotificationService moveNotifications,
         IHanaCloudPurchaseOrderService hanaPurchaseOrders,
         IWorkflowJsonStorageService workflowJsonStorage,
+        IWorkflowSecurityService workflowSecurity,
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider)
     {
@@ -45,6 +47,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _moveNotifications = moveNotifications;
         _hanaPurchaseOrders = hanaPurchaseOrders;
         _workflowJsonStorage = workflowJsonStorage;
+        _workflowSecurity = workflowSecurity;
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
     }
@@ -250,6 +253,18 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             formEntryId,
             cancellationToken,
             preferEzfb: appliedPoRowToEzfb);
+
+        // Forward to a user without workflow access: grant WorkflowUsers + WorkflowSecurity first.
+        if (IsForwardReview(request.Review)
+            && request.ActivityUserId is Guid forwardToUserId
+            && forwardToUserId != Guid.Empty)
+        {
+            await _workflowSecurity.EnsureUserWorkflowAccessAsync(
+                instance.WorkflowId,
+                forwardToUserId,
+                userId,
+                cancellationToken);
+        }
 
         var legacySync = await _legacyTransactionSync.SyncTransactionByActivityIdAsync(
             instance.WorkflowId,
@@ -511,6 +526,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private static bool IsPaidReview(string? review) =>
         !string.IsNullOrWhiteSpace(review)
         && review.Trim().Contains("paid", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsForwardReview(string? review) =>
+        string.Equals(review?.Trim(), "Forward", StringComparison.OrdinalIgnoreCase);
 
     private static bool TryResolveHanaConnectorId(string? workflowJson, out Guid connectorId)
     {

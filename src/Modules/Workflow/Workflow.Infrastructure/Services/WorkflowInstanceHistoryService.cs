@@ -107,7 +107,14 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
         else if (!string.IsNullOrWhiteSpace(tx.Review))
         {
             action = "submit";
-            if (IsApAgentStage(tx))
+            if (IsForwardReview(tx.Review))
+            {
+                action = "forward";
+                title = "Forwarded";
+                var toUser = actionUser ?? "user";
+                description = $"Forwarded to {toUser}";
+            }
+            else if (IsApAgentStage(tx))
             {
                 title = "AP Agent";
                 description = $"Review: {tx.Review}";
@@ -187,7 +194,7 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
     /// </summary>
     private static DateTime ResolvePerformedAt(TransactionHistoryRow tx, string action)
     {
-        if (action is "submit" or "complete"
+        if (action is "submit" or "complete" or "forward"
             || tx.ActionStatus == ActionStatusCompleted
             || tx.ModifiedBy is { } mod && mod != Guid.Empty)
         {
@@ -198,7 +205,7 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
     }
 
     private static Guid? ResolvePerformerUserId(TransactionHistoryRow tx, string action) =>
-        action is "submit" or "complete"
+        action is "submit" or "complete" or "forward"
             ? tx.ModifiedBy ?? tx.CreatedBy
             : tx.CreatedBy;
 
@@ -206,6 +213,9 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
     {
         if (string.Equals(tx.StageType, EndStageType, StringComparison.OrdinalIgnoreCase) || action == "complete")
             return "completed";
+
+        if (action == "forward" || IsForwardReview(tx.Review))
+            return "forwarded";
 
         if (IsApAgentStage(tx))
             return "ap_agent";
@@ -234,6 +244,9 @@ public sealed class WorkflowInstanceHistoryService : IWorkflowInstanceHistorySer
 
         return action == "move" ? "moved" : "submitted";
     }
+
+    private static bool IsForwardReview(string? review) =>
+        string.Equals(review?.Trim(), "Forward", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsApAgentStage(TransactionHistoryRow tx) =>
         string.Equals(tx.StageType, "AP_AGENT", StringComparison.OrdinalIgnoreCase)

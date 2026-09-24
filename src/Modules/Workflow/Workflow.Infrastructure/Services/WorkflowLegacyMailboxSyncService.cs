@@ -190,6 +190,21 @@ WHERE t.id = @TransactionRowId;";
         var sentTable = MailboxTable("sent", suffix);
         var completedTable = MailboxTable("completed", suffix);
 
+        // Forward re-sync deletes Sent by activity key — capture prior Sent watchers first
+        // so earlier forwarders stay visible after a second Forward.
+        List<string>? priorSentWatcherUserIds = null;
+        if (ownerMailboxCopy == MailboxOwnerCopyKind.Sent)
+        {
+            priorSentWatcherUserIds = await ListSentMailboxUserIdsForInstanceAsync(
+                connection,
+                workflowIdValue,
+                workflowIdCompact,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                sentTable,
+                cancellationToken);
+        }
+
         await DeleteFromAllMailboxTablesByKeyAsync(
             connection,
             workflowIdValue,
@@ -391,6 +406,41 @@ INSERT INTO {ownerTable}
             await ccCmd.ExecuteNonQueryAsync(cancellationToken);
         }
 
+        // Re-Forward: restore earlier forwarders' Sent copies (skip new assignee + current forwarder).
+        if (targetTable == inboxTable
+            && ownerMailboxCopy == MailboxOwnerCopyKind.Sent
+            && priorSentWatcherUserIds is { Count: > 0 })
+        {
+            var assigneeUser = activityUserId?.ToString("D");
+            var currentForwarder = modifiedByUserId?.ToString("D");
+            foreach (var watcher in priorSentWatcherUserIds)
+            {
+                if (string.IsNullOrWhiteSpace(watcher))
+                    continue;
+                if (assigneeUser != null
+                    && string.Equals(watcher, assigneeUser, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (currentForwarder != null
+                    && string.Equals(watcher, currentForwarder, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                await EnsureUserMailboxCopyAsync(
+                    connection,
+                    sentTable,
+                    sourceSql,
+                    workflowId,
+                    workflowIdValue,
+                    workflowInstanceId,
+                    workflowInstanceIdStr,
+                    transactionRowId,
+                    txIdStr,
+                    watcher,
+                    action: 0,
+                    extras,
+                    cancellationToken);
+            }
+        }
+
         // Submitter/initiator is not the next assignee: remove from Inbox (Forward puts them on Sent above).
         if (targetTable == inboxTable
             && createdByUserId is Guid submitterId
@@ -524,6 +574,39 @@ INSERT INTO {tableFull}
         cmd.Parameters.AddWithValue("@FormEntryId", (object?)extras.FormEntryId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@FormData", (object?)extras.FormData ?? DBNull.Value);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    private static async Task<List<string>> ListSentMailboxUserIdsForInstanceAsync(
+        NpgsqlConnection connection,
+        string workflowIdValue,
+        string workflowTableKey,
+        Guid workflowInstanceId,
+        string workflowInstanceIdStr,
+        string sentTable,
+        CancellationToken cancellationToken)
+    {
+        var sql = $"""
+SELECT DISTINCT user_id
+FROM {sentTable}
+WHERE (workflow_id = @WorkflowIdValue OR workflow_id = @WorkflowTableKey)
+  AND (workflow_instance_id = @WorkflowInstanceIdStr OR {TryCastUuid("workflow_instance_id")} = @WorkflowInstanceId)
+  AND user_id IS NOT NULL
+  AND BTRIM(user_id) <> '';
+""";
+        var list = new List<string>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
+        cmd.Parameters.AddWithValue("@WorkflowTableKey", workflowTableKey);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceIdStr", workflowInstanceIdStr);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0))
+                list.Add(reader.GetString(0));
+        }
+
+        return list;
     }
 
     private static async Task<List<string>> ListMailboxUserIdsForInstanceAsync(

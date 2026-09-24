@@ -102,6 +102,23 @@ public sealed record UploadIndexListResult(
     int ItemsPerPage,
     int TotalItems);
 
+/// <summary>DELETE stage files body — soft-delete stage rows and remove monitor blobs.</summary>
+public sealed record UploadIndexDeleteFilesRequest(
+    IReadOnlyList<string>? FileIds = null,
+    IReadOnlyList<string>? Ids = null,
+    Guid? RepositoryId = null);
+
+public sealed record UploadIndexDeleteFileResult(
+    string FileId,
+    bool Succeeded,
+    string? Error = null);
+
+public sealed record UploadIndexDeleteFilesResult(
+    int Requested,
+    int Succeeded,
+    int Failed,
+    IReadOnlyList<UploadIndexDeleteFileResult> Files);
+
 /// <summary>One file in a bulk upload batch (staged immediately; OCR may still be running).</summary>
 public sealed record BulkUploadFileResult(
     string FileId,
@@ -137,14 +154,28 @@ public sealed record BulkOcrJobArgs(
     string? ValidateType,
     Guid? UserId);
 
-/// <summary>Per-file OCR status for a bulk job.</summary>
+/// <summary>Per-file status for a bulk upload Hangfire job.</summary>
 public sealed record BulkUploadFileStatusItem(
     string FileId,
     string FileName,
+    /// <summary>Raw stage status (e.g. PendingOCR, OCR, OCRFailed, Indexing).</summary>
     string Status,
-    string? Error = null);
+    string? Error = null,
+    /// <summary>
+    /// Normalized lifecycle: <c>PendingOcr</c>, <c>OcrCompleted</c>, <c>OcrFailed</c>,
+    /// <c>Indexed</c>, <c>Missing</c>.
+    /// </summary>
+    string Phase = "PendingOcr",
+    /// <summary>True when OCR finished successfully (ready to index/export).</summary>
+    bool OcrCompleted = false,
+    /// <summary>True when the file was exported/archived (PUT index/{id}).</summary>
+    bool Indexed = false,
+    /// <summary>True when OCR done and indexed (fully finished for this job file).</summary>
+    bool Completed = false,
+    /// <summary>Archive item id after index/export, when available.</summary>
+    string? PromotedItemId = null);
 
-/// <summary>Poll bulk OCR job — Hangfire state + each stage row status.</summary>
+/// <summary>Poll bulk OCR job — Hangfire state + each stage row OCR/index status.</summary>
 public sealed record BulkUploadJobStatusResult(
     string JobId,
     string HangfireState,
@@ -154,7 +185,13 @@ public sealed record BulkUploadJobStatusResult(
     IReadOnlyList<BulkUploadFileStatusItem> Files,
     int OcrCompleted,
     int OcrPending,
-    int OcrFailed);
+    int OcrFailed,
+    /// <summary>Files exported/archived via PUT index/{id}.</summary>
+    int Indexed = 0,
+    /// <summary>OCR done but not yet indexed/exported.</summary>
+    int ReadyToIndex = 0,
+    /// <summary>Not fully done (pending OCR, failed, or OCR done but not indexed).</summary>
+    int NotCompleted = 0);
 
 public sealed record ArchiveStageJobArgs(
     Guid TenantId,

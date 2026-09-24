@@ -70,6 +70,16 @@ public interface IRepositoryUploadIndexService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Soft-delete staged files and remove their monitor temp blobs.
+    /// </summary>
+    Task<UploadIndexDeleteFilesResult> DeleteStageFilesAsync(
+        Guid tenantId,
+        IReadOnlyList<Guid> stageIds,
+        Guid? repositoryId,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Bulk upload: stage all files to monitor + stage table with shared fields, then queue Hangfire OCR.
     /// Returns immediately with jobId — poll <see cref="GetBulkUploadJobStatusAsync"/>.
     /// Files stay in stage until export (PUT index/{id}).
@@ -101,5 +111,14 @@ public interface IRepositoryUploadIndexService
     Task<BulkUploadJobStatusResult?> GetBulkUploadJobStatusAsync(
         string jobId,
         Guid tenantId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// First active bulk OCR Hangfire job for this tenant (Processing, then Enqueued).
+    /// Optional <paramref name="repositoryId"/> filters to one repository.
+    /// </summary>
+    Task<BulkUploadJobStatusResult?> GetActiveBulkUploadJobStatusAsync(
+        Guid tenantId,
+        Guid? repositoryId = null,
         CancellationToken cancellationToken = default);
 }

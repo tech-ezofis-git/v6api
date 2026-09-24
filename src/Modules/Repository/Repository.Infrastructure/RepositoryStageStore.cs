@@ -438,6 +438,33 @@ internal static class RepositoryStageStore
         await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
+    /// <summary>Soft-delete a stage row (removed from upload/index lists).</summary>
+    public static async Task<bool> SoftDeleteAsync(
+        NpgsqlConnection connection,
+        string stageTableName,
+        Guid tenantId,
+        Guid stageId,
+        Guid? userId,
+        CancellationToken cancellationToken)
+    {
+        var table = RepositorySqlHelper.QualifiedItemsTable(stageTableName);
+        var sql = $"""
+            UPDATE {table}
+            SET is_deleted = true,
+                stage_status = 'Deleted',
+                status = 'DELETED',
+                modified_at_utc = now(),
+                modified_by = COALESCE(@ModifiedBy, modified_by)
+            WHERE id = @Id AND tenant_id = @TenantId AND is_deleted = false;
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Id", stageId);
+        cmd.Parameters.AddWithValue("@TenantId", tenantId);
+        cmd.Parameters.AddWithValue("@ModifiedBy", (object?)userId ?? DBNull.Value);
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
+    }
+
     public static async Task<(IReadOnlyList<RepositoryStageRow> Items, int Total)> ListAsync(
         NpgsqlConnection connection,
         RepositoryDetailDto repo,

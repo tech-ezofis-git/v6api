@@ -50,6 +50,23 @@ internal sealed class EzofisBlobRepositoryFileStorage : IRepositoryFileStorage
         return response.Value.Content;
     }
 
+    public async Task DeleteAsync(
+        Guid tenantId,
+        string relativePath,
+        string storageProviderCode,
+        CancellationToken cancellationToken = default)
+    {
+        EnsureEzofis(storageProviderCode);
+        if (!_blobStorage.IsConfigured)
+            throw new InvalidOperationException("EzofisBlobStorage is not configured.");
+
+        if (string.IsNullOrWhiteSpace(relativePath))
+            return;
+
+        var client = _blobStorage.GetBlobClient(tenantId, relativePath.Trim().Replace('\\', '/'), createContainerIfNotExists: false);
+        await client.DeleteIfExistsAsync(cancellationToken: cancellationToken);
+    }
+
     public bool CanRead(string storageProviderCode) =>
         IsEzofis(storageProviderCode) && _blobStorage.IsConfigured;
 

@@ -405,7 +405,10 @@ NOT EXISTS (
 """;
     }
 
-    /// <summary>Sent: action_status 1. Completed: END stage.</summary>
+    /// <summary>
+    /// Sent: submitted steps (action_status 1), or open Forward watches (still open but current user is not assignee).
+    /// Completed: END stage.
+    /// </summary>
     private static IEnumerable<string> BuildTransactionStateFilter(
         LegacyMailboxTableKind kind,
         string transactionTable)
@@ -426,15 +429,23 @@ NOT EXISTS (
         {
             case LegacyMailboxTableKind.Sent:
                 yield return workflowCompleted;
+                // Include open Forward watches: step stays action_status=0 after Forward,
+                // but forwarder must still see the ticket in Sent until Completed.
                 yield return $"""
 EXISTS (
     SELECT 1
     FROM {transactionTable} tx
     WHERE tx.is_deleted = false
-      AND tx.action_status = 1
       AND UPPER(TRIM(COALESCE(tx.stage_type, ''))) <> 'END'
       AND {instanceJoin}
       AND {participantMatch}
+      AND (
+            tx.action_status = 1
+         OR (
+              tx.action_status = 0
+              AND (tx.activity_user_id IS NULL OR tx.activity_user_id IS DISTINCT FROM @CurrentUserGuid)
+            )
+          )
 )
 """;
                 // Same user still has an open inbox task — show inbox only, not sent.
