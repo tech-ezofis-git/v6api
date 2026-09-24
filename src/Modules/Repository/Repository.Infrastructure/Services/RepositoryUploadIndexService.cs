@@ -660,17 +660,114 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         var (rows, total) = await RepositoryStageStore.ListAsync(
             connection, repo, tenantId, includeDeleted, skip, pageSize, cancellationToken);
 
-        var items = rows.Select(r => new UploadIndexListItem(
-            r.Id.ToString("D"),
-            r.FileName ?? string.Empty,
-            r.Status ?? r.StageStatus,
-            r.RepositoryId.ToString("D"),
-            repo.Name,
-            r.FileSize ?? 0,
-            r.CreatedAtUtc.ToString("O"),
-            r.PromotedItemId?.ToString("D"))).ToList();
+        var items = rows.Select(r =>
+        {
+            var fileId = r.Id.ToString("D");
+            var itemId = r.PromotedItemId is Guid p && p != Guid.Empty ? p.ToString("D") : null;
+            var fields = BuildListFields(repo, r);
+            var stageFileUrl = $"/api/uploadAndIndex/files/{fileId}";
+            var stageDownloadUrl = $"/api/uploadAndIndex/files/{fileId}?disposition=attachment";
+            string? itemFileUrl = null;
+            string? itemDownloadUrl = null;
+            if (itemId != null)
+            {
+                itemFileUrl = $"/api/repositories/{repositoryId:D}/items/{itemId}/file";
+                itemDownloadUrl = $"/api/repositories/{repositoryId:D}/items/{itemId}/file?disposition=attachment";
+            }
+
+            return new UploadIndexListItem(
+                Id: fileId,
+                Name: r.FileName ?? string.Empty,
+                Status: r.Status ?? r.StageStatus,
+                RepositoryId: r.RepositoryId.ToString("D"),
+                RepositoryName: repo.Name,
+                Size: r.FileSize ?? 0,
+                CreatedAt: r.CreatedAtUtc.ToString("O"),
+                PromotedItemId: itemId,
+                FileId: fileId,
+                ItemId: itemId,
+                StageStatus: r.StageStatus,
+                FileType: r.FileType,
+                FilePath: r.FilePath,
+                Fields: fields,
+                FileUrl: stageFileUrl,
+                DownloadUrl: stageDownloadUrl,
+                ItemFileUrl: itemFileUrl,
+                ItemDownloadUrl: itemDownloadUrl,
+                IsIndexed: itemId != null);
+        }).ToList();
 
         return new UploadIndexListResult(items, page, pageSize, total);
+    }
+
+    public async Task<RepositoryItemFileContent?> OpenStageFileAsync(
+        Guid stageId,
+        Guid tenantId,
+        CancellationToken cancellationToken = default)
+    {
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var repo = await ResolveRepositoryForStageAsync(connection, tenantId, stageId, cancellationToken);
+        if (repo == null)
+            return null;
+
+        var row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+        if (row == null || string.IsNullOrWhiteSpace(row.FilePath))
+            return null;
+
+        var providers = await _storageSeed.ListProvidersAsync(tenantId, cancellationToken);
+        var provider = providers.FirstOrDefault(p => p.Id == row.StorageProviderId);
+        if (provider == null)
+            throw new InvalidOperationException("Storage provider not found for staged file.");
+
+        var stream = await _fileStorage.OpenReadAsync(
+            tenantId,
+            row.FilePath,
+            provider.Code,
+            cancellationToken);
+
+        var fileName = string.IsNullOrWhiteSpace(row.FileName) ? $"{stageId:N}.bin" : row.FileName!;
+        var contentType = string.IsNullOrWhiteSpace(row.FileType)
+            ? RepositoryOcrFileSupport.ResolveContentType(fileName)
+            : row.FileType!;
+
+        return new RepositoryItemFileContent(
+            stream,
+            fileName,
+            contentType,
+            row.FileSize);
+    }
+
+    private static IReadOnlyList<UploadIndexFieldDto> BuildListFields(
+        RepositoryDetailDto repo,
+        RepositoryStageRow row)
+    {
+        var fields = new List<UploadIndexFieldDto>();
+        foreach (var field in repo.Fields.OrderBy(f => f.Level).ThenBy(f => f.OrderId ?? int.MaxValue))
+        {
+            row.FieldValues.TryGetValue(field.SqlColumnName, out var bySql);
+            row.FieldValues.TryGetValue(field.Name, out var byName);
+            fields.Add(new UploadIndexFieldDto(
+                field.Name,
+                bySql ?? byName ?? string.Empty,
+                field.DataType));
+        }
+
+        // Include any extra stage keys not in field definitions.
+        foreach (var (key, value) in row.FieldValues.OrderBy(kv => kv.Key, StringComparer.OrdinalIgnoreCase))
+        {
+            if (fields.Any(f => string.Equals(f.Name, key, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            if (string.IsNullOrWhiteSpace(value))
+                continue;
+            fields.Add(new UploadIndexFieldDto(key, value, null));
+        }
+
+        return fields;
     }
 
     public async Task<BulkUploadResult> BulkUploadAsync(
