@@ -188,6 +188,12 @@ public static class ApAgentStartPayloadJson
             WriteMappedString(writer, "repositoryItemId", inner, "repositoryItemId", "RepositoryItemId");
             WriteMappedString(writer, "transactionId", inner, "transactionId", "TransactionId");
             WriteMappedString(writer, "formentryId", inner, "formentryId", "formEntryId", "FormEntryId");
+            // PO master is separate from the invoice formid. Dropping these made agents
+            // refuse lookup ("PoMaster form id is missing").
+            WriteMappedString(writer, "master_source", inner, "master_source", "masterSource", "MasterSource");
+            WriteMappedString(writer, "master_form_id", inner, "master_form_id", "masterFormId", "MasterFormId");
+            WriteMappedString(writer, "resource", inner, "resource", "Resource");
+            WriteMappedString(writer, "connector_id", inner, "connector_id", "connectorId", "ConnectorId");
 
             if (!TryGetPropertyIgnoreCase(inner, "pageno", out _)
                 && !TryGetPropertyIgnoreCase(inner, "pageNo", out _))
