@@ -361,6 +361,53 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             await stageCmd.ExecuteNonQueryAsync(cancellationToken);
             _logger.LogInformation("Provisioned stage table {StageTable} for repository {RepositoryId}", stageTable, repositoryId);
         }
+
+        // Word/Excel OpenXML MIME types exceed legacy file_type varchar(64) and blocked stage insert.
+        await WidenFileTypeColumnAsync(connection, itemsTable, cancellationToken);
+        await WidenFileTypeColumnAsync(connection, stageTable, cancellationToken);
+        var historyTable = RepositorySqlHelper.HistoryTableName(repositoryId);
+        if (await TableExistsAsync(connection, historyTable, cancellationToken))
+            await WidenFileTypeColumnAsync(connection, historyTable, cancellationToken);
+    }
+
+    /// <summary>
+    /// Office MIME types (e.g. Word .docx) are up to ~71 chars; older schemas used varchar(64).
+    /// </summary>
+    private static async Task WidenFileTypeColumnAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        if (!RepositorySqlHelper.IsValidItemsTableName(tableName)
+            && !RepositorySqlHelper.IsValidStageTableName(tableName)
+            && !System.Text.RegularExpressions.Regex.IsMatch(
+                tableName,
+                @"^items_[a-f0-9]{8}_history$",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+            return;
+
+        // Only widen when the column exists and is shorter than 128.
+        const string checkSql = """
+            SELECT character_maximum_length
+            FROM information_schema.columns
+            WHERE table_schema = 'repository'
+              AND table_name = @TableName
+              AND column_name = 'file_type';
+            """;
+
+        await using (var check = new NpgsqlCommand(checkSql, connection))
+        {
+            check.Parameters.AddWithValue("@TableName", tableName);
+            var lenObj = await check.ExecuteScalarAsync(cancellationToken);
+            if (lenObj is null or DBNull)
+                return;
+            if (lenObj is int len && len >= 128)
+                return;
+        }
+
+        var alterSql = $"ALTER TABLE repository.{tableName} ALTER COLUMN file_type TYPE varchar(128);";
+        await using var alter = new NpgsqlCommand(alterSql, connection) { CommandTimeout = 120 };
+        await alter.ExecuteNonQueryAsync(cancellationToken);
     }
 
     public async Task<RepositoryDetailDto?> UpdateRepositoryAsync(
@@ -789,7 +836,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         sb.AppendLine("    storage_provider_id uuid NOT NULL,");
         sb.AppendLine("    file_path varchar(2000) NULL,");
         sb.AppendLine("    file_name varchar(512) NULL,");
-        sb.AppendLine("    file_type varchar(64) NULL,");
+        sb.AppendLine("    file_type varchar(128) NULL,");
         sb.AppendLine("    file_size integer NULL,");
         sb.AppendLine("    total_pages integer NULL,");
         sb.AppendLine("    is_verified boolean NOT NULL DEFAULT false,");
@@ -938,7 +985,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         sb.AppendLine("    storage_provider_id uuid NOT NULL,");
         sb.AppendLine("    file_path varchar(2000) NULL,");
         sb.AppendLine("    file_name varchar(512) NULL,");
-        sb.AppendLine("    file_type varchar(64) NULL,");
+        sb.AppendLine("    file_type varchar(128) NULL,");
         sb.AppendLine("    file_size integer NULL,");
         sb.AppendLine("    total_pages integer NULL,");
         sb.AppendLine("    stage_status varchar(64) NOT NULL DEFAULT 'Pending',");

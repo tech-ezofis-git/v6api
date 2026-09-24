@@ -351,6 +351,73 @@ public sealed class UploadAndIndexController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Soft-delete staged upload/index files and remove their monitor temp blobs.
+    /// Body: <c>{ "fileIds": ["guid", ...] }</c> (alias <c>ids</c>). Optional <c>repositoryId</c>.
+    /// </summary>
+    [HttpPost("/api/uploadAndIndex/upload/deleteFiles")]
+    [HttpPost("/api/uploadAndIndex/index/deleteFiles")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(UploadIndexDeleteFilesResult), StatusCodes.Status200OK)]
+    public async Task<IActionResult> DeleteStageFiles([FromBody] JsonElement body, CancellationToken cancellationToken)
+    {
+        UploadIndexDeleteFilesRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<UploadIndexDeleteFilesRequest>(body.GetRawText(), JsonOptions)
+                ?? new UploadIndexDeleteFilesRequest();
+        }
+        catch (JsonException ex)
+        {
+            return BadRequest(new { error = $"Invalid JSON: {ex.Message}" });
+        }
+
+        var rawIds = (request.FileIds ?? Array.Empty<string>())
+            .Concat(request.Ids ?? Array.Empty<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (rawIds.Count == 0
+            && body.ValueKind == JsonValueKind.Object
+            && body.TryGetProperty("fileId", out var single)
+            && single.ValueKind == JsonValueKind.String)
+        {
+            rawIds.Add(single.GetString()!);
+        }
+
+        var stageIds = new List<Guid>();
+        foreach (var raw in rawIds)
+        {
+            if (!Guid.TryParse(raw.Trim(), out var id) || id == Guid.Empty)
+                return BadRequest(new { error = $"Invalid file id: {raw}" });
+            stageIds.Add(id);
+        }
+
+        if (stageIds.Count == 0)
+            return BadRequest(new { error = "fileIds is required (one or more stage GUIDs)." });
+
+        var tenantId = RequireTenantId();
+        try
+        {
+            var result = await _uploadIndex.DeleteStageFilesAsync(
+                tenantId,
+                stageIds,
+                request.RepositoryId,
+                GetUserId(),
+                cancellationToken);
+            return Ok(result);
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     /// <summary>v5: POST api/uploadAndIndex/index/all — list staged/index rows.</summary>
     [HttpPost("/api/uploadAndIndex/index/all")]
     [Consumes("application/json")]

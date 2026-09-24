@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SaaSApp.Repository.Application;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Repository.Infrastructure.Options;
 using SaaSApp.SharedKernel.Options;
@@ -50,17 +51,45 @@ public sealed class OcrExtractionService : IOcrExtractionService
         }
 
         var resolvedPageNo = ResolvePageNo(pageNo, RepositoryOcrDefaults.DefaultPageNo);
+        var resolvedOcrType = ResolveOptional(ocrType, defaultValue: "ADVANCED");
+        var resolvedValidateType = ResolveOptional(validateType, defaultValue: "1");
 
         _logger.LogInformation(
-            "Calling OCR /chat {Url} with {ParameterCount} parameters, pageno={PageNo}, file size {FileSize} bytes",
+            "Calling OCR /chat {Url} with {ParameterCount} parameters, pageno={PageNo}, ocrtype={OcrType}, file={FileName}, size={FileSize} bytes",
             apiUrl,
             parameters.Count,
             resolvedPageNo,
+            resolvedOcrType,
+            string.IsNullOrWhiteSpace(filename) ? "(none)" : filename.Trim(),
             fileBytes.Length);
 
         var rawJson = await PostMultipartAsync(
-            apiUrl, fileBytes, parameters, tableParameters,
-            resolvedPageNo, filename, cancellationToken);
+            apiUrl,
+            fileBytes,
+            parameters,
+            tableParameters,
+            resolvedPageNo,
+            resolvedOcrType,
+            resolvedValidateType,
+            filename,
+            cancellationToken);
+
+        // Legacy parity: retry once with tesseract when advanced returns no text.
+        if (IsNoTextExtracted(rawJson)
+            && !string.Equals(resolvedOcrType, "tesseract", StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation("OCR returned no text; retrying with ocrtype=tesseract for {FileName}", filename);
+            rawJson = await PostMultipartAsync(
+                apiUrl,
+                fileBytes,
+                parameters,
+                tableParameters,
+                resolvedPageNo,
+                "tesseract",
+                resolvedValidateType,
+                filename,
+                cancellationToken);
+        }
 
         var fieldList = OcrResultParser.TryParseFieldList(rawJson);
         var ocrText = OcrResultParser.TryParseOcrText(rawJson);
@@ -73,6 +102,8 @@ public sealed class OcrExtractionService : IOcrExtractionService
         IReadOnlyList<string> parameters,
         IReadOnlyList<Dictionary<string, IReadOnlyList<string>>>? tableParameters,
         string pageNo,
+        string ocrType,
+        string validateType,
         string? filename,
         CancellationToken cancellationToken)
     {
@@ -81,6 +112,8 @@ public sealed class OcrExtractionService : IOcrExtractionService
         form.Add(new StringContent($"ocr-{Guid.NewGuid():N}"), "session_id");
         form.Add(new StringContent("ocr"), "intent");
         form.Add(new StringContent(pageNo), "pageno");
+        form.Add(new StringContent(ocrType), "ocrtype");
+        form.Add(new StringContent(validateType), "validatetype");
         form.Add(new StringContent(RepositoryOcrDefaults.Instruction), "instruction");
 
         var parametersJson = JsonSerializer.Serialize(parameters);
@@ -92,8 +125,9 @@ public sealed class OcrExtractionService : IOcrExtractionService
         form.Add(new StringContent(tableParamsJson), "tableparameters");
 
         var fileContent = new ByteArrayContent(fileBytes);
-        fileContent.Headers.ContentType = new MediaTypeHeaderValue("application/octet-stream");
-        var resolvedFilename = string.IsNullOrWhiteSpace(filename) ? "document.pdf" : filename.Trim();
+        var resolvedFilename = string.IsNullOrWhiteSpace(filename) ? "document.pdf" : Path.GetFileName(filename.Trim());
+        var contentType = RepositoryOcrFileSupport.ResolveContentType(resolvedFilename);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(contentType);
         form.Add(fileContent, "file", resolvedFilename);
 
         using var response = await _httpClient.PostAsync(apiUrl, form, cancellationToken);
@@ -165,6 +199,37 @@ public sealed class OcrExtractionService : IOcrExtractionService
         return int.TryParse(defaultPageNo, out var defaultPage) && defaultPage > 0
             ? defaultPage.ToString()
             : "1";
+    }
+
+    private static string ResolveOptional(string? value, string defaultValue)
+    {
+        if (string.IsNullOrWhiteSpace(value) || IsPlaceholderValue(value.Trim()))
+            return defaultValue;
+        return value.Trim();
+    }
+
+    private static bool IsNoTextExtracted(string rawJson)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson))
+            return true;
+
+        var trimmed = rawJson.Trim();
+        if (trimmed.Contains("no text extracted", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(trimmed);
+            if (doc.RootElement.ValueKind == JsonValueKind.String
+                && doc.RootElement.GetString()?.Contains("no text extracted", StringComparison.OrdinalIgnoreCase) == true)
+                return true;
+        }
+        catch (JsonException)
+        {
+            // plain text body already checked above
+        }
+
+        return false;
     }
 
     private static bool IsPlaceholderValue(string value) =>

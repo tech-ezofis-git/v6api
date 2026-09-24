@@ -27,6 +27,10 @@ public static class RepositoryInfrastructureServiceCollectionExtensions
             client.Timeout = TimeSpan.FromSeconds(timeout);
         });
         services.AddScoped<IRepositoryPythonAssistantClient, RepositoryPythonAssistantClient>();
+        services.AddHttpClient<IDocumentIntelligentAgentClient, DocumentIntelligentAgentClient>(client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(5);
+        });
         services.AddScoped<IRepositorySchemaService, RepositorySchemaService>();
         services.AddScoped<IRepositoryStorageSeedService, RepositoryStorageSeedService>();
         services.AddScoped<IStaticRepositoryProvisioner, StaticRepositoryProvisioner>();

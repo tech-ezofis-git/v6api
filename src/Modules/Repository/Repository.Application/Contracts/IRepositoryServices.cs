@@ -145,6 +145,16 @@ public interface IRepositoryItemActivityService
         Guid itemId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Ticket raised for this file (if any): current stage + full history.
+    /// Returns null when the item does not exist; returns HasTicket=false when no ticket is linked.
+    /// </summary>
+    Task<RepositoryItemTicketResultDto?> GetTicketAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken = default);
+
     Task<RepositoryItemTimelineEventDto?> AddTimelineEventAsync(
         Guid repositoryId,
         Guid tenantId,
@@ -164,6 +174,17 @@ public interface IRepositoryItemActivityService
         string? actorName,
         Guid? actorUserId,
         Guid? createdBy,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sets items.workflow_instance_id and records "Request initiated for this file" for raise-ticket.
+    /// </summary>
+    Task LinkItemToWorkflowInstanceAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        Guid workflowInstanceId,
+        Guid? userId,
         CancellationToken cancellationToken = default);
 
     Task<RepositoryItemCommentsResultDto?> GetCommentsAsync(

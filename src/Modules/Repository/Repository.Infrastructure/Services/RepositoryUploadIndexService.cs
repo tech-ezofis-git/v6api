@@ -57,6 +57,9 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         await _provisioner.EnsureRepositoryTablesAsync(repositoryId, tenantId, cancellationToken);
 
         fileName = RepositoryFilePathHelper.EnsureFileNameHasExtension(fileName, contentType);
+        // Prefer a real MIME from the file name when browsers send octet-stream / empty type
+        // (common for .docx). Also keeps Office MIME under file_type column length.
+        contentType = RepositoryOcrFileSupport.ResolveContentType(fileName, contentType);
 
         var storageProviderId = await _storageSeed.ResolveStorageProviderIdAsync(
             tenantId, repo.StorageProviderId, null, cancellationToken);
@@ -267,6 +270,15 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         if (!Guid.TryParse(upload.FileId, out var stageId))
             throw new InvalidOperationException("Stage id was not returned from upload.");
 
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException("Repository not found.");
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
         buffer.Position = 0;
         var ocr = await UploadForOcrAsync(
             repositoryId,
@@ -279,15 +291,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             fileName,
             cancellationToken);
 
-        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
-            ?? throw new InvalidOperationException("Repository not found.");
-
         var ocrFieldValues = ParseFieldsToDictionary(ocr.OcrFieldList);
-        var connectionString = _connectionProvider.ConnectionString
-            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
-
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
 
         await RepositoryStageStore.UpdateFieldsAsync(
             connection,
@@ -417,6 +421,13 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             result.ItemId,
             cancellationToken);
 
+        // Archive copy is in place — remove monitor temp file.
+        await TryDeleteMonitorFileAsync(
+            tenantId,
+            row.FilePath,
+            providerCode,
+            cancellationToken);
+
         return new UploadIndexPromoteResult(
             result.ItemId,
             repositoryId,
@@ -425,6 +436,123 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             metadataJson,
             row.FileSize,
             row.FileType);
+    }
+
+    public async Task<UploadIndexDeleteFilesResult> DeleteStageFilesAsync(
+        Guid tenantId,
+        IReadOnlyList<Guid> stageIds,
+        Guid? repositoryId,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        if (stageIds == null || stageIds.Count == 0)
+            throw new ArgumentException("At least one file id is required.");
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var results = new List<UploadIndexDeleteFileResult>(stageIds.Count);
+        foreach (var stageId in stageIds.Distinct())
+        {
+            try
+            {
+                RepositoryDetailDto? repo = null;
+                RepositoryStageRow? row = null;
+
+                if (repositoryId is Guid rid && rid != Guid.Empty)
+                {
+                    repo = await _provisioner.GetRepositoryAsync(rid, tenantId, cancellationToken);
+                    if (repo != null)
+                        row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+                }
+
+                if (row == null)
+                {
+                    repo = await ResolveRepositoryForStageAsync(connection, tenantId, stageId, cancellationToken);
+                    if (repo == null)
+                    {
+                        results.Add(new UploadIndexDeleteFileResult(stageId.ToString("D"), false, "Stage file not found."));
+                        continue;
+                    }
+
+                    row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+                    if (row == null)
+                    {
+                        results.Add(new UploadIndexDeleteFileResult(stageId.ToString("D"), false, "Stage file not found."));
+                        continue;
+                    }
+                }
+
+                if (row.PromotedItemId is Guid promoted && promoted != Guid.Empty)
+                {
+                    results.Add(new UploadIndexDeleteFileResult(
+                        stageId.ToString("D"),
+                        false,
+                        "File is already archived; delete from repository items instead."));
+                    continue;
+                }
+
+                var providers = await _storageSeed.ListProvidersAsync(tenantId, cancellationToken);
+                var providerCode = providers.First(p => p.Id == row.StorageProviderId).Code;
+                var monitorPath = row.FilePath;
+
+                var deleted = await RepositoryStageStore.SoftDeleteAsync(
+                    connection,
+                    repo!.StageTableName,
+                    tenantId,
+                    stageId,
+                    userId,
+                    cancellationToken);
+
+                if (!deleted)
+                {
+                    results.Add(new UploadIndexDeleteFileResult(stageId.ToString("D"), false, "Stage file not found or already deleted."));
+                    continue;
+                }
+
+                await TryDeleteMonitorFileAsync(tenantId, monitorPath, providerCode, cancellationToken);
+                results.Add(new UploadIndexDeleteFileResult(stageId.ToString("D"), true));
+            }
+            catch (Exception ex) when (ex is ArgumentException or InvalidOperationException or IOException or PostgresException)
+            {
+                results.Add(new UploadIndexDeleteFileResult(stageId.ToString("D"), false, ex.Message));
+            }
+        }
+
+        var succeeded = results.Count(r => r.Succeeded);
+        return new UploadIndexDeleteFilesResult(
+            results.Count,
+            succeeded,
+            results.Count - succeeded,
+            results);
+    }
+
+    private async Task TryDeleteMonitorFileAsync(
+        Guid tenantId,
+        string? relativePath,
+        string providerCode,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(relativePath))
+            return;
+
+        var path = relativePath.Trim().Replace('\\', '/');
+        if (!path.StartsWith(RepositoryFilePathHelper.MonitorRoot + "/", StringComparison.OrdinalIgnoreCase)
+            && !string.Equals(path, RepositoryFilePathHelper.MonitorRoot, StringComparison.OrdinalIgnoreCase))
+            return;
+
+        try
+        {
+            await _fileStorage.DeleteAsync(tenantId, path, providerCode, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            // Archive/delete already succeeded in DB — do not fail the request on blob cleanup.
+            _ = ex;
+        }
     }
 
     public async Task<UploadIndexLoadResult?> LoadAsync(

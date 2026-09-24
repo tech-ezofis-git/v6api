@@ -102,6 +102,23 @@ public sealed record UploadIndexListResult(
     int ItemsPerPage,
     int TotalItems);
 
+/// <summary>DELETE stage files body — soft-delete stage rows and remove monitor blobs.</summary>
+public sealed record UploadIndexDeleteFilesRequest(
+    IReadOnlyList<string>? FileIds = null,
+    IReadOnlyList<string>? Ids = null,
+    Guid? RepositoryId = null);
+
+public sealed record UploadIndexDeleteFileResult(
+    string FileId,
+    bool Succeeded,
+    string? Error = null);
+
+public sealed record UploadIndexDeleteFilesResult(
+    int Requested,
+    int Succeeded,
+    int Failed,
+    IReadOnlyList<UploadIndexDeleteFileResult> Files);
+
 /// <summary>One file in a bulk upload batch (staged immediately; OCR may still be running).</summary>
 public sealed record BulkUploadFileResult(
     string FileId,

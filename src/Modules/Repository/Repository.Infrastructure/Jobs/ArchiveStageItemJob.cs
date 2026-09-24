@@ -107,6 +107,23 @@ public sealed class ArchiveStageItemJob
                 result.ItemId,
                 default);
 
+            try
+            {
+                if (!string.IsNullOrWhiteSpace(row.FilePath)
+                    && row.FilePath.Replace('\\', '/').StartsWith("monitor/", StringComparison.OrdinalIgnoreCase))
+                {
+                    await fileStorage.DeleteAsync(args.TenantId, row.FilePath, providerCode, default);
+                }
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "Archive job {JobId}: failed to delete monitor file {Path} after promote",
+                    jobId,
+                    row.FilePath);
+            }
+
             _logger.LogInformation(
                 "Archive stage job {JobId} completed. Stage {StageId} promoted to item {ItemId}",
                 jobId,

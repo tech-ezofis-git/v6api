@@ -891,6 +891,26 @@ public sealed class RepositoriesController : ControllerBase
         return timeline == null ? NotFound() : Ok(timeline);
     }
 
+    /// <summary>
+    /// Ticket raised for this file (if any): reference, current stage, assignee, and full history
+    /// (Request initiated / Approved / Forwarded / …). Separate from workspace.
+    /// </summary>
+    [HttpGet("/api/repositories/{id:guid}/items/{itemId:guid}/ticket")]
+    public async Task<IActionResult> GetItemTicket(
+        Guid id,
+        Guid itemId,
+        [FromQuery] string? shareToken,
+        [FromQuery] string? sharedtoken,
+        CancellationToken cancellationToken)
+    {
+        if (await EnsureShareContextAsync(cancellationToken) is { } shareError)
+            return shareError;
+
+        var (repoId, resolvedItemId, tenantId) = ResolveItemAccess(id, itemId);
+        var ticket = await _itemActivity.GetTicketAsync(repoId, tenantId, resolvedItemId, cancellationToken);
+        return ticket == null ? NotFound() : Ok(ticket);
+    }
+
     [HttpPost("/api/repositories/{id:guid}/items/{itemId:guid}/timeline")]
     public async Task<IActionResult> AddItemTimelineEvent(
         Guid id,

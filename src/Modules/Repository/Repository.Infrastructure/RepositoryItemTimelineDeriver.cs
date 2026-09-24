@@ -61,8 +61,8 @@ internal static class RepositoryItemTimelineDeriver
         {
             events.Add(new RepositoryItemTimelineEventDto(
                 Guid.Empty,
-                "system",
-                "File linked to workflow instance",
+                "workflow",
+                "Request initiated for this file",
                 instanceId.ToString("D"),
                 "System",
                 "System",

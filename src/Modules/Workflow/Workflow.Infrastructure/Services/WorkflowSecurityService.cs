@@ -334,6 +334,115 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         }
     }
 
+    public async Task EnsureUserWorkflowAccessAsync(
+        Guid workflowId,
+        Guid userId,
+        Guid grantedByUserId,
+        CancellationToken cancellationToken = default)
+    {
+        if (workflowId == Guid.Empty || userId == Guid.Empty)
+            return;
+
+        // Admins / pilot already see every workflow — no grant row needed.
+        if (await IsUnrestrictedUserAsync(userId, cancellationToken))
+            return;
+
+        if (await CanAccessWorkflowAsync(workflowId, userId, cancellationToken))
+            return;
+
+        var connectionString = _tenantContext.ConnectionString;
+        var tenantId = _tenantContext.TenantId;
+        if (string.IsNullOrEmpty(connectionString) || tenantId is not Guid tid)
+            return;
+
+        var grantedBy = grantedByUserId != Guid.Empty ? grantedByUserId : userId;
+        var now = DateTime.UtcNow;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        // Revive soft-deleted grant, else insert.
+        const string reviveUsersSql = """
+            UPDATE workflow."WorkflowUsers"
+            SET "IsDeleted" = false,
+                "ModifiedAtUtc" = @ModifiedAt,
+                "ModifiedBy" = @ModifiedBy
+            WHERE "WorkflowId" = @WorkflowId
+              AND "UserId" = @UserId
+              AND "IsDeleted" = true;
+            """;
+        await using (var reviveCmd = new NpgsqlCommand(reviveUsersSql, connection))
+        {
+            reviveCmd.Parameters.AddWithValue("@WorkflowId", workflowId);
+            reviveCmd.Parameters.AddWithValue("@UserId", userId);
+            reviveCmd.Parameters.AddWithValue("@ModifiedAt", now);
+            reviveCmd.Parameters.AddWithValue("@ModifiedBy", grantedBy);
+            await reviveCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        const string insertUsersSql = """
+            INSERT INTO workflow."WorkflowUsers"
+                ("TenantId", "WorkflowId", "UserId", "GroupId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+            SELECT @TenantId, @WorkflowId, @UserId, NULL, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+            WHERE NOT EXISTS (
+                SELECT 1 FROM workflow."WorkflowUsers"
+                WHERE "WorkflowId" = @WorkflowId AND "UserId" = @UserId AND "IsDeleted" = false
+            );
+            """;
+        await using (var insertCmd = new NpgsqlCommand(insertUsersSql, connection))
+        {
+            insertCmd.Parameters.AddWithValue("@TenantId", tid);
+            insertCmd.Parameters.AddWithValue("@WorkflowId", workflowId);
+            insertCmd.Parameters.AddWithValue("@UserId", userId);
+            insertCmd.Parameters.AddWithValue("@CreatedAt", now);
+            insertCmd.Parameters.AddWithValue("@CreatedBy", grantedBy);
+            await insertCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        const string reviveSecuritySql = """
+            UPDATE workflow."WorkflowSecurity"
+            SET "IsDeleted" = false,
+                "ModifiedAtUtc" = @ModifiedAt,
+                "ModifiedBy" = @ModifiedBy
+            WHERE "WorkflowId" = @WorkflowId
+              AND "UserId" = @UserId
+              AND "IsDeleted" = true;
+            """;
+        await using (var reviveSecCmd = new NpgsqlCommand(reviveSecuritySql, connection))
+        {
+            reviveSecCmd.Parameters.AddWithValue("@WorkflowId", workflowId);
+            reviveSecCmd.Parameters.AddWithValue("@UserId", userId);
+            reviveSecCmd.Parameters.AddWithValue("@ModifiedAt", now);
+            reviveSecCmd.Parameters.AddWithValue("@ModifiedBy", grantedBy);
+            await reviveSecCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        const string insertSecuritySql = """
+            INSERT INTO workflow."WorkflowSecurity"
+                ("TenantId", "WorkflowId", "UserId", "UserCategory", "CreatedAtUtc", "ModifiedAtUtc", "CreatedBy", "ModifiedBy", "IsDeleted")
+            SELECT @TenantId, @WorkflowId, @UserId, NULL, @CreatedAt, NULL, @CreatedBy, NULL, false
+            WHERE NOT EXISTS (
+                SELECT 1 FROM workflow."WorkflowSecurity"
+                WHERE "WorkflowId" = @WorkflowId AND "UserId" = @UserId AND "IsDeleted" = false
+            );
+            """;
+        await using (var insertSecCmd = new NpgsqlCommand(insertSecuritySql, connection))
+        {
+            insertSecCmd.Parameters.AddWithValue("@TenantId", tid);
+            insertSecCmd.Parameters.AddWithValue("@WorkflowId", workflowId);
+            insertSecCmd.Parameters.AddWithValue("@UserId", userId);
+            insertSecCmd.Parameters.AddWithValue("@CreatedAt", now);
+            insertSecCmd.Parameters.AddWithValue("@CreatedBy", grantedBy);
+            await insertSecCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+
+        _logger.LogInformation(
+            "Granted workflow {WorkflowId} access to user {UserId} (by {GrantedBy}) for Forward",
+            workflowId,
+            userId,
+            grantedBy);
+    }
+
     public async Task<IReadOnlySet<Guid>> GetAccessibleWorkflowIdsAsync(
         Guid userId,
         CancellationToken cancellationToken = default)

@@ -32,6 +32,16 @@ public interface IWorkflowSecurityService
         Guid userId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Ensures the user can access the workflow (WorkflowUsers + WorkflowSecurity).
+    /// Used when Forwarding a ticket to someone who is not yet granted.
+    /// </summary>
+    Task EnsureUserWorkflowAccessAsync(
+        Guid workflowId,
+        Guid userId,
+        Guid grantedByUserId,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Workflow ids the user may list. Empty when nothing is granted.</summary>
     Task<IReadOnlySet<Guid>> GetAccessibleWorkflowIdsAsync(
         Guid userId,

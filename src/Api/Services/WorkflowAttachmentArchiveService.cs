@@ -14,6 +14,7 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
     private readonly IRepositoryItemQueryService _itemQuery;
     private readonly RepositoryWorkflowAttachService _workflowAttach;
     private readonly ITenantConnectionProvider _connectionProvider;
+    private readonly IRepositoryItemActivityService _itemActivity;
 
     public WorkflowAttachmentArchiveService(
         IRepositoryArchiveFileUploadService archiveUpload,
@@ -21,7 +22,8 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
         IWorkflowProcessAddonService processAddon,
         IRepositoryItemQueryService itemQuery,
         RepositoryWorkflowAttachService workflowAttach,
-        ITenantConnectionProvider connectionProvider)
+        ITenantConnectionProvider connectionProvider,
+        IRepositoryItemActivityService itemActivity)
     {
         _archiveUpload = archiveUpload;
         _uploadIndex = uploadIndex;
@@ -29,6 +31,7 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
         _itemQuery = itemQuery;
         _workflowAttach = workflowAttach;
         _connectionProvider = connectionProvider;
+        _itemActivity = itemActivity;
     }
 
     public async Task<WorkflowAttachmentArchiveResult> UploadAsync(
@@ -88,6 +91,14 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             upload.ItemId,
             upload.FileName,
             transactionId,
+            userId,
+            cancellationToken);
+
+        await _itemActivity.LinkItemToWorkflowInstanceAsync(
+            repositoryId,
+            tenantId,
+            upload.ItemId,
+            instanceId,
             userId,
             cancellationToken);
 
@@ -156,6 +167,14 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             promoted.ItemId,
             fileName,
             transactionId,
+            userId,
+            cancellationToken);
+
+        await _itemActivity.LinkItemToWorkflowInstanceAsync(
+            promoted.RepositoryId,
+            tenantId,
+            promoted.ItemId,
+            instanceId,
             userId,
             cancellationToken);
 
@@ -232,6 +251,14 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             item.Id,
             resolvedName,
             transactionId,
+            userId,
+            cancellationToken);
+
+        await _itemActivity.LinkItemToWorkflowInstanceAsync(
+            repositoryId,
+            tenantId,
+            item.Id,
+            instanceId,
             userId,
             cancellationToken);
 
