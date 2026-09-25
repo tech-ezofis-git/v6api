@@ -56,19 +56,31 @@ public sealed class WorkflowPdfGenerationService : IWorkflowPdfGenerationService
         Guid userId,
         int? transactionId,
         CancellationToken cancellationToken = default,
-        string? submittedFormDataJson = null)
+        string? submittedFormDataJson = null,
+        bool force = false)
     {
         var opts = _options.Value;
         if (!opts.Enabled)
+        {
+            if (force)
+                throw new InvalidOperationException("Workflow PDF generation is disabled.");
             return null;
+        }
 
         var block = await ResolveBlockAsync(workflow.Id, completedStep.ActivityId, cancellationToken);
-        if (block?.Settings?.GeneratePDF != true)
+        var settings = block?.Settings;
+        if (!force && settings?.GeneratePDF != true)
             return null;
 
-        if (block.Settings.PdfTemplate is not { } pdfTemplate
+        if (settings?.PdfTemplate is not { } pdfTemplate
             || pdfTemplate.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
+            if (force)
+            {
+                throw new InvalidOperationException(
+                    $"pdfTemplate is missing in workflow JSON for activity {completedStep.ActivityId}.");
+            }
+
             _logger.LogWarning(
                 "Workflow PDF: generatePDF is true but pdfTemplate is missing for activity {ActivityId} workflow {WorkflowId}",
                 completedStep.ActivityId,
@@ -78,6 +90,9 @@ public sealed class WorkflowPdfGenerationService : IWorkflowPdfGenerationService
 
         if (string.IsNullOrWhiteSpace(opts.ServiceUrl))
         {
+            if (force)
+                throw new InvalidOperationException("Workflow:PdfGeneration:ServiceUrl is not configured.");
+
             _logger.LogInformation(
                 "Workflow PDF: ServiceUrl not configured; skipping PDF for activity {ActivityId}. Set Workflow:PdfGeneration:ServiceUrl when Python is ready.",
                 completedStep.ActivityId);
@@ -119,7 +134,7 @@ public sealed class WorkflowPdfGenerationService : IWorkflowPdfGenerationService
                 cancellationToken);
         }
 
-        var label = block.Settings.Label ?? completedStep.Name ?? "Document";
+        var label = settings.Label ?? completedStep.Name ?? "Document";
         var reference = instance.ReferenceNumber ?? instance.Id.ToString("N")[..8];
         var fileName = SanitizeFileName($"{label}-{reference}.pdf");
 
@@ -163,7 +178,7 @@ public sealed class WorkflowPdfGenerationService : IWorkflowPdfGenerationService
             allowIncompleteFolderMetadata: true);
 
         await BindGeneratedPdfToFormAsync(
-            block.Settings.GeneratePDFFields,
+            settings.GeneratePDFFields,
             resolvedFormId,
             entryId,
             archive.ItemId,

@@ -205,6 +205,34 @@ WHERE t.id = @TransactionRowId;";
                 cancellationToken);
         }
 
+        // Snapshot before the activity-key delete. Completing a step removes the open
+        // Inbox/Sent rows that still use this activity, so reading them afterwards misses
+        // everyone who was involved.
+        var isEnd = string.Equals(stageType?.Trim(), EndStageType, StringComparison.OrdinalIgnoreCase);
+        List<string>? completedWatcherUserIds = null;
+        if (isEnd && !isDeleted)
+        {
+            var mailboxWatchers = await ListMailboxUserIdsForInstanceAsync(
+                connection,
+                workflowIdValue,
+                workflowIdCompact,
+                workflowInstanceId,
+                workflowInstanceIdStr,
+                inboxTable,
+                sentTable,
+                cancellationToken);
+            var participants = await ListTransactionParticipantUserIdsAsync(
+                connection,
+                transactionTable,
+                workflowInstanceId,
+                cancellationToken);
+            completedWatcherUserIds = mailboxWatchers
+                .Concat(participants)
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
         await DeleteFromAllMailboxTablesByKeyAsync(
             connection,
             workflowIdValue,
@@ -220,29 +248,11 @@ WHERE t.id = @TransactionRowId;";
         if (isDeleted)
             return;
 
-        var isEnd = string.Equals(stageType?.Trim(), EndStageType, StringComparison.OrdinalIgnoreCase);
-
         var targetTable = isEnd
             ? completedTable
             : actionStatus == 0
                 ? inboxTable
                 : sentTable;
-
-        // Before moving to Completed, remember who already could see this ticket (Inbox/Sent)
-        // so the forwarder (and others) land in Completed instead of disappearing.
-        List<string>? completedWatcherUserIds = null;
-        if (targetTable == completedTable)
-        {
-            completedWatcherUserIds = await ListMailboxUserIdsForInstanceAsync(
-                connection,
-                workflowIdValue,
-                workflowIdCompact,
-                workflowInstanceId,
-                workflowInstanceIdStr,
-                inboxTable,
-                sentTable,
-                cancellationToken);
-        }
 
         // Keep mailbox aligned with workflow state: no stale inbox after approve; no inbox/sent after complete.
         if (targetTable == sentTable)
@@ -637,6 +647,43 @@ WHERE user_id IS NOT NULL AND BTRIM(user_id) <> '';
         cmd.Parameters.AddWithValue("@WorkflowIdValue", workflowIdValue);
         cmd.Parameters.AddWithValue("@WorkflowTableKey", workflowTableKey);
         cmd.Parameters.AddWithValue("@WorkflowInstanceIdStr", workflowInstanceIdStr);
+        cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            if (!reader.IsDBNull(0))
+                users.Add(reader.GetString(0));
+        }
+
+        return users;
+    }
+
+    /// <summary>Everyone who created, updated, or was assigned on any transaction for this ticket.</summary>
+    private static async Task<List<string>> ListTransactionParticipantUserIdsAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        Guid workflowInstanceId,
+        CancellationToken cancellationToken)
+    {
+        var sql = $"""
+SELECT DISTINCT uid
+FROM (
+    SELECT created_by::text AS uid
+    FROM {transactionTable}
+    WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+    UNION
+    SELECT modified_by::text
+    FROM {transactionTable}
+    WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+    UNION
+    SELECT activity_user_id::text
+    FROM {transactionTable}
+    WHERE workflow_instance_id = @WorkflowInstanceId AND is_deleted = false
+) s
+WHERE uid IS NOT NULL AND BTRIM(uid) <> '' AND uid <> '00000000-0000-0000-0000-000000000000';
+""";
+        var users = new List<string>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@WorkflowInstanceId", workflowInstanceId);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))

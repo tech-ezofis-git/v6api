@@ -21,7 +21,8 @@ public interface IWorkflowPdfGenerationService
         Guid userId,
         int? transactionId,
         CancellationToken cancellationToken = default,
-        string? submittedFormDataJson = null);
+        string? submittedFormDataJson = null,
+        bool force = false);
 }
 
 public sealed record WorkflowPdfGenerationResult(
