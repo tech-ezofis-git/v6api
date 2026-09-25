@@ -1,4 +1,5 @@
 using MediatR;
+using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Domain.Entities;
@@ -21,6 +22,8 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IWorkflowSecurityService _workflowSecurity;
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
+    private readonly IFtlAgentJobClient _ftlAgentJobClient;
+    private readonly ILogger<MoveToNextStepCommandHandler> _logger;
 
     public MoveToNextStepCommandHandler(
         IWorkflowRepository repository,
@@ -35,7 +38,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IWorkflowJsonStorageService workflowJsonStorage,
         IWorkflowSecurityService workflowSecurity,
         IUnitOfWork unitOfWork,
-        ICurrentUserProvider currentUserProvider)
+        ICurrentUserProvider currentUserProvider,
+        IFtlAgentJobClient ftlAgentJobClient,
+        ILogger<MoveToNextStepCommandHandler> logger)
     {
         _repository = repository;
         _dynamicTableRepository = dynamicTableRepository;
@@ -50,6 +55,8 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _workflowSecurity = workflowSecurity;
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
+        _ftlAgentJobClient = ftlAgentJobClient;
+        _logger = logger;
     }
 
     public async Task<MoveToNextStepCommandResult> Handle(MoveToNextStepCommand request, CancellationToken cancellationToken)
@@ -294,16 +301,19 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         else if (legacySync.Status == LegacyTransactionSyncStatus.ReviewUpdated)
         {
             // Generate PDF when leaving this step — including when this move completes the workflow.
-            generatedPdf = await _pdfGeneration.TryGenerateOnStepCompleteAsync(
-                workflow,
-                instance,
-                targetDefinitionStep,
-                formId,
-                formEntryId,
-                userId,
-                legacySync.CurrentTransactionId,
-                cancellationToken,
-                submittedFormDataJson: request.SubmittedFormDataJson);
+            if (!FtlAgentStepDetector.IsDocumentGenerateAgent(targetDefinitionStep))
+            {
+                generatedPdf = await _pdfGeneration.TryGenerateOnStepCompleteAsync(
+                    workflow,
+                    instance,
+                    targetDefinitionStep,
+                    formId,
+                    formEntryId,
+                    userId,
+                    legacySync.CurrentTransactionId,
+                    cancellationToken,
+                    submittedFormDataJson: request.SubmittedFormDataJson);
+            }
 
             // PDF is archived after the first mailbox sync — re-sync so itemId / FILE binds appear.
             if (generatedPdf != null)
@@ -465,6 +475,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             }
         }
 
+        if (!isCompleted && nextDefinitionStep != null)
+            await TryEnqueueFtlAgentAsync(instance, workflow, nextDefinitionStep, userId, formId, cancellationToken);
+
         return new MoveToNextStepCommandResult(
             true,
             resultMessage,
@@ -479,6 +492,51 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             GeneratedPdfAttachmentId: generatedPdf?.AttachmentId,
             GeneratedPdfFileName: generatedPdf?.FileName,
             GeneratedPdfInput: generatedPdf?.PythonRequest);
+    }
+
+    private async Task TryEnqueueFtlAgentAsync(
+        WorkflowInstance instance,
+        Domain.Entities.Workflow workflow,
+        WorkflowStep nextStep,
+        Guid userId,
+        string? formId,
+        CancellationToken cancellationToken)
+    {
+        var mode = FtlAgentStepDetector.HangfireMode(nextStep);
+        if (mode == null || mode == FtlAgentStepDetector.Qualifier)
+            return;
+
+        var activityId = !string.IsNullOrWhiteSpace(nextStep.ActivityId)
+            ? nextStep.ActivityId!
+            : nextStep.Id.ToString("D");
+        try
+        {
+            var jobId = await _ftlAgentJobClient.EnqueueAsync(
+                new FtlAgentJobArgs(
+                    instance.TenantId,
+                    userId,
+                    instance.WorkflowId,
+                    instance.Id,
+                    activityId,
+                    mode,
+                    workflow.RepositoryId,
+                    formId ?? workflow.FormId),
+                cancellationToken);
+            _logger.LogInformation(
+                "Enqueued FTL {Mode} job {JobId} for instance {InstanceId} activity {ActivityId}.",
+                mode,
+                jobId,
+                instance.Id,
+                activityId);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(
+                ex,
+                "FTL {Mode} enqueue failed for instance {InstanceId}. The ticket was already moved.",
+                mode,
+                instance.Id);
+        }
     }
 
     private Task NotifyMoveAsync(

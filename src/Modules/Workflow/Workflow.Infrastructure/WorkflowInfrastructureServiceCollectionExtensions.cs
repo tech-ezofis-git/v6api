@@ -155,6 +155,13 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IApAgentPilotAuthProvider, NullApAgentPilotAuthProvider>();
         services.AddScoped<IApAgentPythonJobClient, ApAgentPythonJobClient>();
         services.AddScoped<RunApAgentPythonJob>();
+        services.AddHttpClient(nameof(FtlAgentPipelineService), client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        });
+        services.AddScoped<IFtlAgentPipelineService, FtlAgentPipelineService>();
+        services.AddScoped<IFtlAgentJobClient, FtlAgentJobClient>();
+        services.AddScoped<RunFtlAgentJob>();
 
         services.AddHttpClient(nameof(FieldMappingService), client =>
         {

@@ -18,6 +18,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly IWorkflowStartBootstrapService _startBootstrap;
     private readonly IWorkflowTicketNumberService _ticketNumbers;
     private readonly IApAgentPythonJobClient _apAgentPythonJobClient;
+    private readonly IFtlAgentJobClient _ftlAgentJobClient;
     private readonly IApAgentPythonPipelineService _apAgentPythonPipeline;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
     private readonly IWorkflowSecurityService _security;
@@ -32,6 +33,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         IWorkflowStartBootstrapService startBootstrap,
         IWorkflowTicketNumberService ticketNumbers,
         IApAgentPythonJobClient apAgentPythonJobClient,
+        IFtlAgentJobClient ftlAgentJobClient,
         IApAgentPythonPipelineService apAgentPythonPipeline,
         IApAgentJobProgressService apAgentJobProgress,
         IWorkflowSecurityService security,
@@ -45,6 +47,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _startBootstrap = startBootstrap;
         _ticketNumbers = ticketNumbers;
         _apAgentPythonJobClient = apAgentPythonJobClient;
+        _ftlAgentJobClient = ftlAgentJobClient;
         _apAgentPythonPipeline = apAgentPythonPipeline;
         _apAgentJobProgress = apAgentJobProgress;
         _security = security;
@@ -207,6 +210,50 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 _logger.LogInformation(
                     "Skipping AP Agent Hangfire enqueue for instance {InstanceId} (TriggerApAgentPythonJob=false).",
                     instance.Id);
+            }
+            else if (dedicatedApAgent == null && request.Attachment is { Content.Length: > 0 })
+            {
+                var qualifyStep = orderedSteps.FirstOrDefault(FtlAgentStepDetector.IsQualifyAgent);
+                if (qualifyStep != null)
+                {
+                    try
+                    {
+                        var qualifyActivityId = !string.IsNullOrWhiteSpace(qualifyStep.ActivityId)
+                            ? qualifyStep.ActivityId!
+                            : qualifyStep.Id.ToString("D");
+                        var ftlJobId = await _ftlAgentJobClient.EnqueueAsync(
+                            new FtlAgentJobArgs(
+                                tenantId,
+                                userId,
+                                request.WorkflowId,
+                                instance.Id,
+                                qualifyActivityId,
+                                FtlAgentStepDetector.Qualifier,
+                                workflow.RepositoryId,
+                                workflow.FormId),
+                            cancellationToken);
+                        apAgentJobId = ftlJobId;
+                        pythonInput = JsonSerializer.SerializeToElement(new
+                        {
+                            session_id = ftlJobId,
+                            intent = "ftl_qualifier",
+                            file = request.Attachment?.FileName,
+                            workflowId = request.WorkflowId,
+                            instanceId = instance.Id,
+                            repositoryId = workflow.RepositoryId,
+                            formId = workflow.FormId,
+                            apAgentJobId = ftlJobId
+                        });
+                        _logger.LogInformation(
+                            "Enqueued FTL qualifier job {JobId} for instance {InstanceId}. Start returns the qualifier input; move-next runs after the agent output.",
+                            ftlJobId,
+                            instance.Id);
+                    }
+                    catch (Exception ex)
+                    {
+                        _logger.LogError(ex, "FTL qualifier enqueue failed for instance {InstanceId}.", instance.Id);
+                    }
+                }
             }
 
             return new StartWorkflowCommandResult(
