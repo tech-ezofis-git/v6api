@@ -27,7 +27,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     private readonly IDynamicTableRepository _attachments;
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IWorkflowLegacyMailboxSyncService _mailbox;
-    private readonly IWorkflowPdfGenerationService _pdfGeneration;
+    private readonly IWorkflowJsonStorageService _workflowJsonStorage;
+    private readonly IWorkflowAttachmentArchiveService _attachmentArchive;
     private readonly IWorkflowApAgentMoveNextService _moveNextSupport;
     private readonly IMediator _mediator;
     private readonly IFormJsonStorageService _formJsonStorage;
@@ -42,7 +43,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         IDynamicTableRepository attachments,
         ITenantConnectionProvider connectionProvider,
         IWorkflowLegacyMailboxSyncService mailbox,
-        IWorkflowPdfGenerationService pdfGeneration,
+        IWorkflowJsonStorageService workflowJsonStorage,
+        IWorkflowAttachmentArchiveService attachmentArchive,
         IWorkflowApAgentMoveNextService moveNextSupport,
         IMediator mediator,
         IFormJsonStorageService formJsonStorage,
@@ -56,7 +58,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         _attachments = attachments;
         _connectionProvider = connectionProvider;
         _mailbox = mailbox;
-        _pdfGeneration = pdfGeneration;
+        _workflowJsonStorage = workflowJsonStorage;
+        _attachmentArchive = attachmentArchive;
         _moveNextSupport = moveNextSupport;
         _mediator = mediator;
         _formJsonStorage = formJsonStorage;
@@ -70,7 +73,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     {
         if (string.Equals(args.Mode, FtlAgentStepDetector.Document, StringComparison.OrdinalIgnoreCase))
         {
-            await ExecuteDocumentAsync(args, cancellationToken);
+            await ExecuteDocumentAsync(args, hangfireJobId, cancellationToken);
             return;
         }
 
@@ -105,6 +108,17 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         var fields = ExtractFormFields(storedJson);
         var lineItemsJson = ExtractLineItems(storedJson);
         var mapped = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson, cancellationToken);
+        if (string.Equals(args.Mode, FtlAgentStepDetector.Quote, StringComparison.OrdinalIgnoreCase))
+        {
+            var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+            var protectedIds = NonEmptyFormKeys(existingFormData);
+            mapped = mapped with
+            {
+                FormDataFields = MergeQuoteFormData(existingFormData, mapped.FormDataFields),
+                TableFields = KeepAddedFields(mapped.TableFields, mapped.FormDataFields, protectedIds),
+                TableColumns = mapped.TableColumns.Where(column => !protectedIds.Contains(column.JsonId)).ToList()
+            };
+        }
 
         if (!string.IsNullOrWhiteSpace(formId)
             && formEntryId is { } entryId && entryId != Guid.Empty
@@ -180,48 +194,59 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             moved.NextStepName);
     }
 
-    private async Task ExecuteDocumentAsync(FtlAgentJobArgs args, CancellationToken cancellationToken)
+    private async Task ExecuteDocumentAsync(FtlAgentJobArgs args, string jobId, CancellationToken cancellationToken)
     {
+        var chatUrl = _agentsChat.ResolveChatUrl();
+        if (string.IsNullOrWhiteSpace(chatUrl))
+            throw new InvalidOperationException("Agents:ChatUrl is not configured.");
+
         var workflow = await _repository.GetByIdWithStepsAsync(args.WorkflowId, cancellationToken)
             ?? throw new InvalidOperationException("Workflow not found.");
-        var instance = await _repository.GetInstanceByIdAsync(args.InstanceId, cancellationToken)
-            ?? throw new InvalidOperationException("Workflow instance not found.");
         var step = workflow.Steps.FirstOrDefault(s =>
             string.Equals(s.ActivityId, args.ActivityId, StringComparison.OrdinalIgnoreCase)
             || string.Equals(s.Id.ToString("D"), args.ActivityId, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException($"FTL step {args.ActivityId} was not found.");
 
+        var quoteJson = await LoadLatestAgentResponseAsync(
+            args.WorkflowId,
+            args.InstanceId,
+            cancellationToken,
+            "QUOTE_AGENT");
+        if (string.IsNullOrWhiteSpace(quoteJson))
+            throw new InvalidOperationException("FTL document did not find a saved quote agent response.");
+
+        using var quoteDoc = JsonDocument.Parse(quoteJson);
+        var quoteResult = FindProperty(quoteDoc.RootElement, "quote_result");
+        if (quoteResult.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+            throw new InvalidOperationException("FTL document quote response did not include quote_result.");
+
+        var template = await LoadPdfTemplateAsync(args.WorkflowId, args.ActivityId, cancellationToken);
+        var responseJson = await PostDocumentAsync(jobId, chatUrl, quoteResult.GetRawText(), template, cancellationToken);
+        var (pdfBytes, fileName) = ReadGeneratedPdf(responseJson);
+        var repositoryId = ParseGuid(args.RepositoryId) ?? ParseGuid(workflow.RepositoryId)
+            ?? throw new InvalidOperationException("Workflow repositoryId is not configured for the document PDF.");
+
+        await using var pdfStream = new MemoryStream(pdfBytes);
+        var archived = await _attachmentArchive.UploadAsync(
+            args.TenantId,
+            args.WorkflowId,
+            args.InstanceId,
+            repositoryId,
+            pdfStream,
+            fileName,
+            "application/pdf",
+            pdfBytes.Length,
+            metadataJson: null,
+            transactionId: null,
+            args.UserId,
+            cancellationToken,
+            allowIncompleteFolderMetadata: true);
+
         var formId = args.FormId ?? workflow.FormId;
         var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
         if (string.IsNullOrWhiteSpace(formId))
             formId = identity?.FormId;
-        var formEntryId = identity?.FormEntryId;
-        var formDataJson = await LoadLatestAgentResponseAsync(
-            args.WorkflowId,
-            args.InstanceId,
-            cancellationToken,
-            "QUALIFY_AGENT");
-
-        var generated = await _pdfGeneration.TryGenerateOnStepCompleteAsync(
-            workflow,
-            instance,
-            step,
-            formId,
-            formEntryId,
-            args.UserId,
-            transactionId: null,
-            cancellationToken,
-            submittedFormDataJson: formDataJson,
-            force: true)
-            ?? throw new InvalidOperationException("Document PDF was not generated.");
-
-        var storedJson = JsonSerializer.Serialize(new
-        {
-            fileName = generated.FileName,
-            attachmentId = generated.AttachmentId,
-            itemId = generated.ItemId
-        });
-        var repositoryId = ParseGuid(args.RepositoryId) ?? ParseGuid(workflow.RepositoryId);
+        var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
 
         await _moveNextSupport.SaveAgentValidationAsync(
             args.WorkflowId,
@@ -231,12 +256,12 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             new MoveToNextStepApAgentPayload(
                 TransactionId: null,
                 InstanceId: args.InstanceId,
-                AiAgentResponseJson: storedJson,
+                AiAgentResponseJson: StripPdf(responseJson),
                 AiAgentHtml: null,
-                RepositoryItemId: generated.ItemId,
+                RepositoryItemId: archived.ItemId,
                 RepositoryId: repositoryId,
                 FormId: formId,
-                FormEntryId: formEntryId),
+                FormEntryId: identity?.FormEntryId),
             legacyTransactionId: null,
             cancellationToken);
 
@@ -248,17 +273,165 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 Comments: "FTL document",
                 ActivityUserId: args.UserId,
                 FormId: formId,
-                FormEntryId: formEntryId),
+                FormEntryId: identity?.FormEntryId,
+                SubmittedFormDataJson: existingFormData),
             cancellationToken);
 
         if (!moved.Success)
             throw new InvalidOperationException(moved.Message ?? "FTL document move-next failed.");
 
         _logger.LogInformation(
-            "FTL document generated {FileName} for instance {InstanceId} and moved to {NextStep}.",
-            generated.FileName,
+            "FTL document archived {FileName} for instance {InstanceId} and moved to {NextStep}.",
+            fileName,
             args.InstanceId,
             moved.NextStepName);
+    }
+
+    private async Task<JsonElement> LoadPdfTemplateAsync(
+        Guid workflowId,
+        string activityId,
+        CancellationToken cancellationToken)
+    {
+        var json = await _workflowJsonStorage.GetWorkflowJsonAsync(workflowId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(json))
+            throw new InvalidOperationException("Workflow JSON was not found for the document template.");
+
+        using var doc = JsonDocument.Parse(json);
+        if (!TryGetPropertyIgnoreCase(doc.RootElement, "blocks", out var blocks)
+            || blocks.ValueKind != JsonValueKind.Array)
+            throw new InvalidOperationException("Workflow JSON has no blocks.");
+
+        foreach (var block in blocks.EnumerateArray())
+        {
+            if (!TryGetPropertyIgnoreCase(block, "id", out var idEl)
+                || idEl.ValueKind != JsonValueKind.String
+                || !string.Equals(idEl.GetString(), activityId, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            if (!TryGetPropertyIgnoreCase(block, "settings", out var settings)
+                || settings.ValueKind != JsonValueKind.Object)
+                break;
+
+            if (TryGetPropertyIgnoreCase(settings, "templateJson", out var templateJson)
+                && templateJson.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+                return CloneTemplate(templateJson);
+
+            if (TryGetPropertyIgnoreCase(settings, "pdfTemplate", out var pdfTemplate)
+                && pdfTemplate.ValueKind is not JsonValueKind.Null and not JsonValueKind.Undefined)
+                return CloneTemplate(pdfTemplate);
+
+            break;
+        }
+
+        throw new InvalidOperationException(
+            $"templateJson is missing on the document node {activityId}.");
+    }
+
+    private static JsonElement CloneTemplate(JsonElement template)
+    {
+        if (template.ValueKind != JsonValueKind.String)
+            return template.Clone();
+
+        var text = template.GetString();
+        if (string.IsNullOrWhiteSpace(text))
+            return template.Clone();
+
+        var trimmed = text.Trim();
+        if ((trimmed.StartsWith('{') && trimmed.EndsWith('}'))
+            || (trimmed.StartsWith('[') && trimmed.EndsWith(']')))
+        {
+            try
+            {
+                using var parsed = JsonDocument.Parse(trimmed);
+                return parsed.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        return template.Clone();
+    }
+
+    private async Task<string> PostDocumentAsync(
+        string jobId,
+        string chatUrl,
+        string quoteResultJson,
+        JsonElement template,
+        CancellationToken cancellationToken)
+    {
+        var payload = new Dictionary<string, object?>
+        {
+            ["quote_result"] = JsonSerializer.Deserialize<object>(quoteResultJson),
+            ["templateJson"] = JsonSerializer.Deserialize<object>(template.GetRawText())
+        };
+        payload["template_type"] = template.ValueKind == JsonValueKind.String
+            ? template.GetString()
+            : ReadTemplateType(template) ?? "internal_review";
+
+        var body = JsonSerializer.Serialize(new
+        {
+            session_id = jobId,
+            intent = "ftl_quote_estimator",
+            payload
+        });
+        using var content = new StringContent(body, Encoding.UTF8, "application/json");
+        return await PostAsync(chatUrl, content, cancellationToken);
+    }
+
+    private static string? ReadTemplateType(JsonElement template)
+    {
+        if (template.ValueKind != JsonValueKind.Object)
+            return null;
+
+        foreach (var name in new[] { "template_type", "templateType", "type", "name" })
+        {
+            if (!template.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
+                continue;
+            var text = value.GetString();
+            if (!string.IsNullOrWhiteSpace(text))
+                return text.Trim();
+        }
+
+        return null;
+    }
+
+    private static (byte[] Bytes, string FileName) ReadGeneratedPdf(string responseJson)
+    {
+        using var doc = JsonDocument.Parse(responseJson);
+        var pdf = FindProperty(doc.RootElement, "pdf_base64");
+        if (pdf.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(pdf.GetString()))
+            throw new InvalidOperationException("FTL document response did not include pdf_base64.");
+
+        var raw = pdf.GetString()!.Trim();
+        var comma = raw.IndexOf(',');
+        if (raw.StartsWith("data:", StringComparison.OrdinalIgnoreCase) && comma >= 0)
+            raw = raw[(comma + 1)..];
+
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(raw);
+        }
+        catch (FormatException ex)
+        {
+            throw new InvalidOperationException("FTL document pdf_base64 is not valid base64.", ex);
+        }
+
+        var name = FindProperty(doc.RootElement, "pdf_filename");
+        var fileName = name.ValueKind == JsonValueKind.String ? name.GetString() : null;
+        if (string.IsNullOrWhiteSpace(fileName))
+        {
+            var estimate = FindProperty(doc.RootElement, "estimate_number");
+            fileName = estimate.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(estimate.GetString())
+                ? estimate.GetString() + ".pdf"
+                : "quote.pdf";
+        }
+
+        fileName = Path.GetFileName(fileName.Trim());
+        if (!fileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+            fileName += ".pdf";
+        return (bytes, fileName);
     }
 
     private async Task<string> PostQualifierAsync(
@@ -770,8 +943,20 @@ LIMIT 1;
         if (exact is not null)
             return exact;
 
-        if (norm == "projectname")
+        if (norm is "projectname" or "project")
             return roots.FirstOrDefault(c => string.Equals(NormalizeFieldKey(c.Label), "project", StringComparison.Ordinal));
+
+        if (norm is "customername" or "customer")
+            return roots.FirstOrDefault(c => string.Equals(NormalizeFieldKey(c.Label), "companyname", StringComparison.Ordinal));
+
+        if (norm is "contactname" or "contactperson")
+            return roots.FirstOrDefault(c => string.Equals(NormalizeFieldKey(c.Label), "contact", StringComparison.Ordinal));
+
+        if (norm is "contactphone" or "phone" or "phonenumber")
+            return roots.FirstOrDefault(c => string.Equals(NormalizeFieldKey(c.Label), "phonenumber", StringComparison.Ordinal));
+
+        if (norm is "estimatenumber" or "estimate" or "ordernumber")
+            return roots.FirstOrDefault(c => string.Equals(NormalizeFieldKey(c.Label), "ordernumber", StringComparison.Ordinal));
 
         if (norm is "matcheditems" or "matcheditem")
         {
@@ -824,18 +1009,25 @@ LIMIT 1;
             {
                 writer.WriteStartArray();
                 var wroteRow = false;
+                var rowNumber = 0;
                 foreach (var row in doc.RootElement.EnumerateArray())
                 {
                     if (row.ValueKind != JsonValueKind.Object)
                         continue;
 
+                    rowNumber++;
                     var cells = new List<(string Key, string Value)>();
                     for (var i = 0; i < children.Count; i++)
                     {
                         var child = children[i];
+                        var role = i < roles.Length ? roles[i] : null;
                         var cell = ReadChildCell(row, child, lineItemTable);
-                        if (string.IsNullOrWhiteSpace(cell) && i < roles.Length)
-                            cell = ReadCellByRole(row, roles[i]);
+                        if (string.IsNullOrWhiteSpace(cell) && role is not null)
+                            cell = ReadCellByRole(row, role) ?? ReadLineItemAlias(row, role);
+                        if (string.IsNullOrWhiteSpace(cell) && lineItemTable && role == "#")
+                            cell = rowNumber.ToString();
+                        if (string.IsNullOrWhiteSpace(cell) && lineItemTable && role == "Subtotal")
+                            cell = TryLineSubtotal(row);
                         var cellKey = useJsonId ? child.JsonId : child.Label;
                         cells.Add((cellKey, cell ?? string.Empty));
                     }
@@ -880,6 +1072,188 @@ LIMIT 1;
         if (key is "lineitem" or "lineitems")
             return ["#", "Product", "Qty", "Price", "Subtotal"];
         return [];
+    }
+
+    private async Task<string?> LoadExistingFormDataAsync(
+        Guid workflowId,
+        Guid instanceId,
+        CancellationToken cancellationToken)
+    {
+        var suffix = workflowId.ToString("N")[..8];
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return null;
+
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+        foreach (var prefix in new[] { "inbox", "sent", "completed" })
+        {
+            var sql = $"""
+                SELECT form_data
+                FROM workflow.{prefix}_{suffix}
+                WHERE workflow_instance_id::text = @InstanceId
+                  AND form_data IS NOT NULL
+                  AND BTRIM(form_data) <> ''
+                ORDER BY id DESC
+                LIMIT 1
+                """;
+            try
+            {
+                await using var cmd = new NpgsqlCommand(sql, connection);
+                cmd.Parameters.AddWithValue("@InstanceId", instanceId.ToString("D"));
+                var value = await cmd.ExecuteScalarAsync(cancellationToken);
+                if (value is string text && !string.IsNullOrWhiteSpace(text))
+                    return text;
+            }
+            catch (PostgresException)
+            {
+            }
+        }
+
+        return null;
+    }
+
+    private static Dictionary<string, string> MergeQuoteFormData(
+        string? existingJson,
+        IReadOnlyDictionary<string, string> incoming)
+    {
+        var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (!string.IsNullOrWhiteSpace(existingJson))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(existingJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                    {
+                        merged[prop.Name] = prop.Value.ValueKind == JsonValueKind.String
+                            ? prop.Value.GetString() ?? string.Empty
+                            : prop.Value.GetRawText();
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        foreach (var (key, value) in incoming)
+        {
+            if (merged.TryGetValue(key, out var current) && !IsEmptyFormValue(current))
+                continue;
+
+            merged[key] = value;
+        }
+
+        return merged;
+    }
+
+    private static HashSet<string> NonEmptyFormKeys(string? existingJson)
+    {
+        var keys = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        if (string.IsNullOrWhiteSpace(existingJson))
+            return keys;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(existingJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return keys;
+
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                var raw = prop.Value.ValueKind == JsonValueKind.String
+                    ? prop.Value.GetString()
+                    : prop.Value.GetRawText();
+                if (!IsEmptyFormValue(raw))
+                    keys.Add(prop.Name);
+            }
+        }
+        catch (JsonException)
+        {
+        }
+
+        return keys;
+    }
+
+    private static Dictionary<string, string> KeepAddedFields(
+        IReadOnlyDictionary<string, string> tableFields,
+        IReadOnlyDictionary<string, string> formDataFields,
+        IReadOnlySet<string> protectedIds)
+    {
+        var protectedValues = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var (jsonId, value) in formDataFields)
+        {
+            if (protectedIds.Contains(jsonId) && !IsEmptyFormValue(value))
+                protectedValues.Add(value);
+        }
+
+        return tableFields
+            .Where(pair => !protectedValues.Contains(pair.Value))
+            .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool IsEmptyFormValue(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return true;
+        var trimmed = value.Trim();
+        return trimmed is "[]" or "{}" or "null";
+    }
+
+    private static string? ReadLineItemAlias(JsonElement row, string role)
+    {
+        if (!LineItemCellAliases.TryGetValue(role, out var aliases))
+            return null;
+
+        foreach (var prop in row.EnumerateObject())
+        {
+            var propKey = NormalizeFieldKey(prop.Name);
+            foreach (var alias in aliases)
+            {
+                if (!string.Equals(NormalizeFieldKey(alias), propKey, StringComparison.Ordinal)
+                    && !string.Equals(alias, prop.Name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                return prop.Value.ValueKind switch
+                {
+                    JsonValueKind.String => prop.Value.GetString(),
+                    JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => prop.Value.GetRawText(),
+                    _ => null
+                };
+            }
+        }
+
+        return null;
+    }
+
+    private static string? TryLineSubtotal(JsonElement row)
+    {
+        if (!TryReadDecimal(row, ["qty", "quantity"], out var qty)
+            || !TryReadDecimal(row, ["unit_price", "unitprice", "price", "rate"], out var price))
+            return null;
+
+        return (qty * price).ToString(System.Globalization.CultureInfo.InvariantCulture);
+    }
+
+    private static bool TryReadDecimal(JsonElement row, string[] names, out decimal value)
+    {
+        foreach (var prop in row.EnumerateObject())
+        {
+            var propKey = NormalizeFieldKey(prop.Name);
+            if (!names.Any(name => string.Equals(NormalizeFieldKey(name), propKey, StringComparison.Ordinal)))
+                continue;
+
+            if (prop.Value.ValueKind == JsonValueKind.Number && prop.Value.TryGetDecimal(out value))
+                return true;
+            if (prop.Value.ValueKind == JsonValueKind.String
+                && decimal.TryParse(prop.Value.GetString(), System.Globalization.NumberStyles.Number, System.Globalization.CultureInfo.InvariantCulture, out value))
+                return true;
+        }
+
+        value = 0;
+        return false;
     }
 
     private static string? ReadCellByRole(JsonElement row, string role)
