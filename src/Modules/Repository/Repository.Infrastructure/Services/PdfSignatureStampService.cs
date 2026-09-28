@@ -86,12 +86,18 @@ internal static class PdfSignatureStampService
         double width,
         double height)
     {
-        var mediaW = page.Width.Point;
-        var mediaH = page.Height.Point;
+        var media = page.MediaBox;
+        var crop = page.CropBox;
+        var mediaW = media.Width;
+        var mediaH = media.Height;
+        var cropW = crop.Width > 1 ? crop.Width : mediaW;
+        var cropH = crop.Height > 1 ? crop.Height : mediaH;
         var rotate = NormalizeRotate(page.Rotate);
 
-        // FE / pdf.js coordinates are for the upright displayed page.
-        var (dispW, dispH) = DisplaySize(mediaW, mediaH, rotate);
+        // Visible page is the crop box. pdf.js places the signature on that box, top-left, y down.
+        var (dispW, dispH) = DisplaySize(cropW, cropH, rotate);
+        var offsetX = crop.X1 - media.X1;
+        var offsetY = media.Y2 - crop.Y2;
 
         if (width > dispW) width = dispW;
         if (height > dispH) height = dispH;
@@ -102,13 +108,13 @@ internal static class PdfSignatureStampService
 
         if (rotate == 0)
         {
-            gfx.DrawImage(image, x, y, width, height);
+            gfx.DrawImage(image, offsetX + x, offsetY + y, width, height);
             return;
         }
 
-        // Map display-space center → MediaBox (PdfSharp top-left), then counter-rotate
-        // so after the viewer applies page.Rotate the signature reads upright.
-        var (cx, cy) = DisplayPointToMedia(x + width / 2.0, y + height / 2.0, mediaW, mediaH, rotate);
+        var (cx, cy) = DisplayPointToMedia(x + width / 2.0, y + height / 2.0, cropW, cropH, rotate);
+        cx += crop.X1 - media.X1;
+        cy += offsetY;
 
         gfx.Save();
         gfx.TranslateTransform(cx, cy);

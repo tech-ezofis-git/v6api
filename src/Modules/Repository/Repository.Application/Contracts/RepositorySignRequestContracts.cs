@@ -81,7 +81,9 @@ public sealed record SignRequestInvitePreviewDto(
     string? RequiredSocialProvider,
     IReadOnlyList<string> AllowedAuthMethods,
     string? LoginType,
-    string? Message);
+    string? Message,
+    /// <summary>Share-sign opens with email OTP. Login is not required.</summary>
+    bool RequiresOtp = true);
 
 public sealed record SubmitSignRequestDto(
     int PageNumber,
@@ -91,6 +93,15 @@ public sealed record SubmitSignRequestDto(
     double Height,
     string SignatureImageBase64,
     DateTime? SignedAtClientUtc = null);
+
+public sealed record SignInviteOtpSessionDto(
+    string AccessToken,
+    string Email,
+    DateTime ExpiresAtUtc);
+
+public sealed record RequestSignInviteOtpDto(string Email);
+
+public sealed record VerifySignInviteOtpDto(string Email, string Otp);
 
 public sealed record DeclineSignRequestDto(string? Reason = null);
 
@@ -146,6 +157,19 @@ public interface IRepositorySignRequestService
     Task<SignRequestInvitePreviewDto?> GetInvitePreviewAsync(
         string inviteToken,
         CancellationToken cancellationToken = default);
+
+    /// <summary>Send an OTP only when <paramref name="email"/> is the invited signer.</summary>
+    Task RequestInviteOtpAsync(string inviteToken, string email, CancellationToken cancellationToken = default);
+
+    /// <summary>Verify the OTP and return a short-lived token for opening and signing the file.</summary>
+    Task<SignInviteOtpSessionDto> VerifyInviteOtpAsync(
+        string inviteToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Email bound to a verified OTP access token for this invite. Null when missing or expired.</summary>
+    string? ResolveOtpAccessEmail(string inviteToken, string? accessToken);
 
     Task<RepositoryItemFileContent?> OpenInviteFileAsync(
         string inviteToken,

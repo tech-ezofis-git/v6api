@@ -399,6 +399,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 AgentValidationWorkflowId: agent.WorkflowId ?? workflowId.ToString("D"),
                 AgentResponse: agent.AgentResponse,
                 AgentHtml: agent.AgentHtml ?? string.Empty,
+                QualifyAgentResponse: agent.QualifyAgentResponse,
+                QuoteAgentResponse: agent.QuoteAgentResponse,
                 Action: 1));
         }
 
@@ -1082,7 +1084,12 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
     private sealed record RepoIds(Guid? RepositoryId, Guid? ItemId);
 
-    private sealed record AgentValidationResult(string? WorkflowId, string? AgentResponse, string? AgentHtml);
+    private sealed record AgentValidationResult(
+        string? WorkflowId,
+        string? AgentResponse,
+        string? AgentHtml,
+        string? QualifyAgentResponse = null,
+        string? QuoteAgentResponse = null);
 
     private static TicketSearchRow ReadSearchRow(NpgsqlDataReader reader) =>
         new(
@@ -1324,22 +1331,49 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         try
         {
             var sql = $"""
-                SELECT workflow_id, agent_response, agent_html_response
+                SELECT type, workflow_id, agent_response, agent_html_response
                 FROM {agentDataValidationTable}
                 WHERE is_deleted = false
                   AND process_id = @ProcessId
                 ORDER BY created_at DESC, id DESC
-                LIMIT 1;
+                LIMIT 20;
                 """;
             await using var cmd = new NpgsqlCommand(sql, connection);
             cmd.Parameters.AddWithValue("@ProcessId", workflowInstanceId);
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-            if (await reader.ReadAsync(cancellationToken))
+            string? workflowId = null;
+            string? agentResponse = null;
+            string? agentHtml = null;
+            string? qualifyResponse = null;
+            string? quoteResponse = null;
+            var first = true;
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                var type = reader.IsDBNull(0) ? null : reader.GetString(0);
+                if (first)
+                {
+                    workflowId = reader.IsDBNull(1) ? null : reader.GetGuid(1).ToString("D");
+                    agentResponse = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    agentHtml = reader.IsDBNull(3) ? null : reader.GetString(3);
+                    first = false;
+                }
+
+                if (qualifyResponse is null
+                    && string.Equals(type?.Trim(), "QUALIFY_AGENT", StringComparison.OrdinalIgnoreCase))
+                    qualifyResponse = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (quoteResponse is null
+                    && string.Equals(type?.Trim(), "QUOTE_AGENT", StringComparison.OrdinalIgnoreCase))
+                    quoteResponse = reader.IsDBNull(2) ? null : reader.GetString(2);
+            }
+
+            if (!first)
             {
                 return new AgentValidationResult(
-                    reader.IsDBNull(0) ? null : reader.GetGuid(0).ToString("D"),
-                    reader.IsDBNull(1) ? null : reader.GetString(1),
-                    reader.IsDBNull(2) ? null : reader.GetString(2));
+                    workflowId,
+                    agentResponse,
+                    agentHtml,
+                    qualifyResponse,
+                    quoteResponse);
             }
         }
         catch (PostgresException)

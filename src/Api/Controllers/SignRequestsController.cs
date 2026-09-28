@@ -210,7 +210,7 @@ public sealed class SignRequestsController : ControllerBase
         }
     }
 
-    /// <summary>Anonymous preview for signer invite (DocuSign-style details + auth methods).</summary>
+    /// <summary>Anonymous preview. Share-sign then uses email OTP, not an external login.</summary>
     [HttpGet("/api/sign-requests/invite/{inviteToken}/preview")]
     [AllowAnonymous]
     [ProducesResponseType(typeof(SignRequestInvitePreviewDto), StatusCodes.Status200OK)]
@@ -222,20 +222,65 @@ public sealed class SignRequestsController : ControllerBase
             : Ok(preview);
     }
 
+    /// <summary>Send an OTP only when the email is the address this document was shared with.</summary>
+    [HttpPost("/api/sign-requests/invite/{inviteToken}/otp")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RequestOtp(
+        string inviteToken,
+        [FromBody] RequestSignInviteOtpDto request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _signRequests.RequestInviteOtpAsync(inviteToken, request.Email, cancellationToken);
+            return Ok(new { sent = true });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message, sent = false });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Verify the OTP and return an access token for the document.</summary>
+    [HttpPost("/api/sign-requests/invite/{inviteToken}/otp/verify")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(SignInviteOtpSessionDto), StatusCodes.Status200OK)]
+    public async Task<IActionResult> VerifyOtp(
+        string inviteToken,
+        [FromBody] VerifySignInviteOtpDto request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var session = await _signRequests.VerifyInviteOtpAsync(
+                inviteToken, request.Email, request.Otp, cancellationToken);
+            return Ok(session);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new { error = ex.Message });
+        }
+    }
+
     /// <summary>
     /// Open PDF for invite signer.
-    /// Same as repository file: <c>?disposition=inline</c> (view) or <c>?disposition=attachment</c> (download).
+    /// Logged-in email, or <c>X-Sign-Access-Token</c> from OTP verify.
     /// </summary>
     [HttpGet("/api/sign-requests/invite/{inviteToken}/file")]
+    [AllowAnonymous]
     [ProducesResponseType(StatusCodes.Status200OK)]
     public async Task<IActionResult> OpenFile(
         string inviteToken,
         [FromQuery] string disposition = "inline",
         CancellationToken cancellationToken = default)
     {
-        var email = GetUserEmail();
+        var email = ResolveInviteEmail(inviteToken);
         if (string.IsNullOrWhiteSpace(email))
-            return Unauthorized(new { error = "Logged-in email is required." });
+            return Unauthorized(new { error = "Enter the invited email and verify the OTP before opening this document." });
 
         try
         {
@@ -256,15 +301,16 @@ public sealed class SignRequestsController : ControllerBase
     }
 
     [HttpPost("/api/sign-requests/invite/{inviteToken}/sign")]
+    [AllowAnonymous]
     [ProducesResponseType(typeof(SignRequestDto), StatusCodes.Status200OK)]
     public async Task<IActionResult> Sign(
         string inviteToken,
         [FromBody] SubmitSignRequestDto request,
         CancellationToken cancellationToken)
     {
-        var email = GetUserEmail();
+        var email = ResolveInviteEmail(inviteToken);
         if (string.IsNullOrWhiteSpace(email))
-            return Unauthorized(new { error = "Logged-in email is required." });
+            return Unauthorized(new { error = "Enter the invited email and verify the OTP before signing." });
 
         try
         {
@@ -287,15 +333,16 @@ public sealed class SignRequestsController : ControllerBase
     }
 
     [HttpPost("/api/sign-requests/invite/{inviteToken}/decline")]
+    [AllowAnonymous]
     [ProducesResponseType(typeof(SignRequestDto), StatusCodes.Status200OK)]
     public async Task<IActionResult> Decline(
         string inviteToken,
         [FromBody] DeclineSignRequestDto request,
         CancellationToken cancellationToken)
     {
-        var email = GetUserEmail();
+        var email = ResolveInviteEmail(inviteToken);
         if (string.IsNullOrWhiteSpace(email))
-            return Unauthorized(new { error = "Logged-in email is required." });
+            return Unauthorized(new { error = "Enter the invited email and verify the OTP before declining." });
 
         try
         {
@@ -331,6 +378,16 @@ public sealed class SignRequestsController : ControllerBase
     {
         var raw = User.FindFirstValue(ClaimTypes.NameIdentifier) ?? User.FindFirstValue("sub") ?? User.FindFirstValue("oid");
         return Guid.TryParse(raw, out var id) ? id : null;
+    }
+
+    private string? ResolveInviteEmail(string inviteToken)
+    {
+        var email = GetUserEmail();
+        if (!string.IsNullOrWhiteSpace(email))
+            return email;
+
+        var accessToken = Request.Headers["X-Sign-Access-Token"].FirstOrDefault();
+        return _signRequests.ResolveOtpAccessEmail(inviteToken, accessToken);
     }
 
     private string? GetUserEmail() =>
