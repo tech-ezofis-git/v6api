@@ -410,7 +410,47 @@ LIMIT 1;
         var map = new Dictionary<string, string>(fields, StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(lineItemsJson) && !map.Keys.Any(k => k.Contains("item", StringComparison.OrdinalIgnoreCase)))
             map["line_items"] = lineItemsJson;
-        return MoveToNextStepFormDataComposer.FromParsedFields(map, lineItemsJson);
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            foreach (var (key, value) in map)
+            {
+                writer.WritePropertyName(key);
+                WriteFormDataValue(writer, value);
+            }
+
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private static void WriteFormDataValue(Utf8JsonWriter writer, string? value)
+    {
+        if (string.IsNullOrEmpty(value))
+        {
+            writer.WriteStringValue(string.Empty);
+            return;
+        }
+
+        var trimmed = value.Trim();
+        if ((trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+            || (trimmed.StartsWith('{') && trimmed.EndsWith('}')))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                doc.RootElement.WriteTo(writer);
+                return;
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        writer.WriteStringValue(value);
     }
 
     private static string? ExtractLineItems(string json)
@@ -504,6 +544,16 @@ LIMIT 1;
         if (lineItemTable is not null && !string.IsNullOrWhiteSpace(lineItemsJson))
             AddMappedControl(lineItemTable, lineItemsJson, controls, tableFields, formDataFields, tableColumns);
 
+        foreach (var root in roots)
+        {
+            if (formDataFields.ContainsKey(root.JsonId))
+                continue;
+
+            formDataFields[root.JsonId] = root.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
+                ? "[]"
+                : string.Empty;
+        }
+
         return new FtlMappedForm(tableFields, formDataFields, tableColumns);
     }
 
@@ -523,8 +573,7 @@ LIMIT 1;
             if (string.IsNullOrWhiteSpace(tableJson))
                 return;
 
-            if (TryResolveTableColumn(control, out var column))
-                tableColumns.Add(new FtlTableColumn(column, tableJson));
+            tableColumns.Add(new FtlTableColumn(control.ColumnName, control.Label, control.JsonId, tableJson));
             formDataFields[control.JsonId] = tableJson;
             return;
         }
@@ -535,17 +584,6 @@ LIMIT 1;
 
         tableFields[control.Label] = text;
         formDataFields[control.JsonId] = text;
-    }
-
-    private static bool TryResolveTableColumn(FtlFormControl control, out string column)
-    {
-        if (!string.IsNullOrWhiteSpace(control.ColumnName))
-        {
-            column = control.ColumnName.Trim();
-            return true;
-        }
-
-        return EzfbColumnNaming.TryToColumnNameFromLabel(control.Label, out column);
     }
 
     private async Task WriteFormTableColumnsAsync(
@@ -562,12 +600,29 @@ LIMIT 1;
             return;
 
         var suffix = FormIdNaming.GetEzfbTableSuffix(formId);
-        var table = $"dbo.\"ezfb_{suffix}_items\"";
+        var tableName = $"ezfb_{suffix}_items";
+        var table = $"dbo.\"{tableName}\"";
         await using var connection = new NpgsqlConnection(tenantCs);
         await connection.OpenAsync(cancellationToken);
+        var existing = await LoadEzfbColumnsAsync(connection, tableName, cancellationToken);
         foreach (var column in columns)
         {
-            var escaped = column.Column.Replace("\"", "\"\"", StringComparison.Ordinal);
+            if (!EzfbColumnNaming.TryResolveEzfbColumn(
+                    column.ColumnName,
+                    column.Label,
+                    column.JsonId,
+                    existing,
+                    out var physical,
+                    out _))
+            {
+                if (!string.IsNullOrWhiteSpace(column.ColumnName))
+                    physical = column.ColumnName.Trim();
+                else if (!EzfbColumnNaming.TryToColumnNameFromLabel(column.Label, out physical)
+                    && !EzfbColumnNaming.TryToColumnName(column.JsonId, out physical))
+                    continue;
+            }
+
+            var escaped = physical.Replace("\"", "\"\"", StringComparison.Ordinal);
             await using (var alter = new NpgsqlCommand(
                 $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS \"{escaped}\" text NULL;",
                 connection))
@@ -579,7 +634,27 @@ LIMIT 1;
             update.Parameters.AddWithValue("@Value", column.Json);
             update.Parameters.AddWithValue("@ItemId", formEntryId);
             await update.ExecuteNonQueryAsync(cancellationToken);
+            existing.Add(physical);
         }
+    }
+
+    private static async Task<HashSet<string>> LoadEzfbColumnsAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'dbo' AND table_name = @TableName
+            """;
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TableName", tableName);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            columns.Add(reader.GetString(0));
+        return columns;
     }
 
     private async Task<List<FtlFormControl>> LoadFtlFormControlsAsync(
@@ -600,6 +675,7 @@ LIMIT 1;
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId AND "isDeleted" = false
               AND "jsonId" IS NOT NULL AND BTRIM("jsonId") <> ''
+            ORDER BY "parentId", id
             """;
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", formId);
@@ -647,14 +723,28 @@ LIMIT 1;
         return labels;
     }
 
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        foreach (var prop in element.EnumerateObject())
+        {
+            if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            value = prop.Value;
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
+
     private static void CollectFieldLabels(JsonElement element, Dictionary<string, string> labels)
     {
         switch (element.ValueKind)
         {
             case JsonValueKind.Object:
-                if (element.TryGetProperty("id", out var idEl)
+                if (TryGetPropertyIgnoreCase(element, "id", out var idEl)
                     && idEl.ValueKind == JsonValueKind.String
-                    && element.TryGetProperty("label", out var labelEl)
+                    && TryGetPropertyIgnoreCase(element, "label", out var labelEl)
                     && labelEl.ValueKind == JsonValueKind.String)
                 {
                     var id = idEl.GetString();
@@ -687,7 +777,7 @@ LIMIT 1;
         {
             return roots.FirstOrDefault(c =>
                 c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
-                && NormalizeFieldKey(c.Label).StartsWith("matcheditem", StringComparison.Ordinal));
+                && NormalizeFieldKey(c.Label).StartsWith("matchedit", StringComparison.Ordinal));
         }
 
         if (norm is "lineitem" or "lineitems")
@@ -727,7 +817,8 @@ LIMIT 1;
             if (doc.RootElement.ValueKind != JsonValueKind.Array || doc.RootElement.GetArrayLength() == 0)
                 return null;
 
-            var children = controls.Where(c => c.ParentId == table.Id).ToList();
+            var children = controls.Where(c => c.ParentId == table.Id).OrderBy(c => c.Id).ToList();
+            var roles = RolesForTable(table);
             using var stream = new MemoryStream();
             using (var writer = new Utf8JsonWriter(stream))
             {
@@ -739,14 +830,18 @@ LIMIT 1;
                         continue;
 
                     var cells = new List<(string Key, string Value)>();
-                    foreach (var child in children)
+                    for (var i = 0; i < children.Count; i++)
                     {
+                        var child = children[i];
                         var cell = ReadChildCell(row, child, lineItemTable);
-                        if (string.IsNullOrWhiteSpace(cell))
-                            continue;
+                        if (string.IsNullOrWhiteSpace(cell) && i < roles.Length)
+                            cell = ReadCellByRole(row, roles[i]);
                         var cellKey = useJsonId ? child.JsonId : child.Label;
-                        cells.Add((cellKey, cell));
+                        cells.Add((cellKey, cell ?? string.Empty));
                     }
+
+                    if (cells.All(c => string.IsNullOrWhiteSpace(c.Value)))
+                        continue;
 
                     if (cells.Count == 0)
                         continue;
@@ -773,6 +868,55 @@ LIMIT 1;
         {
             return null;
         }
+    }
+
+    private static string[] RolesForTable(FtlFormControl table)
+    {
+        var key = NormalizeFieldKey(table.Label);
+        if (key.StartsWith("matchedit", StringComparison.Ordinal))
+            return ["Item", "Category", "Match", "Catalog Ref", "Note"];
+        if (key is "excludeditems" or "excludeditem")
+            return ["Item", "Reason"];
+        if (key is "lineitem" or "lineitems")
+            return ["#", "Product", "Qty", "Price", "Subtotal"];
+        return [];
+    }
+
+    private static string? ReadCellByRole(JsonElement row, string role)
+    {
+        foreach (var prop in row.EnumerateObject())
+        {
+            if (!RoleMatches(prop.Name, role))
+                continue;
+
+            return prop.Value.ValueKind switch
+            {
+                JsonValueKind.String => prop.Value.GetString(),
+                JsonValueKind.Number or JsonValueKind.True or JsonValueKind.False => prop.Value.GetRawText(),
+                _ => null
+            };
+        }
+
+        return null;
+    }
+
+    private static bool RoleMatches(string propName, string role)
+    {
+        if (string.Equals(propName.Trim(), role.Trim(), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var propKey = NormalizeFieldKey(propName);
+        var roleKey = NormalizeFieldKey(role);
+        if (roleKey.Length > 0 && string.Equals(propKey, roleKey, StringComparison.Ordinal))
+            return true;
+
+        return roleKey switch
+        {
+            "catalogref" => propKey is "catalogreference" or "catalog",
+            "note" => propKey is "notes" or "comment",
+            "match" => propKey is "matchtype",
+            _ => false
+        };
     }
 
     private static readonly Dictionary<string, string[]> LineItemCellAliases = new(StringComparer.OrdinalIgnoreCase)
@@ -864,7 +1008,7 @@ LIMIT 1;
 
     private sealed record FtlFormControl(int Id, int ParentId, string JsonId, string Label, string Type, string? ColumnName);
 
-    private sealed record FtlTableColumn(string Column, string Json);
+    private sealed record FtlTableColumn(string? ColumnName, string Label, string JsonId, string Json);
 
     private sealed record FtlMappedForm(
         Dictionary<string, string> TableFields,
