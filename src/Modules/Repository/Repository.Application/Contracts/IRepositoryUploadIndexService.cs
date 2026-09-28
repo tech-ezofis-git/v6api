@@ -70,6 +70,14 @@ public interface IRepositoryUploadIndexService
         Guid? userId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Update stage field columns only. Does not archive or change stage status.</summary>
+    Task<UploadIndexStageFieldsResult?> SaveStageFieldsAsync(
+        Guid stageId,
+        Guid tenantId,
+        UploadIndexStageFieldsRequest request,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
+
     Task<UploadIndexListResult> ListIndexAsync(
         Guid tenantId,
         UploadIndexListRequest request,

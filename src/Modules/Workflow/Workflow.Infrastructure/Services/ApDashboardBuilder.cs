@@ -102,6 +102,7 @@ internal static class ApDashboardBuilder
       ApDashboardPeriod.LastMonth => "last month",
       ApDashboardPeriod.ThisQuarter => "quarter",
       ApDashboardPeriod.ThisYear => "year",
+      ApDashboardPeriod.All => "all time",
       _ => periodLabel
     };
 
@@ -685,6 +686,7 @@ internal static class ApDashboardBuilder
       ApDashboardPeriod.LastMonth => start.ToString("MMMM yyyy", CultureInfo.InvariantCulture),
       ApDashboardPeriod.ThisQuarter => $"Q{((start.Month - 1) / 3) + 1} {start.Year}",
       ApDashboardPeriod.ThisYear => start.Year.ToString(CultureInfo.InvariantCulture),
+      ApDashboardPeriod.All => "All time",
       _ => $"{start:yyyy-MM-dd} – {end:yyyy-MM-dd}"
     };
 
@@ -754,6 +756,7 @@ internal static class ApDashboardBuilder
       ApDashboardPeriod.ThisQuarter => "vs last quarter",
       ApDashboardPeriod.ThisYear => "vs last year",
       ApDashboardPeriod.Custom => "vs prior period",
+      ApDashboardPeriod.All => "all time",
       _ => "vs last month"
     };
 

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Mail;
 using Microsoft.EntityFrameworkCore;
+using SaaSApp.Catalog;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
 
@@ -61,7 +62,7 @@ public sealed class LoginEmailOtpService : ILoginEmailOtpService
 
         using var mail = new MailMessage
         {
-            From = new MailAddress(settings.EmailId),
+            From = EzofisMailAddress.From(settings.EmailId, displayName),
             Subject = "Your Ezofis login verification code",
             IsBodyHtml = true,
             Body = body

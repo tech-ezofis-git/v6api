@@ -55,6 +55,7 @@ public static partial class EventLogRouteMapper
     private static readonly HashSet<string> ExcludedRoutes = new(StringComparer.OrdinalIgnoreCase)
     {
         "POST api/reports/ap-dashboard",
+        "POST api/ftl/catalog",
         "POST api/dashboard/schema",
         "POST api/dashboard/data",
         "POST api/billing/credits/update",
@@ -101,6 +102,7 @@ public static partial class EventLogRouteMapper
         "POST api/uploadandindex/uploadforocr",
         "POST api/uploadandindex/load/{}",
         "PUT api/uploadandindex/index/{}",
+        "PUT api/uploadandindex/index/{}/fields",
         "POST api/uploadandindex/index/all",
 
         "POST api/users/{}/configuration",

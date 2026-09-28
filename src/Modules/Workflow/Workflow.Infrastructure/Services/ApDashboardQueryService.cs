@@ -110,14 +110,19 @@ public sealed class ApDashboardQueryService : IApDashboardQueryService
 
     // Build dropdown options from the selected period (before extra filters),
     // so UI still shows available departments/suppliers for the day/month window.
-    var inPeriod = allInvoices
-      .Where(i => InRange(ResolvePeriodDate(i, request.Period), rangeStart, rangeEnd))
-      .ToList();
+    // period "all" keeps every invoice, including rows with no date.
+    var inPeriod = request.Period == ApDashboardPeriod.All
+      ? allInvoices
+      : allInvoices
+        .Where(i => InRange(ResolvePeriodDate(i, request.Period), rangeStart, rangeEnd))
+        .ToList();
     var filterOptions = ApDashboardFilterSupport.BuildFilterOptions(inPeriod);
     var current = ApDashboardFilterSupport.ApplyFilters(inPeriod, request);
-    var previous = ApDashboardFilterSupport.ApplyFilters(
-      allInvoices.Where(i => InRange(ResolvePeriodDate(i, request.Period), prevStart, prevEnd)).ToList(),
-      request);
+    var previous = request.Period == ApDashboardPeriod.All
+      ? current
+      : ApDashboardFilterSupport.ApplyFilters(
+        allInvoices.Where(i => InRange(ResolvePeriodDate(i, request.Period), prevStart, prevEnd)).ToList(),
+        request);
 
     var result = ApDashboardBuilder.Build(
       request,
@@ -489,6 +494,7 @@ LIMIT 1;
     DateTime? agentCreatedAt)
   {
     var supplier = FirstField(fields, "Supplier", "Supplier Name", "Vendor Name", "VendorName", "Vendor");
+    var invoiceNumber = FirstField(fields, "Invoice Number", "Invoice No", "InvoiceNo", "Invoice #", "InvoiceNumber");
     var amount = ParseDecimal(FirstField(fields, "Amount", "Invoice Amount", "InvoiceAmount", "Total Amount", "Total Due", "PO Amount"));
     var currency = FirstField(fields, "Currency") ?? "USD";
     var invoiceDate = ParseDate(FirstField(fields, "DocumentDate", "Invoice Date", "InvoiceDate", "PO Date"));
@@ -521,7 +527,8 @@ LIMIT 1;
       matchedStatus,
       riskLevel,
       agentCreatedAt ?? startedAt,
-      processingDays);
+      processingDays,
+      string.IsNullOrWhiteSpace(invoiceNumber) ? reference : invoiceNumber);
   }
 
   private static string ResolveInvoiceRiskLevel(
@@ -825,6 +832,7 @@ LIMIT 1;
       ApDashboardPeriod.LastMonth => MonthRange(now.AddMonths(-1)),
       ApDashboardPeriod.ThisQuarter => QuarterRange(now),
       ApDashboardPeriod.ThisYear => (new DateTime(now.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc), now),
+      ApDashboardPeriod.All => (DateTime.SpecifyKind(DateTime.MinValue, DateTimeKind.Utc), DateTime.SpecifyKind(DateTime.MaxValue, DateTimeKind.Utc)),
       _ => MonthRange(now)
     };
   }
@@ -844,6 +852,7 @@ LIMIT 1;
       ApDashboardPeriod.ThisYear => (
         new DateTime(currentStart.Year - 1, 1, 1, 0, 0, 0, DateTimeKind.Utc),
         new DateTime(currentStart.Year - 1, 12, 31, 23, 59, 59, DateTimeKind.Utc).AddTicks(9999999)),
+      ApDashboardPeriod.All => (currentStart, currentEnd),
       _ => SameLengthPriorWindow(currentStart, currentEnd)
     };
   }

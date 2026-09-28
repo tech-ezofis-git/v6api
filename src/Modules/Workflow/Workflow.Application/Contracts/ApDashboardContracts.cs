@@ -11,7 +11,7 @@ public sealed record ApDashboardRequest(
   DateTime? ToUtc = null,
   /// <summary>Department / spend category (e.g. MRO, IT Services). Use "all" to clear.</summary>
   string? Department = null,
-  /// <summary>Supplier name search (partial match).</summary>
+  /// <summary>Supplier name search (partial match). Use "all" to clear.</summary>
   string? Supplier = null,
   /// <summary>Approval status: all, approved, partially_approved, rejected, paid, processing, hold, overdue, due_today, pending.</summary>
   string? Status = null,
@@ -21,7 +21,10 @@ public sealed record ApDashboardRequest(
   string? RequestStatus = null,
   /// <summary>PO / invoice amount tier: all, high_value (&gt; $100K), low_value (&lt; $1K).</summary>
   string? PoAmountTier = null,
-  bool IncludeInvoiceDetails = false);
+  bool IncludeInvoiceDetails = false,
+  /// <summary>Invoice number (partial match). Use "all" to clear. Alias: invoiceNumber.</summary>
+  string? InvoiceNo = null,
+  string? InvoiceNumber = null);
 
 public sealed record ApDashboardFilterOptionDto(string Key, string Label);
 
@@ -41,7 +44,8 @@ public sealed record ApDashboardActiveFiltersDto(
   string? Currency,
   string? RequestStatus,
   string? PoAmountTier,
-  Guid? WorkflowId);
+  Guid? WorkflowId,
+  string? InvoiceNo = null);
 
 [JsonConverter(typeof(ApDashboardPeriodJsonConverter))]
 public enum ApDashboardPeriod
@@ -56,7 +60,9 @@ public enum ApDashboardPeriod
   /// <summary>Calendar tomorrow (UTC).</summary>
   Tomorrow,
   /// <summary>Current calendar week Monday–Sunday (UTC).</summary>
-  ThisWeek
+  ThisWeek,
+  /// <summary>No date window. Every invoice is included.</summary>
+  All
 }
 
 /// <summary>Serialize/deserialize AP dashboard period as camelCase strings (thisMonth) without affecting other API enums.</summary>
@@ -230,4 +236,5 @@ public sealed record ApDashboardInvoiceDto(
   /// <summary>Per-invoice risk: low, medium, high.</summary>
   string RiskLevel,
   DateTime? CreatedAtUtc,
-  decimal? ProcessingDays);
+  decimal? ProcessingDays,
+  string? InvoiceNumber = null);

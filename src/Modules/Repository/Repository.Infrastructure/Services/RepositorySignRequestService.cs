@@ -7,6 +7,7 @@ using Npgsql;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using SaaSApp.Catalog;
 using SaaSApp.Catalog.Persistence;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
@@ -209,6 +210,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         {
             await TrySendInitiatorEmailAsync(
                 senderEmail,
+                senderName,
                 $"Sign request created: {fileName}",
                 BuildInitiatorStatusEmail(
                     "Your document was sent for signature",
@@ -460,7 +462,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             <p style="margin:0 0 16px;font-size:28px;font-weight:700;letter-spacing:4px;color:#111;">{WebUtility.HtmlEncode(code)}</p>
             <p style="margin:0;font-size:14px;color:#555;">This code expires in 5 minutes.</p>
             """);
-        await TrySendEmailAsync(normalized, $"{_options.EmailSubjectPrefix}: verification code", body, cancellationToken);
+        await TrySendEmailAsync(normalized, $"{_options.EmailSubjectPrefix}: verification code", body, ctx.InitiatedByName, cancellationToken);
     }
 
     public Task<SignInviteOtpSessionDto> VerifyInviteOtpAsync(
@@ -675,6 +677,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         {
             await TrySendInitiatorEmailAsync(
                 ctx.InitiatedByEmail,
+                ctx.InitiatedByName,
                 $"Signed: {fileLabel}",
                 BuildInitiatorStatusEmail(
                     "A signer completed their signature",
@@ -709,6 +712,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         {
             await TrySendInitiatorEmailAsync(
                 ctx.InitiatedByEmail,
+                ctx.InitiatedByName,
                 $"Your document has been completed: {fileLabel}",
                 BuildCompletedEmailBody(fileLabel, orgName, ctx.InitiatedByName, ctx.InitiatedByEmail),
                 cancellationToken);
@@ -752,6 +756,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             : $"<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">Reason: {WebUtility.HtmlEncode(request.Reason)}</p>";
         await TrySendInitiatorEmailAsync(
             ctx.InitiatedByEmail,
+            ctx.InitiatedByName,
             $"Sign declined: {fileLabel}",
             BuildInitiatorStatusEmail(
                 "A signer declined this document",
@@ -1150,7 +1155,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
     {
         var baseUrl = (_options.FrontendBaseUrl ?? "").Trim().TrimEnd('/');
         if (string.IsNullOrEmpty(baseUrl))
-            baseUrl = "https://demoapp.ezofis.com";
+            baseUrl = "https://app.ezofis.com";
 
         var path = string.IsNullOrWhiteSpace(_options.SignRequestPath) ? "/sign-request" : _options.SignRequestPath.Trim();
         if (!path.StartsWith('/'))
@@ -1236,18 +1241,19 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             <p style="margin:0 0 24px;word-break:break-all;color:#777;font-size:12px;">{WebUtility.HtmlEncode(inviteUrl)}</p>
             {BuildSecurityFooter(isInitiator: false)}
             """);
-        await TrySendEmailAsync(recipientEmail, subject, body, cancellationToken);
+        await TrySendEmailAsync(recipientEmail, subject, body, senderName, cancellationToken);
     }
 
     private async Task TrySendInitiatorEmailAsync(
         string recipientEmail,
+        string? senderName,
         string subject,
         string htmlBody,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(recipientEmail) || !recipientEmail.Contains('@'))
             return;
-        await TrySendEmailAsync(recipientEmail, subject, htmlBody, cancellationToken);
+        await TrySendEmailAsync(recipientEmail, subject, htmlBody, senderName, cancellationToken);
     }
 
     private string BuildCompletedEmailBody(
@@ -1344,6 +1350,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         string recipientEmail,
         string subject,
         string htmlBody,
+        string? senderName,
         CancellationToken cancellationToken)
     {
         try
@@ -1367,7 +1374,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
             using var mail = new MailMessage
             {
-                From = new MailAddress(settings.EmailId),
+                From = EzofisMailAddress.From(settings.EmailId, senderName),
                 Subject = subject,
                 IsBodyHtml = true
             };

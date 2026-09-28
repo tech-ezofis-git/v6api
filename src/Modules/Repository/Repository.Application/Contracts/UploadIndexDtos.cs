@@ -80,6 +80,17 @@ public sealed record UploadIndexArchiveQueuedResult(
     string? FileName = null,
     string? FilePath = null);
 
+/// <summary>PUT index/{id}/fields — stage column values only. Does not archive.</summary>
+public sealed record UploadIndexStageFieldsRequest(
+    IReadOnlyList<UploadIndexFieldDto>? Fields,
+    Guid? RepositoryId = null);
+
+public sealed record UploadIndexStageFieldsResult(
+    string Id,
+    string? FileName,
+    string Message,
+    IReadOnlyList<UploadIndexFieldDto> Fields);
+
 public sealed record UploadIndexListRequest(
     int CurrentPage = 1,
     int ItemsPerPage = 50,

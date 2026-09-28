@@ -114,6 +114,17 @@ internal static class ApDashboardFilterSupport
       q = q.Where(i => i.Supplier.Contains(supplier, StringComparison.OrdinalIgnoreCase));
     }
 
+    var invoiceNoFilter = HasFilterValue(request.InvoiceNo)
+      ? request.InvoiceNo
+      : HasFilterValue(request.InvoiceNumber) ? request.InvoiceNumber : null;
+    if (HasFilterValue(invoiceNoFilter))
+    {
+      var invoiceNo = invoiceNoFilter!.Trim();
+      q = q.Where(i =>
+        (i.InvoiceNumber ?? string.Empty).Contains(invoiceNo, StringComparison.OrdinalIgnoreCase)
+        || (i.ReferenceNumber ?? string.Empty).Contains(invoiceNo, StringComparison.OrdinalIgnoreCase));
+    }
+
     if (HasFilterValue(request.Currency))
     {
       var currency = request.Currency!.Trim();
@@ -190,7 +201,8 @@ internal static class ApDashboardFilterSupport
       NullIfAll(request.Currency),
       NullIfAll(request.RequestStatus),
       NullIfAll(request.PoAmountTier),
-      request.WorkflowId);
+      request.WorkflowId,
+      NullIfAll(HasFilterValue(request.InvoiceNo) ? request.InvoiceNo : request.InvoiceNumber));
 
   private static bool MatchesApprovalStatus(ApDashboardInvoiceDto invoice, string normalizedStatus) =>
     string.Equals(invoice.ApprovalStatus, normalizedStatus, StringComparison.OrdinalIgnoreCase)
@@ -201,8 +213,14 @@ internal static class ApDashboardFilterSupport
       left.Contains(t, StringComparison.OrdinalIgnoreCase)
       || right.Contains(t, StringComparison.OrdinalIgnoreCase));
 
-  private static bool HasFilterValue(string? value) =>
-    !string.IsNullOrWhiteSpace(value) && !value.Trim().Equals("all", StringComparison.OrdinalIgnoreCase);
+  private static bool HasFilterValue(string? value)
+  {
+    if (string.IsNullOrWhiteSpace(value))
+      return false;
+
+    var key = NormalizeKey(value);
+    return key is not ("all" or "all_statuses" or "all_request_statuses" or "all_amounts");
+  }
 
   private static string? NullIfAll(string? value) =>
     HasFilterValue(value) ? value!.Trim() : null;
