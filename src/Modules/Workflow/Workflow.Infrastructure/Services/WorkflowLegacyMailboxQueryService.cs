@@ -550,6 +550,8 @@ LEFT JOIN LATERAL (
     av.agent_validation_workflow_id,
     COALESCE(av.agent_response, '') AS agent_response,
     COALESCE(av.agent_html_response, '') AS agent_html,
+    av.qualify_agent_response,
+    av.quote_agent_response,
     COALESCE(m."action", 1) AS action
 """;
 
@@ -703,7 +705,9 @@ ORDER BY m.transaction_created_at DESC, m.id DESC;";
             AgentValidationWorkflowId: reader.IsDBNull(38) ? null : reader.GetString(38),
             AgentResponse: reader.IsDBNull(39) ? null : reader.GetString(39),
             AgentHtml: reader.IsDBNull(40) ? null : reader.GetString(40),
-            Action: reader.FieldCount > 41 && !reader.IsDBNull(41) ? reader.GetInt32(41) : 1);
+            QualifyAgentResponse: reader.FieldCount > 41 && !reader.IsDBNull(41) ? reader.GetString(41) : null,
+            QuoteAgentResponse: reader.FieldCount > 42 && !reader.IsDBNull(42) ? reader.GetString(42) : null,
+            Action: reader.FieldCount > 43 && !reader.IsDBNull(43) ? reader.GetInt32(43) : 1);
 
     private static async Task<string> BuildAgentValidationApplyAsync(
         NpgsqlConnection connection,
@@ -717,7 +721,9 @@ LEFT JOIN LATERAL (
     SELECT
         NULL::text AS agent_validation_workflow_id,
         NULL::text AS agent_response,
-        NULL::text AS agent_html_response
+        NULL::text AS agent_html_response,
+        NULL::text AS qualify_agent_response,
+        NULL::text AS quote_agent_response
 ) av ON true
 """;
         }
@@ -727,7 +733,25 @@ LEFT JOIN LATERAL (
     SELECT
         a.workflow_id::text AS agent_validation_workflow_id,
         a.agent_response,
-        a.agent_html_response
+        a.agent_html_response,
+        (
+            SELECT q.agent_response
+            FROM workflow.{agentTableName} q
+            WHERE q.is_deleted = false
+              AND q.process_id = {TryCastInstanceId("m.workflow_instance_id")}
+              AND UPPER(TRIM(COALESCE(q.type, ''))) = 'QUALIFY_AGENT'
+            ORDER BY q.created_at DESC, q.id DESC
+            LIMIT 1
+        ) AS qualify_agent_response,
+        (
+            SELECT q.agent_response
+            FROM workflow.{agentTableName} q
+            WHERE q.is_deleted = false
+              AND q.process_id = {TryCastInstanceId("m.workflow_instance_id")}
+              AND UPPER(TRIM(COALESCE(q.type, ''))) = 'QUOTE_AGENT'
+            ORDER BY q.created_at DESC, q.id DESC
+            LIMIT 1
+        ) AS quote_agent_response
     FROM workflow.{agentTableName} a
     WHERE a.is_deleted = false
       AND a.process_id = {TryCastInstanceId("m.workflow_instance_id")}

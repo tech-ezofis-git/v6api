@@ -17,6 +17,8 @@ namespace SaaSApp.Repository.Infrastructure.Services;
 public sealed class RepositorySignRequestService : IRepositorySignRequestService
 {
     private static readonly ConcurrentDictionary<string, byte> SchemaEnsured = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, SignOtpEntry> InviteOtps = new(StringComparer.OrdinalIgnoreCase);
+    private static readonly ConcurrentDictionary<string, SignAccessEntry> InviteAccess = new(StringComparer.OrdinalIgnoreCase);
     private static readonly JsonSerializerOptions JsonOptions = new() { PropertyNamingPolicy = JsonNamingPolicy.CamelCase };
 
     private readonly ITenantConnectionProvider _connectionProvider;
@@ -183,7 +185,9 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
         foreach (var row in signerRows.Where(r => r.Status == SignRequestSignerStatuses.Pending))
         {
-            // Same as file share: isnew=true → FE shows set-password; isnew=false → existing login.
+            if (IsSelfSigner(senderEmail, row.Email))
+                continue;
+
             var isNew = await _guestProvisioning.RequiresPasswordSetupAsync(tenantId, row.Email, cancellationToken);
             var inviteUrl = BuildInviteUrl(row.Token, row.Email, isNew);
             await TrySendSignerInviteEmailAsync(
@@ -201,18 +205,21 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
                 cancellationToken);
         }
 
-        await TrySendInitiatorEmailAsync(
-            senderEmail,
-            $"Sign request created: {fileName}",
-            BuildInitiatorStatusEmail(
-                "Your document was sent for signature",
-                "You sent this document for signature and it is waiting for signers.",
-                fileName,
-                orgName,
-                senderName,
+        if (signerRows.Any(r => !IsSelfSigner(senderEmail, r.Email)))
+        {
+            await TrySendInitiatorEmailAsync(
                 senderEmail,
-                extraHtml: $"<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">Mode: {WebUtility.HtmlEncode(mode)}. Signers: {WebUtility.HtmlEncode(string.Join(", ", signerRows.Select(s => s.Email)))}</p>"),
-            cancellationToken);
+                $"Sign request created: {fileName}",
+                BuildInitiatorStatusEmail(
+                    "Your document was sent for signature",
+                    "You sent this document for signature and it is waiting for signers.",
+                    fileName,
+                    orgName,
+                    senderName,
+                    senderEmail,
+                    extraHtml: $"<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">Mode: {WebUtility.HtmlEncode(mode)}. Signers: {WebUtility.HtmlEncode(string.Join(", ", signerRows.Select(s => s.Email)))}</p>"),
+                cancellationToken);
+        }
 
         return (await GetAsync(tenantId, requestId, cancellationToken))!;
     }
@@ -350,12 +357,13 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             ctx.SignerStatus,
             ctx.RequestStatus,
             ctx.ExpiresAtUtc,
-            RequiresLogin: true,
+            RequiresLogin: false,
             auth.RequiresPasswordSetup,
             auth.RequiredSocialProvider,
             auth.AllowedAuthMethods,
             auth.LoginType,
-            ctx.Message);
+            ctx.Message,
+            RequiresOtp: true);
     }
 
     public async Task<RepositoryItemFileContent?> OpenInviteFileAsync(
@@ -435,6 +443,69 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         if (!string.Equals(ctx.SignerEmail, email.Trim(), StringComparison.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("Email does not match this sign invite.");
     }
+
+    public async Task RequestInviteOtpAsync(string inviteToken, string email, CancellationToken cancellationToken = default)
+    {
+        var ctx = await ResolveInviteAsync(inviteToken, cancellationToken)
+            ?? throw new InvalidOperationException("Sign invite not found or expired.");
+        var normalized = (email ?? "").Trim().ToLowerInvariant();
+        if (!string.Equals(ctx.SignerEmail, normalized, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("OTP is sent only to the email this document was shared with.");
+
+        var code = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+        InviteOtps[OtpKey(inviteToken, normalized)] = new SignOtpEntry(code, normalized, DateTime.UtcNow.AddMinutes(5));
+        var body = WrapBrandedEmail($"""
+            <h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#1a1a1a;">Your signing code</h1>
+            <p style="margin:0 0 16px;font-size:15px;line-height:1.5;color:#333;">Use this code to open the document shared with {WebUtility.HtmlEncode(normalized)}.</p>
+            <p style="margin:0 0 16px;font-size:28px;font-weight:700;letter-spacing:4px;color:#111;">{WebUtility.HtmlEncode(code)}</p>
+            <p style="margin:0;font-size:14px;color:#555;">This code expires in 5 minutes.</p>
+            """);
+        await TrySendEmailAsync(normalized, $"{_options.EmailSubjectPrefix}: verification code", body, cancellationToken);
+    }
+
+    public Task<SignInviteOtpSessionDto> VerifyInviteOtpAsync(
+        string inviteToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = (email ?? "").Trim().ToLowerInvariant();
+        var code = (otp ?? "").Trim();
+        if (!InviteOtps.TryGetValue(OtpKey(inviteToken, normalized), out var entry)
+            || entry.ExpiresUtc < DateTime.UtcNow
+            || !string.Equals(entry.Code, code, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("The verification code is invalid or expired.");
+
+        InviteOtps.TryRemove(OtpKey(inviteToken, normalized), out _);
+        var accessToken = GenerateToken();
+        var expires = DateTime.UtcNow.AddMinutes(30);
+        InviteAccess[accessToken] = new SignAccessEntry(inviteToken.Trim(), normalized, expires);
+        return Task.FromResult(new SignInviteOtpSessionDto(accessToken, normalized, expires));
+    }
+
+    public string? ResolveOtpAccessEmail(string inviteToken, string? accessToken)
+    {
+        if (string.IsNullOrWhiteSpace(accessToken))
+            return null;
+        if (!InviteAccess.TryGetValue(accessToken.Trim(), out var entry))
+            return null;
+        if (entry.ExpiresUtc < DateTime.UtcNow)
+        {
+            InviteAccess.TryRemove(accessToken.Trim(), out _);
+            return null;
+        }
+
+        if (!string.Equals(entry.InviteToken, inviteToken.Trim(), StringComparison.OrdinalIgnoreCase))
+            return null;
+        return entry.Email;
+    }
+
+    private static string OtpKey(string inviteToken, string email) =>
+        inviteToken.Trim() + "|" + email.Trim().ToLowerInvariant();
+
+    private sealed record SignOtpEntry(string Code, string Email, DateTime ExpiresUtc);
+
+    private sealed record SignAccessEntry(string InviteToken, string Email, DateTime ExpiresUtc);
 
     private async Task<RepositoryItemFileContent?> OpenFileCoreAsync(
         InviteContext ctx,
@@ -600,19 +671,22 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
         var orgName = await GetTenantNameAsync(ctx.TenantId, cancellationToken);
         var fileLabel = ctx.FileName ?? "document.pdf";
-        await TrySendInitiatorEmailAsync(
-            ctx.InitiatedByEmail,
-            $"Signed: {fileLabel}",
-            BuildInitiatorStatusEmail(
-                "A signer completed their signature",
-                $"<strong>{WebUtility.HtmlEncode(ctx.SignerEmail)}</strong> signed this document.",
-                fileLabel,
-                orgName,
-                ctx.InitiatedByName,
-                ctx.InitiatedByEmail),
-            cancellationToken);
+        if (!IsSelfSigner(ctx.InitiatedByEmail, ctx.SignerEmail))
+        {
+            await TrySendInitiatorEmailAsync(
+                ctx.InitiatedByEmail,
+                $"Signed: {fileLabel}",
+                BuildInitiatorStatusEmail(
+                    "A signer completed their signature",
+                    $"<strong>{WebUtility.HtmlEncode(ctx.SignerEmail)}</strong> signed this document.",
+                    fileLabel,
+                    orgName,
+                    ctx.InitiatedByName,
+                    ctx.InitiatedByEmail),
+                cancellationToken);
+        }
 
-        if (nextToken != null && nextEmail != null)
+        if (nextToken != null && nextEmail != null && !IsSelfSigner(ctx.InitiatedByEmail, nextEmail))
         {
             var isNew = await _guestProvisioning.RequiresPasswordSetupAsync(ctx.TenantId, nextEmail, cancellationToken);
             var inviteUrl = BuildInviteUrl(nextToken, nextEmail, isNew);
@@ -1064,8 +1138,13 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         _connectionProvider.ConnectionString
         ?? throw new InvalidOperationException("Tenant connection string not resolved.");
 
+    private static bool IsSelfSigner(string? initiatorEmail, string signerEmail) =>
+        !string.IsNullOrWhiteSpace(initiatorEmail)
+        && string.Equals(initiatorEmail.Trim(), signerEmail.Trim(), StringComparison.OrdinalIgnoreCase);
+
     /// <summary>
     /// Same pattern as file share: <c>isnew=true</c> → set password; <c>isnew=false</c> → existing login.
+    /// Share-sign now uses OTP (<c>auth=otp</c>) instead of that login.
     /// </summary>
     private string BuildInviteUrl(string inviteToken, string email, bool isNew)
     {
@@ -1078,7 +1157,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             path = "/" + path;
 
         var isNewQuery = isNew ? "true" : "false";
-        return $"{baseUrl}{path}/{Uri.EscapeDataString(inviteToken)}?email={Uri.EscapeDataString(email)}&isnew={isNewQuery}";
+        return $"{baseUrl}{path}/{Uri.EscapeDataString(inviteToken)}?email={Uri.EscapeDataString(email)}&isnew={isNewQuery}&auth=otp";
     }
 
     private static string GenerateToken()

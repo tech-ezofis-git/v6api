@@ -71,6 +71,12 @@ public sealed record LegacyMailboxRowDto(
     string? AgentValidationWorkflowId = null,
     string? AgentResponse = null,
     string? AgentHtml = null,
+    /// <summary>Latest QUALIFY_AGENT row from agent_data_validation. Separate from formData.</summary>
+    [property: JsonConverter(typeof(RawJsonStringConverter))]
+    string? QualifyAgentResponse = null,
+    /// <summary>Latest QUOTE_AGENT row from agent_data_validation. Separate from formData.</summary>
+    [property: JsonConverter(typeof(RawJsonStringConverter))]
+    string? QuoteAgentResponse = null,
     /// <summary>1 = show verify/approve buttons; 0 = hide. Default 1.</summary>
     int Action = 1,
     /// <summary>
