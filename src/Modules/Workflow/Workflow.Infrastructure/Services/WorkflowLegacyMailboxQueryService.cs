@@ -1,3 +1,5 @@
+using System.Text;
+using System.Text.Json;
 using Npgsql;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
@@ -79,7 +81,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         if (request.SkipTotal)
         {
             var items = await ReadListPageAsync(connection, dataSql, parameters, offset, pageSize, cancellationToken);
-            await EnrichFormDataAsync(items, cancellationToken);
+            await EnrichFormDataAsync(connection, items, cancellationToken);
             await EnrichRepositoryItemAsync(items, cancellationToken);
             return new LegacyMailboxListResult(items, -1, page, pageSize, TableExists: true);
         }
@@ -87,31 +89,134 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var countSql = BuildCountSql(tableFull, whereSql, latestOnlyPerInstance);
         var totalCount = await ExecuteCountAsync(connection, countSql, parameters, cancellationToken);
         var pageItems = await ReadListPageAsync(connection, dataSql, parameters, offset, pageSize, cancellationToken);
-        await EnrichFormDataAsync(pageItems, cancellationToken);
+        await EnrichFormDataAsync(connection, pageItems, cancellationToken);
         await EnrichRepositoryItemAsync(pageItems, cancellationToken);
 
         return new LegacyMailboxListResult(pageItems, totalCount, page, pageSize, TableExists: true);
     }
 
-    private async Task EnrichFormDataAsync(IList<LegacyMailboxRowDto> items, CancellationToken cancellationToken)
+    private async Task EnrichFormDataAsync(
+        NpgsqlConnection connection,
+        IList<LegacyMailboxRowDto> items,
+        CancellationToken cancellationToken)
     {
+        var controlsByForm = new Dictionary<string, List<FormControlSlot>>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < items.Count; i++)
         {
             var row = items[i];
-            if (!string.IsNullOrWhiteSpace(row.FormData))
-                continue;
-            if (string.IsNullOrWhiteSpace(row.FormId) || string.IsNullOrWhiteSpace(row.FormEntryId))
-                continue;
-            if (!Guid.TryParse(row.FormEntryId, out var entryId) || entryId == Guid.Empty)
-                continue;
+            var formData = row.FormData;
+            if (string.IsNullOrWhiteSpace(formData)
+                && !string.IsNullOrWhiteSpace(row.FormId)
+                && Guid.TryParse(row.FormEntryId, out var entryId)
+                && entryId != Guid.Empty)
+            {
+                formData = await _formDataLoader.LoadFormDataJsonAsync(row.FormId, entryId, cancellationToken);
+            }
 
-            var loaded = await _formDataLoader.LoadFormDataJsonAsync(row.FormId, entryId, cancellationToken);
-            if (string.IsNullOrWhiteSpace(loaded))
+            if (string.IsNullOrWhiteSpace(row.FormId))
+            {
+                if (!string.Equals(formData, row.FormData, StringComparison.Ordinal))
+                    items[i] = row with { FormData = formData };
                 continue;
+            }
 
-            items[i] = row with { FormData = loaded };
+            if (!controlsByForm.TryGetValue(row.FormId, out var controls))
+            {
+                controls = await LoadRootFormControlsAsync(connection, row.FormId, cancellationToken);
+                controlsByForm[row.FormId] = controls;
+            }
+
+            formData = IncludeEveryControl(formData, controls);
+            if (!string.Equals(formData, row.FormData, StringComparison.Ordinal))
+                items[i] = row with { FormData = formData };
         }
     }
+
+    private static async Task<List<FormControlSlot>> LoadRootFormControlsAsync(
+        NpgsqlConnection connection,
+        string formId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT "jsonId", type
+            FROM dbo."wFormControl"
+            WHERE "wFormId" = @FormId
+              AND "isDeleted" = false
+              AND COALESCE("parentId", 0) = 0
+              AND "jsonId" IS NOT NULL
+              AND BTRIM("jsonId") <> ''
+            ORDER BY id
+            """;
+        var controls = new List<FormControlSlot>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@FormId", formId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var type = reader.IsDBNull(1) ? string.Empty : reader.GetString(1);
+            controls.Add(new FormControlSlot(
+                reader.GetString(0).Trim(),
+                type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)));
+        }
+
+        return controls;
+    }
+
+    /// <summary>Every root control jsonId is returned. Missing values are "" and missing tables are [].</summary>
+    private static string? IncludeEveryControl(string? formData, IReadOnlyList<FormControlSlot> controls)
+    {
+        if (controls.Count == 0)
+            return formData;
+
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (!string.IsNullOrWhiteSpace(formData))
+            {
+                try
+                {
+                    using var doc = JsonDocument.Parse(formData);
+                    if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    {
+                        foreach (var prop in doc.RootElement.EnumerateObject())
+                        {
+                            if (!written.Add(prop.Name))
+                                continue;
+                            writer.WritePropertyName(prop.Name);
+                            prop.Value.WriteTo(writer);
+                        }
+                    }
+                }
+                catch (JsonException)
+                {
+                }
+            }
+
+            foreach (var control in controls)
+            {
+                if (!written.Add(control.JsonId))
+                    continue;
+                writer.WritePropertyName(control.JsonId);
+                if (control.IsTable)
+                {
+                    writer.WriteStartArray();
+                    writer.WriteEndArray();
+                }
+                else
+                {
+                    writer.WriteStringValue(string.Empty);
+                }
+            }
+
+            writer.WriteEndObject();
+        }
+
+        return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    private sealed record FormControlSlot(string JsonId, bool IsTable);
 
     private async Task EnrichRepositoryItemAsync(IList<LegacyMailboxRowDto> items, CancellationToken cancellationToken)
     {
