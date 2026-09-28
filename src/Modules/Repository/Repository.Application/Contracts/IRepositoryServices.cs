@@ -75,6 +75,17 @@ public interface IRepositoryItemQueryService
         IReadOnlyDictionary<string, string> metadata,
         Guid? userId,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Marks the item row <c>is_deleted = true</c>. The row and stored file are kept.
+    /// Returns false when the item is missing or already deleted.
+    /// </summary>
+    Task<bool> SoftDeleteItemAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        Guid? userId,
+        CancellationToken cancellationToken = default);
     Task<RepositoryItemFileContent?> OpenItemFileAsync(Guid repositoryId, Guid tenantId, Guid itemId, CancellationToken cancellationToken = default);
 }
 

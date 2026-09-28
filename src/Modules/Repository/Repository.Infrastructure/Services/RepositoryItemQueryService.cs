@@ -437,6 +437,42 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
         return new UpdateRepositoryItemMetadataResult(itemId, updatedFieldCount);
     }
 
+    public async Task<bool> SoftDeleteItemAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+            ?? throw new InvalidOperationException("Repository not found.");
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var table = RepositorySqlHelper.QualifiedItemsTable(repo.ItemsTableName);
+        var sql = $"""
+            UPDATE {table}
+            SET is_deleted = true,
+                modified_at_utc = now(),
+                modified_by = COALESCE(@ModifiedBy, modified_by)
+            WHERE id = @ItemId
+              AND tenant_id = @TenantId
+              AND repository_id = @RepositoryId
+              AND is_deleted = false;
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@ModifiedBy", (object?)userId ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@ItemId", itemId);
+        cmd.Parameters.AddWithValue("@TenantId", tenantId);
+        cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
+        return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
+    }
+
     public async Task<RepositoryItemFileContent?> OpenItemFileAsync(
         Guid repositoryId,
         Guid tenantId,

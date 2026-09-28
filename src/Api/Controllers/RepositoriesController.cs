@@ -984,6 +984,38 @@ public sealed class RepositoriesController : ControllerBase
         return CreatedAtAction(nameof(GetItem), new { id, itemId }, new { itemId });
     }
 
+    /// <summary>
+    /// Soft-delete a repository file by item id (<c>is_deleted = true</c>).
+    /// The row and blob stay so timeline, shares, and sign history still resolve. Lists omit the item.
+    /// </summary>
+    [HttpDelete("/api/repositories/{id:guid}/items/{itemId:guid}")]
+    public async Task<IActionResult> DeleteItem(
+        Guid id,
+        Guid itemId,
+        CancellationToken cancellationToken = default)
+    {
+        var tenantId = RequireTenantId();
+        try
+        {
+            var item = await _items.GetItemAsync(id, tenantId, itemId, cancellationToken);
+            if (item == null)
+                return NotFound();
+
+            if (await EnsureItemAccessAsync(id, tenantId, RepositorySecurityFieldMap.FromDetail(item), RepositorySecurityPermissions.Delete, cancellationToken) is { } denied)
+                return denied;
+
+            var deleted = await _items.SoftDeleteItemAsync(id, tenantId, itemId, GetUserId(), cancellationToken);
+            if (!deleted)
+                return NotFound();
+
+            return Ok(new { itemId, isDeleted = true });
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+    }
+
     /// <summary>Update metadata on an existing item (after upload). Body = JSON object, same keys as upload metadata.</summary>
     [HttpPatch("/api/repositories/{id:guid}/items/{itemId:guid}/metadata")]
     public async Task<IActionResult> UpdateItemMetadata(
