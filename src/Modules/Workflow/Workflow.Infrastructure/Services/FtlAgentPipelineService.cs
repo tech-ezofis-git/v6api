@@ -103,8 +103,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             .FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
         var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
         var fields = ExtractFormFields(storedJson);
-        fields = await RemapFieldsToJsonIdsAsync(formId, fields, cancellationToken);
         var lineItemsJson = ExtractLineItems(storedJson);
+        (fields, lineItemsJson) = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(formId)
             && formEntryId is { } entryId && entryId != Guid.Empty
@@ -451,21 +451,22 @@ LIMIT 1;
         return "QUALIFY";
     }
 
-    private async Task<Dictionary<string, string>> RemapFieldsToJsonIdsAsync(
+    private async Task<(Dictionary<string, string> Fields, string? LineItemsJson)> RemapFieldsToJsonIdsAsync(
         string? formId,
         Dictionary<string, string> fields,
+        string? lineItemsJson,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(formId) || fields.Count == 0)
-            return fields;
+        if (string.IsNullOrWhiteSpace(formId) || (fields.Count == 0 && string.IsNullOrWhiteSpace(lineItemsJson)))
+            return (fields, lineItemsJson);
 
         var tenantCs = _connectionProvider.ConnectionString;
         if (string.IsNullOrWhiteSpace(tenantCs))
-            return fields;
+            return (fields, lineItemsJson);
 
         var controls = await LoadFtlFormControlsAsync(formId, tenantCs, cancellationToken);
         if (controls.Count == 0)
-            return fields;
+            return (fields, lineItemsJson);
 
         var roots = controls.Where(c => c.ParentId == 0).ToList();
         var mapped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
@@ -491,7 +492,20 @@ LIMIT 1;
             mapped[control.JsonId] = formatted;
         }
 
-        return mapped;
+        var lineItemTable = roots.FirstOrDefault(c =>
+            c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
+            && NormalizeFieldKey(c.Label) is "lineitem" or "lineitems");
+        if (lineItemTable is not null && !string.IsNullOrWhiteSpace(lineItemsJson))
+        {
+            var formatted = FormatQualifierTable(lineItemsJson, lineItemTable, controls, lineItemTable: true);
+            if (!string.IsNullOrWhiteSpace(formatted))
+            {
+                mapped[lineItemTable.JsonId] = formatted;
+                lineItemsJson = formatted;
+            }
+        }
+
+        return (mapped, lineItemsJson);
     }
 
     private async Task<List<FtlFormControl>> LoadFtlFormControlsAsync(
@@ -597,6 +611,13 @@ LIMIT 1;
                 && NormalizeFieldKey(c.Label).StartsWith("matcheditem", StringComparison.Ordinal));
         }
 
+        if (norm is "lineitem" or "lineitems")
+        {
+            return roots.FirstOrDefault(c =>
+                c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
+                && NormalizeFieldKey(c.Label) is "lineitem" or "lineitems");
+        }
+
         return null;
     }
 
@@ -606,7 +627,10 @@ LIMIT 1;
         IReadOnlyList<FtlFormControl> controls)
     {
         if (control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase))
-            return FormatQualifierTable(raw, control, controls);
+        {
+            var lineItemTable = NormalizeFieldKey(control.Label) is "lineitem" or "lineitems";
+            return FormatQualifierTable(raw, control, controls, lineItemTable);
+        }
 
         return TryJoinPrimitiveArray(raw, out var joined) ? joined : raw;
     }
@@ -614,7 +638,8 @@ LIMIT 1;
     private static string? FormatQualifierTable(
         string raw,
         FtlFormControl table,
-        IReadOnlyList<FtlFormControl> controls)
+        IReadOnlyList<FtlFormControl> controls,
+        bool lineItemTable = false)
     {
         try
         {
@@ -636,7 +661,7 @@ LIMIT 1;
                     var cells = new List<(string Key, string Value)>();
                     foreach (var child in children)
                     {
-                        var cell = ReadChildCell(row, child);
+                        var cell = ReadChildCell(row, child, lineItemTable);
                         if (string.IsNullOrWhiteSpace(cell))
                             continue;
                         cells.Add((child.JsonId, cell));
@@ -669,12 +694,20 @@ LIMIT 1;
         }
     }
 
-    private static string? ReadChildCell(JsonElement row, FtlFormControl child)
+    private static readonly Dictionary<string, string[]> LineItemCellAliases = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["#"] = ["#", "line", "line_no", "lineno", "sno", "no"],
+        ["Product"] = ["product", "item", "description", "product_name", "name"],
+        ["Qty"] = ["qty", "quantity"],
+        ["Price"] = ["price", "rate", "unit_price", "unitprice", "unit cost"],
+        ["Subtotal"] = ["subtotal", "amount", "extended", "line_amount", "lineamount", "total"]
+    };
+
+    private static string? ReadChildCell(JsonElement row, FtlFormControl child, bool lineItemTable)
     {
         foreach (var prop in row.EnumerateObject())
         {
-            if (!string.Equals(NormalizeFieldKey(prop.Name), NormalizeFieldKey(child.Label), StringComparison.Ordinal)
-                && !string.Equals(prop.Name, child.JsonId, StringComparison.OrdinalIgnoreCase))
+            if (!CellKeyMatches(prop.Name, child, lineItemTable))
                 continue;
 
             return prop.Value.ValueKind switch
@@ -686,6 +719,32 @@ LIMIT 1;
         }
 
         return null;
+    }
+
+    private static bool CellKeyMatches(string propName, FtlFormControl child, bool lineItemTable)
+    {
+        if (string.Equals(propName, child.JsonId, StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        if (string.Equals(propName.Trim(), child.Label.Trim(), StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var propKey = NormalizeFieldKey(propName);
+        var labelKey = NormalizeFieldKey(child.Label);
+        if (labelKey.Length > 0 && string.Equals(propKey, labelKey, StringComparison.Ordinal))
+            return true;
+
+        if (!lineItemTable || !LineItemCellAliases.TryGetValue(child.Label.Trim(), out var aliases))
+            return false;
+
+        foreach (var alias in aliases)
+        {
+            if (string.Equals(alias, propName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(NormalizeFieldKey(alias), propKey, StringComparison.Ordinal))
+                return true;
+        }
+
+        return false;
     }
 
     private static bool TryJoinPrimitiveArray(string raw, out string joined)
