@@ -1155,7 +1155,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
     {
         var baseUrl = (_options.FrontendBaseUrl ?? "").Trim().TrimEnd('/');
         if (string.IsNullOrEmpty(baseUrl))
-            baseUrl = "https://app.ezofis.com";
+            baseUrl = "https://cloud.ezofis.com";
 
         var path = string.IsNullOrWhiteSpace(_options.SignRequestPath) ? "/sign-request" : _options.SignRequestPath.Trim();
         if (!path.StartsWith('/'))

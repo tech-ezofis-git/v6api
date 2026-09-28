@@ -4,8 +4,8 @@ public sealed class RepositorySignRequestOptions
 {
     public const string SectionName = "RepositorySignRequest";
 
-    /// <summary>App origin, e.g. https://app.ezofis.com</summary>
-    public string FrontendBaseUrl { get; set; } = "https://app.ezofis.com";
+    /// <summary>App origin, e.g. https://cloud.ezofis.com</summary>
+    public string FrontendBaseUrl { get; set; } = "https://cloud.ezofis.com";
 
     /// <summary>Signer landing path; token is appended as /{inviteToken}.</summary>
     public string SignRequestPath { get; set; } = "/sign-request";
