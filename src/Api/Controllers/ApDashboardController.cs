@@ -29,9 +29,10 @@ public sealed class ApDashboardController : ControllerBase
   /// <remarks>
   /// UI filters supported:
   /// <list type="bullet">
-  /// <item><c>period</c> — today, tomorrow, thisWeek, thisMonth, lastMonth, thisQuarter, thisYear, custom</item>
+  /// <item><c>period</c> — all, today, tomorrow, thisWeek, thisMonth, lastMonth, thisQuarter, thisYear, custom</item>
   /// <item><c>department</c> — MRO, IT Services, etc. (spend category)</item>
-  /// <item><c>supplier</c> — supplier name search</item>
+  /// <item><c>supplier</c> — supplier name search, or <c>all</c></item>
+  /// <item><c>invoiceNo</c> — invoice number search, or <c>all</c></item>
   /// <item><c>status</c> — approved, partially_approved, rejected, paid, processing, hold, overdue, due_today, pending, all</item>
   /// <item><c>currency</c> — USD, EUR, INR, GBP, all</item>
   /// <item><c>requestStatus</c> — pending, processing, completed, hold, rejected, all</item>
@@ -76,6 +77,7 @@ public sealed class ApDashboardController : ControllerBase
     [FromQuery] string? requestStatus = null,
     [FromQuery] string? poAmountTier = null,
     [FromQuery] bool includeInvoiceDetails = false,
+    [FromQuery] string? invoiceNo = null,
     CancellationToken cancellationToken = default) =>
     GetDashboard(
       new ApDashboardRequest(
@@ -89,6 +91,7 @@ public sealed class ApDashboardController : ControllerBase
         currency,
         requestStatus,
         poAmountTier,
-        includeInvoiceDetails),
+        includeInvoiceDetails,
+        invoiceNo),
       cancellationToken);
 }

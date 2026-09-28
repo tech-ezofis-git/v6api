@@ -3,6 +3,7 @@ using System.Net.Mail;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Options;
 using SaaSApp.Api.Services.Jira;
+using SaaSApp.Catalog;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
 
@@ -13,6 +14,7 @@ public sealed class SupportTicketEmailContext
     public Guid TicketId { get; init; }
     public Guid TenantId { get; init; }
     public string? CallerEmail { get; init; }
+    public string? CallerName { get; init; }
     public string? SupportCategory { get; init; }
     public string? Priorty { get; init; }
     public string? PreferredContact { get; init; }
@@ -68,6 +70,7 @@ public sealed class SupportTicketEmailService
                 await SendAsync(
                     settings,
                     context.CallerEmail.Trim(),
+                    context.CallerName,
                     "Your support request has been received",
                     BuildCallerBody(context),
                     cancellationToken);
@@ -82,6 +85,7 @@ public sealed class SupportTicketEmailService
                 await SendAsync(
                     settings,
                     supportEmail,
+                    context.CallerName,
                     $"New support ticket: {category}",
                     BuildSupportTeamBody(context),
                     cancellationToken);
@@ -96,13 +100,14 @@ public sealed class SupportTicketEmailService
     private static async Task SendAsync(
         MailSetting settings,
         string to,
+        string? fromName,
         string subject,
         string htmlBody,
         CancellationToken cancellationToken)
     {
         using var mail = new MailMessage
         {
-            From = new MailAddress(settings.EmailId),
+            From = EzofisMailAddress.From(settings.EmailId, fromName),
             Subject = subject,
             Body = htmlBody,
             IsBodyHtml = true

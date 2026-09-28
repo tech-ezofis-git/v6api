@@ -2,6 +2,7 @@ using System.Net;
 using System.Net.Mail;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using SaaSApp.Catalog;
 using SaaSApp.Catalog.Persistence;
 using SaaSApp.Reporting.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
@@ -62,9 +63,17 @@ public sealed class ReportMailService : IReportMailService
             ? $"Attached is the scheduled report <strong>{WebUtility.HtmlEncode(data.Name)}</strong> ({data.RowCount} row(s))."
             : WebUtility.HtmlEncode(schedule.Message).Replace("\n", "<br/>", StringComparison.Ordinal);
 
+        string? ownerName = null;
+        if (config.OwnerUserId is Guid ownerId && ownerId != Guid.Empty)
+        {
+            var profiles = await _userEmails.GetProfilesAsync([ownerId], cancellationToken);
+            if (profiles.TryGetValue(ownerId, out var profile))
+                ownerName = string.IsNullOrWhiteSpace(profile.DisplayName) ? profile.Email : profile.DisplayName;
+        }
+
         using var mail = new MailMessage
         {
-            From = new MailAddress(settings.EmailId),
+            From = EzofisMailAddress.From(settings.EmailId, ownerName),
             Subject = subject,
             Body = $"""
                 <p>{message}</p>

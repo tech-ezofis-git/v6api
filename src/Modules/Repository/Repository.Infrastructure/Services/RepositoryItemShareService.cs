@@ -3,6 +3,8 @@ using System.Net.Mail;
 using System.Security.Cryptography;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
+using Npgsql;
+using SaaSApp.Catalog;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using SaaSApp.Catalog.Entities;
@@ -297,6 +299,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             : isFilterShare
                 ? "filtered repository view"
                 : item?.FileName;
+        var senderName = await ResolveSenderNameAsync(sourceTenantId, sharedByUserId, cancellationToken);
         await TrySendShareEmailAsync(
             recipientEmail,
             label,
@@ -306,6 +309,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             isNew,
             isFilterShare,
             isDashboardShare,
+            senderName,
             cancellationToken);
 
         return new CreateRepositoryItemShareResult(
@@ -676,6 +680,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         bool isNew,
         bool isFilterShare,
         bool isDashboardShare,
+        string? senderName,
         CancellationToken cancellationToken)
     {
         try
@@ -718,7 +723,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
 
             using var mail = new MailMessage
             {
-                From = new MailAddress(settings.EmailId),
+                From = EzofisMailAddress.From(settings.EmailId, senderName),
                 Subject = _options.EmailSubject,
                 Body = body,
                 IsBodyHtml = true
@@ -738,6 +743,33 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Failed to send repository share email to {Email}", recipientEmail);
+        }
+    }
+
+    private async Task<string?> ResolveSenderNameAsync(Guid tenantId, Guid userId, CancellationToken cancellationToken)
+    {
+        if (userId == Guid.Empty)
+            return null;
+
+        try
+        {
+            var connectionString = await _connectionResolver.GetConnectionStringAsync(tenantId, cancellationToken);
+            if (string.IsNullOrWhiteSpace(connectionString))
+                return null;
+
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, userId, cancellationToken);
+            if (profile == null)
+                return null;
+            return string.IsNullOrWhiteSpace(profile.Value.DisplayName)
+                ? profile.Value.Email
+                : profile.Value.DisplayName;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not resolve share sender name for user {UserId}", userId);
+            return null;
         }
     }
 

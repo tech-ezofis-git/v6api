@@ -4,6 +4,7 @@ using System.Net.Mail;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Distributed;
+using SaaSApp.Catalog;
 using SaaSApp.Catalog.Entities;
 using SaaSApp.Catalog.Persistence;
 
@@ -77,7 +78,7 @@ public sealed class CheckAuthenticateCommandHandler : IRequestHandler<CheckAuthe
 
         using var mail = new MailMessage
         {
-            From = new MailAddress(settings.EmailId),
+            From = EzofisMailAddress.From(settings.EmailId, firstName),
             Subject = "Your One-Time Password (OTP) Code",
             IsBodyHtml = true,
             Body = htmlBody

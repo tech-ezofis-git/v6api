@@ -112,7 +112,8 @@ Omit filter fields, or send `"all"`:
 | `fromUtc` | datetime \| null | null | Required when `period = "custom"` |
 | `toUtc` | datetime \| null | null | Required when `period = "custom"` |
 | `department` | string \| null | null | Spend category (e.g. `MRO`, `IT Services`) |
-| `supplier` | string \| null | null | Partial supplier name search |
+| `supplier` | string \| null | null | Partial supplier name. `"all"` means every supplier |
+| `invoiceNo` | string \| null | null | Partial invoice number. `"all"` means every invoice |
 | `status` | string \| null | null | Approval status filter |
 | `currency` | string \| null | null | `USD`, `EUR`, `INR`, `GBP`, or `all` |
 | `requestStatus` | string \| null | null | Workflow request status |
@@ -130,6 +131,7 @@ Omit filter fields, or send `"all"`:
 | `lastMonth` | Previous calendar month |
 | `thisQuarter` | Current quarter to date |
 | `thisYear` | Current year to date |
+| `all` | Every invoice, including rows with no date |
 | `custom` | Use `fromUtc` + `toUtc` |
 
 ```json

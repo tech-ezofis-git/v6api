@@ -101,6 +101,7 @@ public static partial class EventLogRouteMapper
         "POST api/uploadandindex/uploadforocr",
         "POST api/uploadandindex/load/{}",
         "PUT api/uploadandindex/index/{}",
+        "PUT api/uploadandindex/index/{}/fields",
         "POST api/uploadandindex/index/all",
 
         "POST api/users/{}/configuration",

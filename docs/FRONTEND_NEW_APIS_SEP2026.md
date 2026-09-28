@@ -319,6 +319,23 @@ GET /api/repositories/{repositoryId}/items/{itemId}/file?disposition=attachment
 
 (Or use `itemFileUrl` / `itemDownloadUrl` from index/all.)
 
+### Save stage fields only
+
+```http
+PUT /api/uploadAndIndex/index/{fileId}/fields
+Content-Type: application/json
+```
+
+```json
+{
+  "fields": [
+    { "name": "Vendor", "value": "Acme", "type": "SHORT_TEXT" }
+  ]
+}
+```
+
+`repositoryId` is optional. Updates stage columns only. Does not archive and does not change status. `PUT /index/{fileId}` is still the archive call.
+
 ### Archive one file
 
 ```http

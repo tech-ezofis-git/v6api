@@ -390,6 +390,47 @@ public sealed class UploadAndIndexController : ControllerBase
     }
 
     /// <summary>
+    /// PUT api/uploadAndIndex/index/{id}/fields — update stage field columns only.
+    /// Does not archive and does not change stage status.
+    /// </summary>
+    [HttpPut("/api/uploadAndIndex/index/{id}/fields")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(UploadIndexStageFieldsResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> SaveStageFields(string id, [FromBody] JsonElement body, CancellationToken cancellationToken)
+    {
+        if (!Guid.TryParse(id, out var stageId) || stageId == Guid.Empty)
+            return BadRequest(new { error = "id must be a valid GUID." });
+
+        UploadIndexStageFieldsRequest? request;
+        try
+        {
+            request = JsonSerializer.Deserialize<UploadIndexStageFieldsRequest>(body.GetRawText(), JsonOptions);
+        }
+        catch (JsonException ex)
+        {
+            return BadRequest(new { error = $"Invalid JSON: {ex.Message}" });
+        }
+
+        if (request?.Fields == null || request.Fields.Count == 0)
+            return BadRequest(new { error = "fields is required." });
+
+        var tenantId = RequireTenantId();
+        try
+        {
+            var result = await _uploadIndex.SaveStageFieldsAsync(stageId, tenantId, request, GetUserId(), cancellationToken);
+            if (result == null)
+                return NotFound(new { error = "Index record not found." });
+
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
     /// Soft-delete staged upload/index files and remove their monitor temp blobs.
     /// Body: <c>{ "fileIds": ["guid", ...] }</c> (alias <c>ids</c>). Optional <c>repositoryId</c>.
     /// </summary>

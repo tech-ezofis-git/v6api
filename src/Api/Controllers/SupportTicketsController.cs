@@ -111,6 +111,7 @@ public sealed class SupportTicketsController : ControllerBase
                     TicketId = id,
                     TenantId = tenantId.Value,
                     CallerEmail = callerEmail,
+                    CallerName = GetCurrentUserName(),
                     SupportCategory = request.SupportCategory,
                     Priorty = request.Priorty,
                     PreferredContact = request.PreferredContact,
@@ -126,6 +127,15 @@ public sealed class SupportTicketsController : ControllerBase
         return StatusCode(
             StatusCodes.Status201Created,
             new CreateSupportTicketResponse(id, jiraResult.IssueKey, jiraResult.IssueUrl, jiraResult.Success));
+    }
+
+    private string? GetCurrentUserName()
+    {
+        var user = HttpContext.User;
+        var name = user.FindFirst("name")?.Value
+            ?? user.FindFirst(ClaimTypes.Name)?.Value
+            ?? user.FindFirst("displayName")?.Value;
+        return string.IsNullOrWhiteSpace(name) ? null : name.Trim();
     }
 
     private string? GetCurrentUserEmail()

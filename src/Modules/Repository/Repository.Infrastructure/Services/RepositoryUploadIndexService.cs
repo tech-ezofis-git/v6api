@@ -633,6 +633,65 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             promoted.FilePath);
     }
 
+    public async Task<UploadIndexStageFieldsResult?> SaveStageFieldsAsync(
+        Guid stageId,
+        Guid tenantId,
+        UploadIndexStageFieldsRequest request,
+        Guid? userId,
+        CancellationToken cancellationToken = default)
+    {
+        var incoming = ParseFieldsToDictionary(request.Fields);
+        if (incoming.Count == 0)
+            throw new InvalidOperationException("fields is required.");
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        RepositoryDetailDto repo;
+        RepositoryStageRow? row;
+        if (request.RepositoryId is Guid repositoryId && repositoryId != Guid.Empty)
+        {
+            repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
+                ?? throw new InvalidOperationException("Repository not found.");
+            row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+        }
+        else
+        {
+            repo = await ResolveRepositoryForStageAsync(connection, tenantId, stageId, cancellationToken)
+                ?? throw new InvalidOperationException("Repository not found for this index file.");
+            row = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken);
+        }
+
+        if (row == null)
+            return null;
+
+        var fieldValues = incoming;
+        foreach (var kv in row.FieldValues)
+            fieldValues.TryAdd(kv.Key, kv.Value);
+
+        await RepositoryStageStore.UpdateFieldsAsync(
+            connection,
+            repo,
+            tenantId,
+            stageId,
+            fieldValues,
+            status: null,
+            stageStatus: null,
+            ocrResult: null,
+            userId,
+            cancellationToken);
+
+        var saved = await RepositoryStageStore.GetAsync(connection, repo, tenantId, stageId, cancellationToken) ?? row;
+        return new UploadIndexStageFieldsResult(
+            stageId.ToString("D"),
+            saved.FileName,
+            "Fields saved.",
+            BuildListFields(repo, saved));
+    }
+
     public async Task<UploadIndexListResult> ListIndexAsync(
         Guid tenantId,
         UploadIndexListRequest request,
