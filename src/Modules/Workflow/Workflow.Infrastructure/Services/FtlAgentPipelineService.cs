@@ -104,12 +104,13 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
         var fields = ExtractFormFields(storedJson);
         var lineItemsJson = ExtractLineItems(storedJson);
-        (fields, lineItemsJson) = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson, cancellationToken);
+        var mapped = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(formId)
             && formEntryId is { } entryId && entryId != Guid.Empty
             && repositoryId is { } repoId && repoId != Guid.Empty
-            && attachment?.ItemId is { } itemId)
+            && attachment?.ItemId is { } itemId
+            && mapped.TableFields.Count > 0)
         {
             await _moveNextSupport.ApplyMetadataAsync(
                 args.TenantId,
@@ -120,8 +121,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                     entryId,
                     repoId,
                     itemId,
-                    fields,
-                    lineItemsJson),
+                    mapped.TableFields,
+                    LineItemsJson: null),
                 args.UserId,
                 cancellationToken);
         }
@@ -160,13 +161,16 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 ActivityUserId: args.UserId,
                 FormId: formId,
                 FormEntryId: formEntryId,
-                FormDataFields: fields,
-                FormLineItemsJson: lineItemsJson,
-                SubmittedFormDataJson: BuildFormFieldsJson(fields, null)),
+                FormDataFields: mapped.TableFields,
+                FormLineItemsJson: null,
+                SubmittedFormDataJson: BuildFormFieldsJson(mapped.FormDataFields, null)),
             cancellationToken);
 
         if (!moved.Success)
             throw new InvalidOperationException(moved.Message ?? "FTL move-next failed.");
+
+        if (!string.IsNullOrWhiteSpace(formId) && formEntryId is { } savedEntry && savedEntry != Guid.Empty)
+            await WriteFormTableColumnsAsync(formId, savedEntry, mapped.TableColumns, cancellationToken);
 
         _logger.LogInformation(
             "FTL {Mode} moved instance {InstanceId} with review {Review} to {NextStep}.",
@@ -451,25 +455,31 @@ LIMIT 1;
         return "QUALIFY";
     }
 
-    private async Task<(Dictionary<string, string> Fields, string? LineItemsJson)> RemapFieldsToJsonIdsAsync(
+    private async Task<FtlMappedForm> RemapFieldsToJsonIdsAsync(
         string? formId,
         Dictionary<string, string> fields,
         string? lineItemsJson,
         CancellationToken cancellationToken)
     {
+        var empty = new FtlMappedForm(
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase),
+            []);
         if (string.IsNullOrWhiteSpace(formId) || (fields.Count == 0 && string.IsNullOrWhiteSpace(lineItemsJson)))
-            return (fields, lineItemsJson);
+            return empty;
 
         var tenantCs = _connectionProvider.ConnectionString;
         if (string.IsNullOrWhiteSpace(tenantCs))
-            return (fields, lineItemsJson);
+            return empty;
 
         var controls = await LoadFtlFormControlsAsync(formId, tenantCs, cancellationToken);
         if (controls.Count == 0)
-            return (fields, lineItemsJson);
+            return empty;
 
         var roots = controls.Where(c => c.ParentId == 0).ToList();
-        var mapped = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var tableFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var formDataFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var tableColumns = new List<FtlTableColumn>();
         foreach (var (key, value) in fields)
         {
             if (string.IsNullOrWhiteSpace(value) || string.Equals(value, "null", StringComparison.OrdinalIgnoreCase))
@@ -485,27 +495,91 @@ LIMIT 1;
                 continue;
             }
 
-            var formatted = FormatQualifierValue(value, control, controls);
-            if (string.IsNullOrWhiteSpace(formatted) || string.Equals(formatted, "null", StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            mapped[control.JsonId] = formatted;
+            AddMappedControl(control, value, controls, tableFields, formDataFields, tableColumns);
         }
 
         var lineItemTable = roots.FirstOrDefault(c =>
             c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
             && NormalizeFieldKey(c.Label) is "lineitem" or "lineitems");
         if (lineItemTable is not null && !string.IsNullOrWhiteSpace(lineItemsJson))
+            AddMappedControl(lineItemTable, lineItemsJson, controls, tableFields, formDataFields, tableColumns);
+
+        return new FtlMappedForm(tableFields, formDataFields, tableColumns);
+    }
+
+    private static void AddMappedControl(
+        FtlFormControl control,
+        string raw,
+        IReadOnlyList<FtlFormControl> controls,
+        Dictionary<string, string> tableFields,
+        Dictionary<string, string> formDataFields,
+        List<FtlTableColumn> tableColumns)
+    {
+        var isTable = control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase);
+        if (isTable)
         {
-            var formatted = FormatQualifierTable(lineItemsJson, lineItemTable, controls, lineItemTable: true);
-            if (!string.IsNullOrWhiteSpace(formatted))
-            {
-                mapped[lineItemTable.JsonId] = formatted;
-                lineItemsJson = formatted;
-            }
+            var lineItemTable = NormalizeFieldKey(control.Label) is "lineitem" or "lineitems";
+            var tableJson = FormatQualifierTable(raw, control, controls, lineItemTable, useJsonId: true);
+            if (string.IsNullOrWhiteSpace(tableJson))
+                return;
+
+            if (TryResolveTableColumn(control, out var column))
+                tableColumns.Add(new FtlTableColumn(column, tableJson));
+            formDataFields[control.JsonId] = tableJson;
+            return;
         }
 
-        return (mapped, lineItemsJson);
+        var text = TryJoinPrimitiveArray(raw, out var joined) ? joined : raw;
+        if (string.IsNullOrWhiteSpace(text) || string.Equals(text, "null", StringComparison.OrdinalIgnoreCase))
+            return;
+
+        tableFields[control.Label] = text;
+        formDataFields[control.JsonId] = text;
+    }
+
+    private static bool TryResolveTableColumn(FtlFormControl control, out string column)
+    {
+        if (!string.IsNullOrWhiteSpace(control.ColumnName))
+        {
+            column = control.ColumnName.Trim();
+            return true;
+        }
+
+        return EzfbColumnNaming.TryToColumnNameFromLabel(control.Label, out column);
+    }
+
+    private async Task WriteFormTableColumnsAsync(
+        string formId,
+        Guid formEntryId,
+        IReadOnlyList<FtlTableColumn> columns,
+        CancellationToken cancellationToken)
+    {
+        if (columns.Count == 0)
+            return;
+
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return;
+
+        var suffix = FormIdNaming.GetEzfbTableSuffix(formId);
+        var table = $"dbo.\"ezfb_{suffix}_items\"";
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+        foreach (var column in columns)
+        {
+            var escaped = column.Column.Replace("\"", "\"\"", StringComparison.Ordinal);
+            await using (var alter = new NpgsqlCommand(
+                $"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS \"{escaped}\" text NULL;",
+                connection))
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var update = new NpgsqlCommand(
+                $"UPDATE {table} SET \"{escaped}\" = @Value WHERE item_id = @ItemId;",
+                connection);
+            update.Parameters.AddWithValue("@Value", column.Json);
+            update.Parameters.AddWithValue("@ItemId", formEntryId);
+            await update.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     private async Task<List<FtlFormControl>> LoadFtlFormControlsAsync(
@@ -517,8 +591,12 @@ LIMIT 1;
         var controls = new List<FtlFormControl>();
         await using var connection = new NpgsqlConnection(tenantCs);
         await connection.OpenAsync(cancellationToken);
+        await using (var alter = new NpgsqlCommand(
+            """ALTER TABLE dbo."wFormControl" ADD COLUMN IF NOT EXISTS "columnName" varchar(200) NULL;""",
+            connection))
+            await alter.ExecuteNonQueryAsync(cancellationToken);
         const string sql = """
-            SELECT id, "parentId", "jsonId", name, type
+            SELECT id, "parentId", "jsonId", name, type, "columnName"
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId AND "isDeleted" = false
               AND "jsonId" IS NOT NULL AND BTRIM("jsonId") <> ''
@@ -540,7 +618,8 @@ LIMIT 1;
                 reader.IsDBNull(1) ? 0 : reader.GetInt32(1),
                 jsonId,
                 label,
-                reader.IsDBNull(4) ? string.Empty : reader.GetString(4)));
+                reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
+                reader.IsDBNull(5) ? null : reader.GetString(5)));
         }
 
         return controls;
@@ -629,7 +708,7 @@ LIMIT 1;
         if (control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase))
         {
             var lineItemTable = NormalizeFieldKey(control.Label) is "lineitem" or "lineitems";
-            return FormatQualifierTable(raw, control, controls, lineItemTable);
+            return FormatQualifierTable(raw, control, controls, lineItemTable, useJsonId: false);
         }
 
         return TryJoinPrimitiveArray(raw, out var joined) ? joined : raw;
@@ -639,7 +718,8 @@ LIMIT 1;
         string raw,
         FtlFormControl table,
         IReadOnlyList<FtlFormControl> controls,
-        bool lineItemTable = false)
+        bool lineItemTable,
+        bool useJsonId)
     {
         try
         {
@@ -664,7 +744,8 @@ LIMIT 1;
                         var cell = ReadChildCell(row, child, lineItemTable);
                         if (string.IsNullOrWhiteSpace(cell))
                             continue;
-                        cells.Add((child.JsonId, cell));
+                        var cellKey = useJsonId ? child.JsonId : child.Label;
+                        cells.Add((cellKey, cell));
                     }
 
                     if (cells.Count == 0)
@@ -781,7 +862,14 @@ LIMIT 1;
         }
     }
 
-    private sealed record FtlFormControl(int Id, int ParentId, string JsonId, string Label, string Type);
+    private sealed record FtlFormControl(int Id, int ParentId, string JsonId, string Label, string Type, string? ColumnName);
+
+    private sealed record FtlTableColumn(string Column, string Json);
+
+    private sealed record FtlMappedForm(
+        Dictionary<string, string> TableFields,
+        Dictionary<string, string> FormDataFields,
+        List<FtlTableColumn> TableColumns);
 
     private static string NormalizeFieldKey(string value)
     {
