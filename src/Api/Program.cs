@@ -75,6 +75,7 @@ builder.Services.AddScoped<IFolderCreationDraftService, FolderCreationDraftServi
 builder.Services.AddScoped<IUserCreationDraftService, UserCreationDraftService>();
 builder.Services.AddScoped<IReportBuilderDraftService, ReportBuilderDraftService>();
 builder.Services.AddScoped<IDashboardSchemaService, DashboardSchemaService>();
+builder.Services.AddScoped<IFtlCatalogService, FtlCatalogService>();
 builder.Services.Configure<TenantPilotUserOptions>(
     builder.Configuration.GetSection(TenantPilotUserOptions.SectionName));
 builder.Services.AddScoped<ITenantPilotUserProvisioningService, TenantPilotUserProvisioningService>();

@@ -207,21 +207,18 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             || string.Equals(s.Id.ToString("D"), args.ActivityId, StringComparison.OrdinalIgnoreCase))
             ?? throw new InvalidOperationException($"FTL step {args.ActivityId} was not found.");
 
-        var quoteJson = await LoadLatestAgentResponseAsync(
-            args.WorkflowId,
-            args.InstanceId,
-            cancellationToken,
-            "QUOTE_AGENT");
-        if (string.IsNullOrWhiteSpace(quoteJson))
-            throw new InvalidOperationException("FTL document did not find a saved quote agent response.");
+        var formId = args.FormId ?? workflow.FormId;
+        var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(formId))
+            formId = identity?.FormId;
 
-        using var quoteDoc = JsonDocument.Parse(quoteJson);
-        var quoteResult = FindProperty(quoteDoc.RootElement, "quote_result");
-        if (quoteResult.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
-            throw new InvalidOperationException("FTL document quote response did not include quote_result.");
+        var formData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(formData))
+            throw new InvalidOperationException("FTL document did not find form data for this instance.");
 
+        var pythonFormData = await RemapFormDataKeysToColumnNamesAsync(formId, formData, cancellationToken);
         var template = await LoadPdfTemplateAsync(args.WorkflowId, args.ActivityId, cancellationToken);
-        var responseJson = await PostDocumentAsync(jobId, chatUrl, quoteResult.GetRawText(), template, cancellationToken);
+        var responseJson = await PostDocumentAsync(jobId, chatUrl, pythonFormData, template, cancellationToken);
         var (pdfBytes, fileName) = ReadGeneratedPdf(responseJson);
         var repositoryId = ParseGuid(args.RepositoryId) ?? ParseGuid(workflow.RepositoryId)
             ?? throw new InvalidOperationException("Workflow repositoryId is not configured for the document PDF.");
@@ -242,11 +239,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             cancellationToken,
             allowIncompleteFolderMetadata: true);
 
-        var formId = args.FormId ?? workflow.FormId;
-        var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
-        if (string.IsNullOrWhiteSpace(formId))
-            formId = identity?.FormId;
-        var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var existingFormData = formData;
 
         await _moveNextSupport.SaveAgentValidationAsync(
             args.WorkflowId,
@@ -356,18 +349,25 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     private async Task<string> PostDocumentAsync(
         string jobId,
         string chatUrl,
-        string quoteResultJson,
+        string formDataJson,
         JsonElement template,
         CancellationToken cancellationToken)
     {
+        object? formData = formDataJson;
+        try
+        {
+            using var parsed = JsonDocument.Parse(formDataJson);
+            formData = JsonSerializer.Deserialize<object>(parsed.RootElement.GetRawText());
+        }
+        catch (JsonException)
+        {
+        }
+
         var payload = new Dictionary<string, object?>
         {
-            ["quote_result"] = JsonSerializer.Deserialize<object>(quoteResultJson),
+            ["formData"] = formData,
             ["templateJson"] = JsonSerializer.Deserialize<object>(template.GetRawText())
         };
-        payload["template_type"] = template.ValueKind == JsonValueKind.String
-            ? template.GetString()
-            : ReadTemplateType(template) ?? "internal_review";
 
         var body = JsonSerializer.Serialize(new
         {
@@ -377,23 +377,6 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         });
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         return await PostAsync(chatUrl, content, cancellationToken);
-    }
-
-    private static string? ReadTemplateType(JsonElement template)
-    {
-        if (template.ValueKind != JsonValueKind.Object)
-            return null;
-
-        foreach (var name in new[] { "template_type", "templateType", "type", "name" })
-        {
-            if (!template.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.String)
-                continue;
-            var text = value.GetString();
-            if (!string.IsNullOrWhiteSpace(text))
-                return text.Trim();
-        }
-
-        return null;
     }
 
     private static (byte[] Bytes, string FileName) ReadGeneratedPdf(string responseJson)
@@ -1110,6 +1093,157 @@ LIMIT 1;
             }
         }
 
+        return null;
+    }
+
+    private async Task<string> RemapFormDataKeysToColumnNamesAsync(
+        string? formId,
+        string formDataJson,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(formId))
+            return formDataJson;
+
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return formDataJson;
+
+        var controls = await LoadFtlFormControlsAsync(formId, tenantCs, cancellationToken);
+        if (controls.Count == 0)
+            return formDataJson;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(formDataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return formDataJson;
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    var control = FindControl(controls, prop.Name);
+                    var key = ColumnOutputKey(control) ?? prop.Name;
+                    if (!written.Add(key))
+                        continue;
+
+                    writer.WritePropertyName(key);
+                    if (!TryWriteTableWithColumnNames(writer, prop.Value, control, controls))
+                        prop.Value.WriteTo(writer);
+                }
+
+                writer.WriteEndObject();
+            }
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+        catch (JsonException)
+        {
+            return formDataJson;
+        }
+    }
+
+    private static bool TryWriteTableWithColumnNames(
+        Utf8JsonWriter writer,
+        JsonElement value,
+        FtlFormControl? table,
+        IReadOnlyList<FtlFormControl> controls)
+    {
+        if (table is null || !table.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        JsonDocument? owned = null;
+        try
+        {
+            JsonElement array;
+            if (value.ValueKind == JsonValueKind.Array)
+            {
+                array = value;
+            }
+            else if (value.ValueKind == JsonValueKind.String)
+            {
+                var text = value.GetString()?.Trim();
+                if (string.IsNullOrWhiteSpace(text) || !text.StartsWith('['))
+                    return false;
+
+                owned = JsonDocument.Parse(text);
+                if (owned.RootElement.ValueKind != JsonValueKind.Array)
+                    return false;
+
+                array = owned.RootElement;
+            }
+            else
+            {
+                return false;
+            }
+
+            var children = controls.Where(c => c.ParentId == table.Id).ToList();
+            writer.WriteStartArray();
+            foreach (var row in array.EnumerateArray())
+            {
+                if (row.ValueKind != JsonValueKind.Object)
+                {
+                    row.WriteTo(writer);
+                    continue;
+                }
+
+                writer.WriteStartObject();
+                var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var cell in row.EnumerateObject())
+                {
+                    var child = children.Count == 0
+                        ? FindControl(controls, cell.Name)
+                        : children.FirstOrDefault(c => string.Equals(c.JsonId, cell.Name, StringComparison.OrdinalIgnoreCase))
+                            ?? children.FirstOrDefault(c =>
+                                string.Equals(c.ColumnName, cell.Name, StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(c.Label, cell.Name, StringComparison.OrdinalIgnoreCase));
+                    var key = ColumnOutputKey(child) ?? cell.Name;
+                    if (!written.Add(key))
+                        continue;
+
+                    writer.WritePropertyName(key);
+                    cell.Value.WriteTo(writer);
+                }
+
+                writer.WriteEndObject();
+            }
+
+            writer.WriteEndArray();
+            return true;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+        finally
+        {
+            owned?.Dispose();
+        }
+    }
+
+    private static FtlFormControl? FindControl(IReadOnlyList<FtlFormControl> controls, string key)
+    {
+        var match = controls.FirstOrDefault(c => string.Equals(c.JsonId, key, StringComparison.OrdinalIgnoreCase));
+        if (match is not null)
+            return match;
+
+        return controls.FirstOrDefault(c =>
+            string.Equals(c.ColumnName, key, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.Label, key, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static string? ColumnOutputKey(FtlFormControl? control)
+    {
+        if (control is null)
+            return null;
+        if (!string.IsNullOrWhiteSpace(control.ColumnName))
+            return control.ColumnName.Trim();
+        if (!string.IsNullOrWhiteSpace(control.Label)
+            && !string.Equals(control.Label, control.JsonId, StringComparison.OrdinalIgnoreCase))
+            return control.Label.Trim();
         return null;
     }
 
