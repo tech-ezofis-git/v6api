@@ -90,14 +90,17 @@ internal static class PdfSignatureStampService
         var crop = page.CropBox;
         var mediaW = media.Width;
         var mediaH = media.Height;
-        var cropW = crop.Width > 1 ? crop.Width : mediaW;
-        var cropH = crop.Height > 1 ? crop.Height : mediaH;
+        // PDFsharp returns a zero rectangle when /CropBox is absent. That is the MediaBox,
+        // not a box at y=0. Using Y2=0 shifts the stamp down by the full page height.
+        var hasCrop = crop.Width > 1 && crop.Height > 1;
+        var cropW = hasCrop ? crop.Width : mediaW;
+        var cropH = hasCrop ? crop.Height : mediaH;
         var rotate = NormalizeRotate(page.Rotate);
 
         // Visible page is the crop box. pdf.js places the signature on that box, top-left, y down.
         var (dispW, dispH) = DisplaySize(cropW, cropH, rotate);
-        var offsetX = crop.X1 - media.X1;
-        var offsetY = media.Y2 - crop.Y2;
+        var offsetX = hasCrop ? crop.X1 - media.X1 : 0;
+        var offsetY = hasCrop ? media.Y2 - crop.Y2 : 0;
 
         if (width > dispW) width = dispW;
         if (height > dispH) height = dispH;
@@ -113,7 +116,7 @@ internal static class PdfSignatureStampService
         }
 
         var (cx, cy) = DisplayPointToMedia(x + width / 2.0, y + height / 2.0, cropW, cropH, rotate);
-        cx += crop.X1 - media.X1;
+        cx += offsetX;
         cy += offsetY;
 
         gfx.Save();
