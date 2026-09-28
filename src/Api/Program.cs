@@ -40,11 +40,14 @@ builder.Configuration
     .AddJsonFile("appsettings.ActivityLog.json", optional: true, reloadOnChange: true)
     .AddJsonFile("appsettings.EventLog.json", optional: true, reloadOnChange: true);
 
-// Production-only overrides (EzofisAuth, pool sizes, RunServerInApi=false for separate worker).
-// Do NOT load this in Development — it disables the in-process Hangfire server and blocks OCR/archive jobs.
+// Production-only overrides (EzofisAuth, pool sizes, the single Hangfire server).
+// Do NOT load this in Development — a local API must not register its own Hangfire server
+// on the shared catalog database. Environment variables stay above this file so
+// Hangfire__RunServerInApi can still turn the server off on a specific host.
 if (builder.Environment.IsProduction())
 {
     builder.Configuration.AddJsonFile("appsettings.Production.json", optional: true, reloadOnChange: true);
+    builder.Configuration.AddEnvironmentVariables();
 }
 
 
@@ -250,7 +253,11 @@ if (hangfireEnabled)
         .UseRecommendedSerializerSettings()
         .UsePostgreSqlStorage(hangfireConnectionString, hangfireStorageOptions));
 
-    if (builder.Configuration.GetValue<bool?>("Hangfire:RunServerInApi") ?? true)
+    // Missing key: Development stays off so a laptop does not become a server.
+    // Production appsettings turns the one deployed server on.
+    var runServerInApi = builder.Configuration.GetValue<bool?>("Hangfire:RunServerInApi")
+        ?? !builder.Environment.IsDevelopment();
+    if (runServerInApi)
     {
         // API host: keep workers low — each job holds SQL + HTTP to Python (minutes). High WorkerCount
         // starves IIS/Kestrel threads and makes every API call feel slow.
@@ -258,21 +265,38 @@ if (hangfireEnabled)
             ?? builder.Configuration.GetValue<int?>("Hangfire:WorkerCount")
             ?? 1;
         apiWorkers = Math.Clamp(apiWorkers, 1, 3);
+        var serverName = builder.Configuration.GetValue<string>("Hangfire:ServerName");
+        if (string.IsNullOrWhiteSpace(serverName))
+            serverName = "v6-api";
 
         builder.Services.AddHangfireServer(options =>
         {
             options.WorkerCount = apiWorkers;
-            options.ServerName = $"{Environment.MachineName}:V6Api";
+            // Fixed name. MachineName made every PC and every new container a different server,
+            // so each API publish left the previous one Aborted.
+            options.ServerName = serverName;
             options.Queues = ["default"];
             options.SchedulePollingInterval = TimeSpan.FromSeconds(15);
+            // Docker stop_grace_period is 30s. Unregister before the process is killed.
+            options.StopTimeout = TimeSpan.FromSeconds(10);
+            options.ShutdownTimeout = TimeSpan.FromSeconds(25);
+            // Drop a killed process before the dashboard's 5-minute "Aborted" banner.
+            options.ServerTimeout = TimeSpan.FromMinutes(2);
+            options.ServerCheckInterval = TimeSpan.FromMinutes(1);
         });
+        builder.Services.AddHostedService<SingleHangfireServerCleanupService>();
 
         Log.Information(
-            "Hangfire server in API process: {WorkerCount} worker(s), MaxPoolSize={MaxPoolSize}, ConnTimeout={ConnTimeout}s, CmdTimeout={CmdTimeout}s",
+            "Hangfire server in API process: {ServerName}, {WorkerCount} worker(s), MaxPoolSize={MaxPoolSize}, ConnTimeout={ConnTimeout}s, CmdTimeout={CmdTimeout}s",
+            serverName,
             apiWorkers,
             hangfireCsBuilder.MaxPoolSize,
             hangfireCsBuilder.Timeout,
             hangfireCsBuilder.CommandTimeout);
+    }
+    else
+    {
+        Log.Information("Hangfire server is off in this process (enqueue only).");
     }
 }
 else
