@@ -4,8 +4,8 @@ public sealed class RepositoryShareOptions
 {
     public const string SectionName = "RepositoryShare";
 
-    /// <summary>App origin, e.g. https://demoapp.ezofis.com</summary>
-    public string FrontendBaseUrl { get; set; } = "https://demoapp.ezofis.com";
+    /// <summary>App origin, e.g. https://cloud.ezofis.com</summary>
+    public string FrontendBaseUrl { get; set; } = "https://cloud.ezofis.com";
 
     /// <summary>Login/signup route (share links land here with shareToken query).</summary>
     public string SignInPath { get; set; } = "/sign-in";

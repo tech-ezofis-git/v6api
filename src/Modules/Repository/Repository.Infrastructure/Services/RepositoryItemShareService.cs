@@ -660,7 +660,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
     {
         var baseUrl = (_options.FrontendBaseUrl ?? "").Trim().TrimEnd('/');
         if (string.IsNullOrEmpty(baseUrl))
-            baseUrl = "https://demoapp.ezofis.com";
+            baseUrl = "https://cloud.ezofis.com";
 
         var signInPath = string.IsNullOrWhiteSpace(_options.SignInPath) ? "/sign-in" : _options.SignInPath.Trim();
         if (!signInPath.StartsWith('/'))
