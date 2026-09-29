@@ -15,7 +15,8 @@ public record MoveToNextStepCommand(
     Guid? FormEntryId = null,
     IReadOnlyDictionary<string, string>? FormDataFields = null,
     string? FormLineItemsJson = null,
-    string? SubmittedFormDataJson = null
+    string? SubmittedFormDataJson = null,
+    bool EndWorkflow = false
 ) : IRequest<MoveToNextStepCommandResult>;
 
 public record MoveToNextStepCommandResult(

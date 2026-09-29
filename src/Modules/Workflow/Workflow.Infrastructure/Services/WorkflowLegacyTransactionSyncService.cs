@@ -84,7 +84,8 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
         Guid? activityUserId,
         string? review,
         MailboxFormSnapshot? mailboxForm = null,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        bool endWorkflow = false)
     {
         var connectionString = _tenantContext.ConnectionString;
         if (string.IsNullOrWhiteSpace(connectionString))
@@ -222,8 +223,18 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
             Guid? nextTransactionGuid = null;
             var workflowCompleted = false;
 
-            if (IsEndReview(review))
+            if (IsEndReview(review) || endWorkflow)
             {
+                if (endWorkflow && !IsEndReview(review))
+                {
+                    var endRule = WorkflowStepActionsHelper.FindMatchingAction(targetStep, review);
+                    if (endRule == null && WorkflowStepActionsHelper.ParseActions(targetStep.ActionsJson).Count > 0)
+                    {
+                        throw new InvalidOperationException(
+                            $"Review '{review?.Trim()}' is not a valid ProceedAction for activity '{txActivityId}'.");
+                    }
+                }
+
                 await CompleteWorkflowInstanceAsync(connection, instancesTable, workflowInstanceId, userId, cancellationToken);
                 await _mailboxSync.SyncInstanceEndTransactionsAsync(
                     workflowId, workflowInstanceId, connection, mailboxForm, cancellationToken);
