@@ -851,7 +851,8 @@ LIMIT 1;
                 jsonId,
                 label,
                 reader.IsDBNull(4) ? string.Empty : reader.GetString(4),
-                reader.IsDBNull(5) ? null : reader.GetString(5)));
+                reader.IsDBNull(5) ? null : reader.GetString(5),
+                string.IsNullOrWhiteSpace(dbName) ? null : dbName.Trim()));
         }
 
         return controls;
@@ -1198,8 +1199,9 @@ LIMIT 1;
                         ? FindControl(controls, cell.Name)
                         : children.FirstOrDefault(c => string.Equals(c.JsonId, cell.Name, StringComparison.OrdinalIgnoreCase))
                             ?? children.FirstOrDefault(c =>
-                                string.Equals(c.ColumnName, cell.Name, StringComparison.OrdinalIgnoreCase)
-                                || string.Equals(c.Label, cell.Name, StringComparison.OrdinalIgnoreCase));
+                                string.Equals(c.Name, cell.Name, StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(c.Label, cell.Name, StringComparison.OrdinalIgnoreCase)
+                                || string.Equals(c.ColumnName, cell.Name, StringComparison.OrdinalIgnoreCase));
                     var key = ColumnOutputKey(child) ?? cell.Name;
                     if (!written.Add(key))
                         continue;
@@ -1231,16 +1233,18 @@ LIMIT 1;
             return match;
 
         return controls.FirstOrDefault(c =>
-            string.Equals(c.ColumnName, key, StringComparison.OrdinalIgnoreCase)
-            || string.Equals(c.Label, key, StringComparison.OrdinalIgnoreCase));
+            string.Equals(c.Name, key, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.Label, key, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(c.ColumnName, key, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string? ColumnOutputKey(FtlFormControl? control)
     {
         if (control is null)
             return null;
-        if (!string.IsNullOrWhiteSpace(control.ColumnName))
-            return control.ColumnName.Trim();
+        if (!string.IsNullOrWhiteSpace(control.Name)
+            && !string.Equals(control.Name, control.JsonId, StringComparison.OrdinalIgnoreCase))
+            return control.Name.Trim();
         if (!string.IsNullOrWhiteSpace(control.Label)
             && !string.Equals(control.Label, control.JsonId, StringComparison.OrdinalIgnoreCase))
             return control.Label.Trim();
@@ -1514,7 +1518,7 @@ LIMIT 1;
         }
     }
 
-    private sealed record FtlFormControl(int Id, int ParentId, string JsonId, string Label, string Type, string? ColumnName);
+    private sealed record FtlFormControl(int Id, int ParentId, string JsonId, string Label, string Type, string? ColumnName, string? Name);
 
     private sealed record FtlTableColumn(string? ColumnName, string Label, string JsonId, string Json);
 

@@ -14,13 +14,19 @@ public interface IFtlCatalogService
 public sealed class FtlCatalogQueryRequest
 {
     public string? ProductCode { get; set; }
+
+    /// <summary>
+    /// Full or partial product code. <c>SGV2(1S)_DP_MAC36_LH</c> also returns every product whose code contains <c>SGV2</c>.
+    /// </summary>
+    [System.Text.Json.Serialization.JsonPropertyName("searchKey")]
+    public string? SearchKey { get; set; }
 }
 
 public sealed class FtlCatalogQueryResult
 {
     public string Mode { get; init; } = "codes";
     public IReadOnlyList<string> ProductCodes { get; init; } = [];
-    public FtlCatalogProductDto? Product { get; init; }
+    public IReadOnlyList<FtlCatalogProductDto> Products { get; init; } = [];
 }
 
 public sealed class FtlCatalogProductDto
@@ -53,78 +59,138 @@ public sealed class FtlCatalogService : IFtlCatalogService
     public async Task<FtlCatalogQueryResult> QueryAsync(FtlCatalogQueryRequest request, CancellationToken cancellationToken)
     {
         var productCode = request.ProductCode?.Trim();
-        var listCodes = string.IsNullOrWhiteSpace(productCode)
-            || string.Equals(productCode, "all", StringComparison.OrdinalIgnoreCase);
+        var search = request.SearchKey?.Trim();
+        var selectedProduct = !string.IsNullOrWhiteSpace(productCode)
+            && !string.Equals(productCode, "all", StringComparison.OrdinalIgnoreCase);
 
         await using var db = await _catalogFactory.CreateDbContextAsync(cancellationToken);
         var connection = (NpgsqlConnection)db.Database.GetDbConnection();
         if (connection.State != System.Data.ConnectionState.Open)
             await connection.OpenAsync(cancellationToken);
 
-        if (listCodes)
-            return new FtlCatalogQueryResult { Mode = "codes", ProductCodes = await LoadProductCodesAsync(connection, cancellationToken) };
+        if (selectedProduct)
+        {
+            var exact = await LoadProductsAsync(connection, null, productCode, cancellationToken);
+            if (exact.Count == 0)
+                throw new InvalidOperationException($"Product '{productCode}' was not found in the FTL catalog.");
 
-        var product = await LoadProductAsync(connection, productCode!, cancellationToken);
-        if (product is null)
-            throw new InvalidOperationException($"Product '{productCode}' was not found in the FTL catalog.");
+            return new FtlCatalogQueryResult { Mode = "details", Products = exact };
+        }
 
-        return new FtlCatalogQueryResult { Mode = "details", Product = product };
+        var match = search;
+        if (!string.IsNullOrWhiteSpace(search))
+        {
+            var exactCode = await LoadProductsAsync(connection, null, search, cancellationToken);
+            if (exactCode.Count == 1)
+                match = RelatedToken(search);
+        }
+
+        var codes = await LoadProductCodesAsync(connection, match, cancellationToken);
+        return new FtlCatalogQueryResult
+        {
+            Mode = string.IsNullOrWhiteSpace(search) ? "codes" : "search",
+            ProductCodes = codes
+        };
     }
 
     private static async Task<IReadOnlyList<string>> LoadProductCodesAsync(
         NpgsqlConnection connection,
+        string? contains,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT product_code
             FROM public.ftl_catalog
             WHERE product_code IS NOT NULL AND BTRIM(product_code) <> ''
-            ORDER BY product_code ASC
             """;
+        if (!string.IsNullOrWhiteSpace(contains))
+            sql += """
+                 AND product_code ILIKE @Pattern ESCAPE '\'
+                """;
+        sql += """
+             ORDER BY product_code ASC
+            """;
+
         var codes = new List<string>();
         await using var cmd = new NpgsqlCommand(sql, connection);
+        if (!string.IsNullOrWhiteSpace(contains))
+            cmd.Parameters.Add(new NpgsqlParameter("@Pattern", NpgsqlDbType.Text) { Value = "%" + EscapeLike(contains) + "%" });
+
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             codes.Add(reader.GetString(0));
         return codes;
     }
 
-    private static async Task<FtlCatalogProductDto?> LoadProductAsync(
+    /// <summary><c>SGV2(1S)_DP_MAC36_LH</c> and <c>SGV2_DOOR_TOOLS</c> both relate on <c>SGV2</c>.</summary>
+    private static string RelatedToken(string search)
+    {
+        var trimmed = search.Trim();
+        var cut = trimmed.IndexOfAny(['(', '_']);
+        var token = cut > 0 ? trimmed[..cut] : trimmed;
+        return token.Trim();
+    }
+
+    private static string EscapeLike(string value) =>
+        value.Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("%", "\\%", StringComparison.Ordinal)
+            .Replace("_", "\\_", StringComparison.Ordinal);
+
+    private static async Task<IReadOnlyList<FtlCatalogProductDto>> LoadProductsAsync(
         NpgsqlConnection connection,
-        string productCode,
+        string? containsToken,
+        string? exactCode,
         CancellationToken cancellationToken)
     {
-        const string sql = """
+        var sql = """
             SELECT id, product_code, category, type, oem, door_hand, door_width,
                    description, unit_price, currency, search_text, raw_metadata,
                    created_at, updated_at
             FROM public.ftl_catalog
-            WHERE LOWER(BTRIM(product_code)) = LOWER(BTRIM(@ProductCode))
-            LIMIT 1
+            WHERE product_code IS NOT NULL AND BTRIM(product_code) <> ''
             """;
-        await using var cmd = new NpgsqlCommand(sql, connection);
-        cmd.Parameters.Add(new NpgsqlParameter("@ProductCode", NpgsqlDbType.Text) { Value = productCode });
-        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
-        if (!await reader.ReadAsync(cancellationToken))
-            return null;
+        if (!string.IsNullOrWhiteSpace(exactCode))
+            sql += """
+                 AND LOWER(BTRIM(product_code)) = LOWER(BTRIM(@ProductCode))
+                """;
+        else if (!string.IsNullOrWhiteSpace(containsToken))
+            sql += """
+                 AND product_code ILIKE @Pattern ESCAPE '\'
+                """;
+        sql += """
+             ORDER BY product_code ASC
+            """;
 
-        return new FtlCatalogProductDto
+        var products = new List<FtlCatalogProductDto>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        if (!string.IsNullOrWhiteSpace(exactCode))
+            cmd.Parameters.Add(new NpgsqlParameter("@ProductCode", NpgsqlDbType.Text) { Value = exactCode });
+        else if (!string.IsNullOrWhiteSpace(containsToken))
+            cmd.Parameters.Add(new NpgsqlParameter("@Pattern", NpgsqlDbType.Text) { Value = "%" + EscapeLike(containsToken) + "%" });
+
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
         {
-            Id = reader.GetGuid(0),
-            ProductCode = reader.GetString(1),
-            Category = ReadString(reader, 2),
-            Type = ReadString(reader, 3),
-            Oem = ReadString(reader, 4),
-            DoorHand = ReadString(reader, 5),
-            DoorWidth = ReadDecimal(reader, 6),
-            Description = ReadString(reader, 7),
-            UnitPrice = ReadDecimal(reader, 8),
-            Currency = ReadString(reader, 9),
-            SearchText = ReadString(reader, 10),
-            RawMetadata = ReadJson(reader, 11),
-            CreatedAt = ReadDateTime(reader, 12),
-            UpdatedAt = ReadDateTime(reader, 13)
-        };
+            products.Add(new FtlCatalogProductDto
+            {
+                Id = reader.GetGuid(0),
+                ProductCode = reader.GetString(1),
+                Category = ReadString(reader, 2),
+                Type = ReadString(reader, 3),
+                Oem = ReadString(reader, 4),
+                DoorHand = ReadString(reader, 5),
+                DoorWidth = ReadDecimal(reader, 6),
+                Description = ReadString(reader, 7),
+                UnitPrice = ReadDecimal(reader, 8),
+                Currency = ReadString(reader, 9),
+                SearchText = ReadString(reader, 10),
+                RawMetadata = ReadJson(reader, 11),
+                CreatedAt = ReadDateTime(reader, 12),
+                UpdatedAt = ReadDateTime(reader, 13)
+            });
+        }
+
+        return products;
     }
 
     private static string? ReadString(NpgsqlDataReader reader, int ordinal) =>

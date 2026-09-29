@@ -20,8 +20,9 @@ public sealed class FtlCatalogController : ControllerBase
 
     /// <summary>
     /// One lookup for the FTL catalog.
-    /// Leave <c>productCode</c> empty (or send <c>all</c>) to list every product code.
-    /// Send a product code to return that product's details.
+    /// Leave <c>productCode</c> empty to return product codes only. <c>searchKey</c> such as <c>1S_T1</c> returns codes that contain that text.
+    /// A full code in <c>searchKey</c>, such as <c>SGV2(1S)_DP_MAC36_LH</c>, also returns every code that contains <c>SGV2</c>.
+    /// Send the clicked <c>productCode</c> to return that product's full details.
     /// </summary>
     [HttpPost]
     [ProducesResponseType(typeof(FtlCatalogQueryResult), StatusCodes.Status200OK)]
