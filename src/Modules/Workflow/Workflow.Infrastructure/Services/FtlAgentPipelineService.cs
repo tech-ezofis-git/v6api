@@ -489,6 +489,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     {
         form.Add(new StringContent(args.WorkflowId.ToString("D")), "workflowId");
         form.Add(new StringContent(args.TenantId.ToString("D")), "tenantId");
+        form.Add(new StringContent(args.TenantId.ToString("D")), "tenant_id");
         form.Add(new StringContent(args.InstanceId.ToString("D")), "instanceId");
         if (!string.IsNullOrWhiteSpace(args.RepositoryId))
             form.Add(new StringContent(args.RepositoryId), "repositoryId");
