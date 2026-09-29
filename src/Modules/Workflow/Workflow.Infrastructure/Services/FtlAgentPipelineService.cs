@@ -453,6 +453,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         {
             ["template_type"] = "inflow",
             ["workflowId"] = args.WorkflowId.ToString("D"),
+            ["tenantId"] = args.TenantId.ToString("D"),
             ["instanceId"] = args.InstanceId.ToString("D"),
             ["repositoryId"] = args.RepositoryId,
             ["formId"] = args.FormId,
@@ -487,6 +488,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     private void AddTrackingFields(MultipartFormDataContent form, FtlAgentJobArgs args, string jobId)
     {
         form.Add(new StringContent(args.WorkflowId.ToString("D")), "workflowId");
+        form.Add(new StringContent(args.TenantId.ToString("D")), "tenantId");
         form.Add(new StringContent(args.InstanceId.ToString("D")), "instanceId");
         if (!string.IsNullOrWhiteSpace(args.RepositoryId))
             form.Add(new StringContent(args.RepositoryId), "repositoryId");
