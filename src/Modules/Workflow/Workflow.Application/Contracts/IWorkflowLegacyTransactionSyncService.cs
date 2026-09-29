@@ -18,7 +18,8 @@ public interface IWorkflowLegacyTransactionSyncService
         Guid? activityUserId,
         string? review,
         MailboxFormSnapshot? mailboxForm = null,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        bool endWorkflow = false);
 
     /// <summary>
     /// Legacy process FlowStatus for the instance (0 = running, 1 = completed), or null if no process row exists.

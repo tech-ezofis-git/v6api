@@ -197,6 +197,37 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
 
     private async Task ExecuteDocumentAsync(FtlAgentJobArgs args, string jobId, CancellationToken cancellationToken)
     {
+        await GenerateDocumentAsync(args, cancellationToken);
+
+        var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var formData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var moved = await _mediator.Send(
+            new MoveToNextStepCommand(
+                args.InstanceId,
+                args.ActivityId,
+                Review: "Generated",
+                Comments: "FTL document",
+                ActivityUserId: args.UserId,
+                FormId: args.FormId,
+                FormEntryId: identity?.FormEntryId,
+                SubmittedFormDataJson: formData,
+                EndWorkflow: true),
+            cancellationToken);
+
+        if (!moved.Success)
+            throw new InvalidOperationException(moved.Message ?? "FTL document move-next failed.");
+
+        _logger.LogInformation(
+            "FTL document archived {FileName} for instance {InstanceId} and ended the ticket.",
+            moved.GeneratedPdfFileName,
+            args.InstanceId);
+    }
+
+    public async Task<FtlDocumentGenerateResult> GenerateDocumentAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default)
+    {
+        var jobId = args.InstanceId.ToString("N");
         var chatUrl = _agentsChat.ResolveChatUrl();
         if (string.IsNullOrWhiteSpace(chatUrl))
             throw new InvalidOperationException("Agents:ChatUrl is not configured.");
@@ -219,7 +250,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
 
         var pythonFormData = await RemapFormDataKeysToColumnNamesAsync(formId, formData, cancellationToken);
         var template = await LoadPdfTemplateAsync(args.WorkflowId, args.ActivityId, cancellationToken);
-        var responseJson = await PostDocumentAsync(jobId, chatUrl, pythonFormData, template, cancellationToken);
+        var (responseJson, pythonRequest) = await PostDocumentAsync(jobId, chatUrl, pythonFormData, template, cancellationToken);
         var (pdfBytes, fileName) = ReadGeneratedPdf(responseJson);
         var repositoryId = ParseGuid(args.RepositoryId) ?? ParseGuid(workflow.RepositoryId)
             ?? throw new InvalidOperationException("Workflow repositoryId is not configured for the document PDF.");
@@ -240,8 +271,6 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             cancellationToken,
             allowIncompleteFolderMetadata: true);
 
-        var existingFormData = formData;
-
         await _moveNextSupport.SaveAgentValidationAsync(
             args.WorkflowId,
             args.InstanceId,
@@ -259,26 +288,16 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             legacyTransactionId: null,
             cancellationToken);
 
-        var moved = await _mediator.Send(
-            new MoveToNextStepCommand(
-                args.InstanceId,
-                args.ActivityId,
-                Review: "Submit",
-                Comments: "FTL document",
-                ActivityUserId: args.UserId,
-                FormId: formId,
-                FormEntryId: identity?.FormEntryId,
-                SubmittedFormDataJson: existingFormData),
-            cancellationToken);
-
-        if (!moved.Success)
-            throw new InvalidOperationException(moved.Message ?? "FTL document move-next failed.");
-
         _logger.LogInformation(
-            "FTL document archived {FileName} for instance {InstanceId} and moved to {NextStep}.",
+            "FTL document archived {FileName} for instance {InstanceId}.",
             fileName,
-            args.InstanceId,
-            moved.NextStepName);
+            args.InstanceId);
+
+        return new FtlDocumentGenerateResult(
+            archived.AttachmentId,
+            archived.ItemId,
+            fileName,
+            pythonRequest);
     }
 
     private async Task<JsonElement> LoadPdfTemplateAsync(
@@ -347,7 +366,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         return template.Clone();
     }
 
-    private async Task<string> PostDocumentAsync(
+    private async Task<(string ResponseJson, WorkflowPdfPythonRequestDto Request)> PostDocumentAsync(
         string jobId,
         string chatUrl,
         string formDataJson,
@@ -364,10 +383,11 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         {
         }
 
+        var templateNode = JsonSerializer.Deserialize<object>(template.GetRawText());
         var payload = new Dictionary<string, object?>
         {
             ["formData"] = formData,
-            ["templateJson"] = JsonSerializer.Deserialize<object>(template.GetRawText())
+            ["templateJson"] = templateNode
         };
 
         var body = JsonSerializer.Serialize(new
@@ -385,7 +405,45 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             jobId,
             body);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
-        return await PostAsync(chatUrl, content, cancellationToken);
+        var responseJson = await PostAsync(chatUrl, content, cancellationToken);
+        using var templateDoc = JsonDocument.Parse(template.GetRawText());
+        var request = new WorkflowPdfPythonRequestDto(
+            FlattenFormData(formDataJson),
+            "quote.pdf",
+            new Dictionary<string, string>
+            {
+                ["session_id"] = jobId,
+                ["intent"] = "ftl_quote_estimator"
+            },
+            templateDoc.RootElement.Clone());
+        return (responseJson, request);
+    }
+
+    private static IReadOnlyDictionary<string, string> FlattenFormData(string formDataJson)
+    {
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            using var doc = JsonDocument.Parse(formDataJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                fields["formData"] = formDataJson;
+                return fields;
+            }
+
+            foreach (var prop in doc.RootElement.EnumerateObject())
+            {
+                fields[prop.Name] = prop.Value.ValueKind == JsonValueKind.String
+                    ? prop.Value.GetString() ?? string.Empty
+                    : prop.Value.GetRawText();
+            }
+        }
+        catch (JsonException)
+        {
+            fields["formData"] = formDataJson;
+        }
+
+        return fields;
     }
 
     private static (byte[] Bytes, string FileName) ReadGeneratedPdf(string responseJson)

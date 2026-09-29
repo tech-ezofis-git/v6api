@@ -19,4 +19,19 @@ public interface IFtlAgentJobClient
 public interface IFtlAgentPipelineService
 {
     Task ExecuteAsync(FtlAgentJobArgs args, string hangfireJobId, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Sends the current form data and the document-node template to Python, archives the PDF.
+    /// Does not move the workflow.
+    /// </summary>
+    Task<FtlDocumentGenerateResult> GenerateDocumentAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default);
 }
+
+/// <summary>PDF archived from the document-generate Python call, plus the exact request sent.</summary>
+public sealed record FtlDocumentGenerateResult(
+    Guid AttachmentId,
+    Guid ItemId,
+    string FileName,
+    WorkflowPdfPythonRequestDto PythonRequest);
