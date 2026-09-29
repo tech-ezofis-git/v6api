@@ -10,6 +10,7 @@ using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.SharedKernel.Options;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Domain.Entities;
 using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
 using SaaSApp.Workflow.Infrastructure.Options;
@@ -163,7 +164,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         }
 
         var review = args.Mode == FtlAgentStepDetector.Qualifier
-            ? ResolveQualifyReview(storedJson)
+            ? ResolveQualifyReview(storedJson, step)
             : "Submit";
 
         var moved = await _mediator.Send(
@@ -375,6 +376,14 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             intent = "ftl_quote_estimator",
             payload
         });
+        _logger.LogInformation(
+            "FTL document Python chat input session {SessionId}. formData={FormData}",
+            jobId,
+            formDataJson);
+        _logger.LogInformation(
+            "FTL document Python chat request body session {SessionId}: {RequestBody}",
+            jobId,
+            body);
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         return await PostAsync(chatUrl, content, cancellationToken);
     }
@@ -640,18 +649,51 @@ LIMIT 1;
         }
     }
 
-    private static string ResolveQualifyReview(string json)
+    private static string ResolveQualifyReview(string json, WorkflowStep step)
+    {
+        var decision = ReadQualifyDecision(json);
+        var matched = WorkflowStepActionsHelper.FindMatchingAction(step, decision);
+        if (!string.IsNullOrWhiteSpace(matched?.ProceedAction))
+            return matched.ProceedAction!;
+
+        foreach (var action in WorkflowStepActionsHelper.ParseActions(step.ActionsJson))
+        {
+            var label = action.ProceedAction;
+            if (string.IsNullOrWhiteSpace(label))
+                continue;
+            var isDisqualify = label.Contains("disqual", StringComparison.OrdinalIgnoreCase);
+            if (decision == "disqualify" && isDisqualify)
+                return label;
+            if (decision == "qualify"
+                && label.Contains("qualif", StringComparison.OrdinalIgnoreCase)
+                && !isDisqualify)
+                return label;
+        }
+
+        return decision;
+    }
+
+    private static string ReadQualifyDecision(string json)
     {
         using var doc = JsonDocument.Parse(json);
         var result = FindProperty(doc.RootElement, "qualifier_result");
-        var qualify = result.ValueKind == JsonValueKind.Object
-            && result.TryGetProperty("qualify", out var q)
-            ? q.GetString()
-            : null;
-        if (!string.IsNullOrWhiteSpace(qualify)
-            && qualify.Contains("disqual", StringComparison.OrdinalIgnoreCase))
-            return "DISQUALIFY";
-        return "QUALIFY";
+        if (result.ValueKind != JsonValueKind.Object)
+            return "qualify";
+
+        foreach (var prop in result.EnumerateObject())
+        {
+            if (!prop.Name.Equals("qualify", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var value = prop.Value.ValueKind == JsonValueKind.String
+                ? prop.Value.GetString()
+                : prop.Value.GetRawText();
+            if (!string.IsNullOrWhiteSpace(value)
+                && value.Contains("disqual", StringComparison.OrdinalIgnoreCase))
+                return "disqualify";
+            return "qualify";
+        }
+
+        return "qualify";
     }
 
     private async Task<FtlMappedForm> RemapFieldsToJsonIdsAsync(
