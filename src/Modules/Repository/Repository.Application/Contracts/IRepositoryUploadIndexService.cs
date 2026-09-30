@@ -81,6 +81,7 @@ public interface IRepositoryUploadIndexService
     Task<UploadIndexListResult> ListIndexAsync(
         Guid tenantId,
         UploadIndexListRequest request,
+        Guid indexedByUserId,
         CancellationToken cancellationToken = default);
 
     /// <summary>

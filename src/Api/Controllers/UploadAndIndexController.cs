@@ -529,7 +529,9 @@ public sealed class UploadAndIndexController : ControllerBase
         var tenantId = RequireTenantId();
         try
         {
-            var result = await _uploadIndex.ListIndexAsync(tenantId, request, cancellationToken);
+            var userId = GetUserId()
+                ?? throw new InvalidOperationException("User context is required.");
+            var result = await _uploadIndex.ListIndexAsync(tenantId, request, userId, cancellationToken);
             return Ok(new
             {
                 data = new[]
