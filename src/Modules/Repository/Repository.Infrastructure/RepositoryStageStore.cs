@@ -469,6 +469,7 @@ internal static class RepositoryStageStore
         NpgsqlConnection connection,
         RepositoryDetailDto repo,
         Guid tenantId,
+        Guid indexedByUserId,
         bool includeDeleted,
         int skip,
         int take,
@@ -476,13 +477,14 @@ internal static class RepositoryStageStore
     {
         var table = RepositorySqlHelper.QualifiedItemsTable(repo.StageTableName);
         var where = includeDeleted
-            ? "tenant_id = @TenantId AND repository_id = @RepositoryId"
-            : "tenant_id = @TenantId AND repository_id = @RepositoryId AND is_deleted = false AND COALESCE(status, '') <> 'ARCHIVED'";
+            ? "tenant_id = @TenantId AND repository_id = @RepositoryId AND created_by = @CreatedBy"
+            : "tenant_id = @TenantId AND repository_id = @RepositoryId AND created_by = @CreatedBy AND is_deleted = false AND COALESCE(status, '') <> 'ARCHIVED'";
 
         var countSql = $"SELECT COUNT(*) FROM {table} WHERE {where};";
         await using var countCmd = new NpgsqlCommand(countSql, connection);
         countCmd.Parameters.AddWithValue("@TenantId", tenantId);
         countCmd.Parameters.AddWithValue("@RepositoryId", repo.Id);
+        countCmd.Parameters.AddWithValue("@CreatedBy", indexedByUserId);
         var total = Convert.ToInt32(await countCmd.ExecuteScalarAsync(cancellationToken));
 
         var sql = $"""
@@ -498,6 +500,7 @@ internal static class RepositoryStageStore
         {
             listCmd.Parameters.AddWithValue("@TenantId", tenantId);
             listCmd.Parameters.AddWithValue("@RepositoryId", repo.Id);
+            listCmd.Parameters.AddWithValue("@CreatedBy", indexedByUserId);
             listCmd.Parameters.AddWithValue("@Skip", Math.Max(skip, 0));
             listCmd.Parameters.AddWithValue("@Take", Math.Max(take, 1));
             await using var reader = await listCmd.ExecuteReaderAsync(cancellationToken);

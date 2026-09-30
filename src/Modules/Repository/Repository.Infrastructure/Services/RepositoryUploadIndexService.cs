@@ -695,8 +695,11 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
     public async Task<UploadIndexListResult> ListIndexAsync(
         Guid tenantId,
         UploadIndexListRequest request,
+        Guid indexedByUserId,
         CancellationToken cancellationToken = default)
     {
+        if (indexedByUserId == Guid.Empty)
+            throw new InvalidOperationException("User context is required.");
         if (request.RepositoryId is not Guid repositoryId || repositoryId == Guid.Empty)
             throw new ArgumentException("repositoryId is required for index/all.");
 
@@ -717,7 +720,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         await connection.OpenAsync(cancellationToken);
 
         var (rows, total) = await RepositoryStageStore.ListAsync(
-            connection, repo, tenantId, includeDeleted, skip, pageSize, cancellationToken);
+            connection, repo, tenantId, indexedByUserId, includeDeleted, skip, pageSize, cancellationToken);
 
         var items = rows.Select(r =>
         {

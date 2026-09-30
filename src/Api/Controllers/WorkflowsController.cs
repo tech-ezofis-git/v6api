@@ -71,6 +71,7 @@ public sealed class WorkflowsController : ControllerBase
     private readonly IWorkflowInboxShareAssignmentService _inboxShareAssignment;
     private readonly IWorkflowTicketSearchService _ticketSearch;
     private readonly IWorkflowSecurityService _workflowSecurity;
+    private readonly IFtlAgentPipelineService _ftlAgentPipeline;
 
     public WorkflowsController(
         IMediator mediator,
@@ -90,7 +91,8 @@ public sealed class WorkflowsController : ControllerBase
         IShareGuestUserProvisioningService guestProvisioning,
         IWorkflowInboxShareAssignmentService inboxShareAssignment,
         IWorkflowTicketSearchService ticketSearch,
-        IWorkflowSecurityService workflowSecurity)
+        IWorkflowSecurityService workflowSecurity,
+        IFtlAgentPipelineService ftlAgentPipeline)
     {
         _mediator = mediator;
         _workflowSchemaService = workflowSchemaService;
@@ -110,6 +112,75 @@ public sealed class WorkflowsController : ControllerBase
         _inboxShareAssignment = inboxShareAssignment;
         _ticketSearch = ticketSearch;
         _workflowSecurity = workflowSecurity;
+        _ftlAgentPipeline = ftlAgentPipeline;
+    }
+
+    /// <summary>
+    /// Preview a document PDF. formData may be keyed by jsonId; keys are converted to field names
+    /// before the Python chat call. Returns the PDF and the named formData. Does not archive or move a ticket.
+    /// </summary>
+    [HttpPost("document/preview")]
+    [Consumes("application/json")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> PreviewDocument([FromBody] JsonElement body, CancellationToken cancellationToken)
+    {
+        if (body.ValueKind != JsonValueKind.Object)
+            return BadRequest(new { error = "JSON body is required." });
+
+        var formDataJson = ReadJsonBodyProperty(body, "formData");
+        var templateRaw = ReadJsonBodyProperty(body, "templateJson");
+        if (string.IsNullOrWhiteSpace(formDataJson))
+            return BadRequest(new { error = "formData is required." });
+        if (string.IsNullOrWhiteSpace(templateRaw))
+            return BadRequest(new { error = "templateJson is required." });
+
+        JsonElement template;
+        try
+        {
+            using var templateDoc = JsonDocument.Parse(templateRaw);
+            template = templateDoc.RootElement.Clone();
+        }
+        catch (JsonException ex)
+        {
+            return BadRequest(new { error = $"templateJson is not valid JSON: {ex.Message}" });
+        }
+
+        var formId = ReadJsonBodyProperty(body, "formId");
+        try
+        {
+            var result = await _ftlAgentPipeline.PreviewDocumentAsync(formId, formDataJson, template, cancellationToken);
+            JsonElement namedFormData;
+            using (var namedDoc = JsonDocument.Parse(result.FormDataJson))
+                namedFormData = namedDoc.RootElement.Clone();
+
+            return Ok(new
+            {
+                fileName = result.FileName,
+                pdfBase64 = result.PdfBase64,
+                formData = namedFormData
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private static string? ReadJsonBodyProperty(JsonElement body, string name)
+    {
+        foreach (var prop in body.EnumerateObject())
+        {
+            if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (prop.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                return null;
+            if (prop.Value.ValueKind == JsonValueKind.String)
+                return prop.Value.GetString();
+            return prop.Value.GetRawText();
+        }
+
+        return null;
     }
 
     /// <summary>Apply workflow schema to current tenant database. Call this if workflow.Workflows is missing. Requires X-Tenant-Id. In Development, no auth required.</summary>
