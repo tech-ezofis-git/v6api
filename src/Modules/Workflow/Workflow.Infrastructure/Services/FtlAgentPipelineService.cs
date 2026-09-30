@@ -1003,14 +1003,12 @@ LIMIT 1;
         {
             case JsonValueKind.Object:
                 if (TryGetPropertyIgnoreCase(element, "id", out var idEl)
-                    && idEl.ValueKind == JsonValueKind.String
-                    && TryGetPropertyIgnoreCase(element, "label", out var labelEl)
-                    && labelEl.ValueKind == JsonValueKind.String)
+                    && idEl.ValueKind == JsonValueKind.String)
                 {
                     var id = idEl.GetString();
-                    var label = labelEl.GetString();
-                    if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(label))
-                        labels[id] = label;
+                    var title = ReadFieldTitle(element);
+                    if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(title))
+                        labels[id] = title;
                 }
 
                 foreach (var prop in element.EnumerateObject())
@@ -1021,6 +1019,25 @@ LIMIT 1;
                     CollectFieldLabels(item, labels);
                 break;
         }
+    }
+
+    /// <summary>
+    /// Top-level fields use label ("Order Number"). Table columns store the title in name
+    /// ("Product", "Qty", "Item") and leave label empty.
+    /// </summary>
+    private static string? ReadFieldTitle(JsonElement element)
+    {
+        if (TryGetPropertyIgnoreCase(element, "label", out var labelEl)
+            && labelEl.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(labelEl.GetString()))
+            return labelEl.GetString()!.Trim();
+
+        if (TryGetPropertyIgnoreCase(element, "name", out var nameEl)
+            && nameEl.ValueKind == JsonValueKind.String
+            && !string.IsNullOrWhiteSpace(nameEl.GetString()))
+            return nameEl.GetString()!.Trim();
+
+        return null;
     }
 
     private static FtlFormControl? ResolveQualifierControl(string key, IReadOnlyList<FtlFormControl> roots)
