@@ -1,5 +1,4 @@
 using MediatR;
-using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows;
@@ -24,7 +23,6 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly IFtlAgentJobClient _ftlAgentJobClient;
-    private readonly IServiceProvider _services;
     private readonly ILogger<MoveToNextStepCommandHandler> _logger;
 
     public MoveToNextStepCommandHandler(
@@ -42,7 +40,6 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider,
         IFtlAgentJobClient ftlAgentJobClient,
-        IServiceProvider services,
         ILogger<MoveToNextStepCommandHandler> logger)
     {
         _repository = repository;
@@ -59,7 +56,6 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
         _ftlAgentJobClient = ftlAgentJobClient;
-        _services = services;
         _logger = logger;
     }
 
@@ -305,8 +301,14 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         }
         else if (legacySync.Status == LegacyTransactionSyncStatus.ReviewUpdated)
         {
-            // Generate PDF when leaving this step — including when this move completes the workflow.
-            if (!FtlAgentStepDetector.IsDocumentGenerateAgent(targetDefinitionStep))
+            // PDF is created only by the Document Generate Agent. Leaving Manual User
+            // (or any other step) into that agent must not generate a PDF here.
+            var upcomingStep = WorkflowStepActionsHelper.ResolveNextStepByReview(
+                targetDefinitionStep, request.Review, orderedSteps);
+            var routesToDocumentAgent = upcomingStep != null
+                && FtlAgentStepDetector.IsDocumentGenerateAgent(upcomingStep);
+            if (!FtlAgentStepDetector.IsDocumentGenerateAgent(targetDefinitionStep)
+                && !routesToDocumentAgent)
             {
                 generatedPdf = await _pdfGeneration.TryGenerateOnStepCompleteAsync(
                     workflow,
@@ -424,52 +426,6 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 cancellationToken: cancellationToken);
         }
 
-        if (!workflowCompleted
-            && !request.EndWorkflow
-            && nextDefinitionStep != null
-            && FtlAgentStepDetector.IsDocumentGenerateAgent(nextDefinitionStep))
-        {
-            var documentActivityId = !string.IsNullOrWhiteSpace(nextDefinitionStep.ActivityId)
-                ? nextDefinitionStep.ActivityId!
-                : nextDefinitionStep.Id.ToString("D");
-            var generated = await _services.GetRequiredService<IFtlAgentPipelineService>().GenerateDocumentAsync(
-                new FtlAgentJobArgs(
-                    instance.TenantId,
-                    userId,
-                    instance.WorkflowId,
-                    instance.Id,
-                    documentActivityId,
-                    FtlAgentStepDetector.Document,
-                    workflow.RepositoryId,
-                    formId ?? workflow.FormId),
-                cancellationToken);
-
-            legacySync = await _legacyTransactionSync.SyncTransactionByActivityIdAsync(
-                instance.WorkflowId,
-                instance.Id,
-                instance.ReferenceNumber,
-                nextDefinitionStep,
-                orderedSteps,
-                documentActivityId,
-                userId,
-                userId,
-                "Generated",
-                mailboxForm,
-                cancellationToken,
-                endWorkflow: true);
-
-            WorkflowStepTransitionHelper.CompleteStepInstance(instance, nextDefinitionStep.Id, userId);
-            instance.Complete(userId);
-            await _repository.UpdateInstanceAsync(instance, cancellationToken);
-            await _unitOfWork.SaveChangesAsync(cancellationToken);
-            workflowCompleted = true;
-            generatedPdf = new WorkflowPdfGenerationResult(
-                generated.AttachmentId,
-                generated.ItemId,
-                generated.FileName,
-                generated.PythonRequest);
-        }
-
         var isCompleted = workflowCompleted || instance.Status == WorkflowInstanceStatus.Completed;
         int? legacyNextTransactionId = isCompleted ? 0 : legacySync.NextTransactionId;
         Guid? legacyNextTransactionGuid = isCompleted ? null : legacySync.NextTransactionGuid;
@@ -554,7 +510,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         CancellationToken cancellationToken)
     {
         var mode = FtlAgentStepDetector.HangfireMode(nextStep);
-        if (mode == null || mode == FtlAgentStepDetector.Qualifier || mode == FtlAgentStepDetector.Document)
+        if (mode == null || mode == FtlAgentStepDetector.Qualifier)
             return;
 
         var activityId = !string.IsNullOrWhiteSpace(nextStep.ActivityId)

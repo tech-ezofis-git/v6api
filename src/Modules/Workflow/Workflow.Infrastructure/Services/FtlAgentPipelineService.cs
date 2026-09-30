@@ -210,17 +210,17 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 ActivityUserId: args.UserId,
                 FormId: args.FormId,
                 FormEntryId: identity?.FormEntryId,
-                SubmittedFormDataJson: formData,
-                EndWorkflow: true),
+                SubmittedFormDataJson: formData),
             cancellationToken);
 
         if (!moved.Success)
             throw new InvalidOperationException(moved.Message ?? "FTL document move-next failed.");
 
         _logger.LogInformation(
-            "FTL document archived {FileName} for instance {InstanceId} and ended the ticket.",
+            "FTL document archived {FileName} for instance {InstanceId} and moved to {NextStep}.",
             moved.GeneratedPdfFileName,
-            args.InstanceId);
+            args.InstanceId,
+            moved.NextStepName);
     }
 
     public async Task<FtlDocumentGenerateResult> GenerateDocumentAsync(
