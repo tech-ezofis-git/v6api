@@ -1978,8 +1978,15 @@ public sealed class WorkflowsController : ControllerBase
             parsedFormData.Fields,
             parsedFormData.LineItemsJson,
             submittedFormDataJson);
-        var result = await _mediator.Send(command, cancellationToken);
-        return Ok(result);
+        try
+        {
+            var result = await _mediator.Send(command, cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { success = false, message = ex.Message });
+        }
     }
 
     /// <summary>
