@@ -300,6 +300,76 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             pythonRequest);
     }
 
+    public async Task<FtlDocumentPreviewResult> PreviewDocumentAsync(
+        string? formId,
+        string formDataJson,
+        JsonElement templateJson,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(formDataJson))
+            throw new InvalidOperationException("formData is required.");
+        if (templateJson.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+            throw new InvalidOperationException("templateJson is required.");
+
+        var chatUrl = _agentsChat.ResolveChatUrl();
+        if (string.IsNullOrWhiteSpace(chatUrl))
+            throw new InvalidOperationException("Agents:ChatUrl is not configured.");
+
+        if (string.IsNullOrWhiteSpace(formId))
+            formId = await ResolveFormIdFromFormDataAsync(formDataJson, cancellationToken);
+
+        var namedFormData = await RemapFormDataKeysToColumnNamesAsync(formId, formDataJson, cancellationToken);
+        var template = CloneTemplate(templateJson);
+        var sessionId = Guid.NewGuid().ToString("N");
+        var (responseJson, _) = await PostDocumentAsync(sessionId, chatUrl, namedFormData, template, cancellationToken);
+        var (pdfBytes, fileName) = ReadGeneratedPdf(responseJson);
+        return new FtlDocumentPreviewResult(fileName, Convert.ToBase64String(pdfBytes), namedFormData);
+    }
+
+    private async Task<string?> ResolveFormIdFromFormDataAsync(string formDataJson, CancellationToken cancellationToken)
+    {
+        string? jsonId = null;
+        try
+        {
+            using var doc = JsonDocument.Parse(formDataJson);
+            if (doc.RootElement.ValueKind == JsonValueKind.Object)
+            {
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    if (!string.IsNullOrWhiteSpace(prop.Name))
+                    {
+                        jsonId = prop.Name.Trim();
+                        break;
+                    }
+                }
+            }
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+
+        if (string.IsNullOrWhiteSpace(jsonId))
+            return null;
+
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return null;
+
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+        const string sql = """
+            SELECT "wFormId"
+            FROM dbo."wFormControl"
+            WHERE "isDeleted" = false AND "jsonId" = @JsonId
+            LIMIT 1
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@JsonId", jsonId);
+        var value = await cmd.ExecuteScalarAsync(cancellationToken);
+        return value is string text && !string.IsNullOrWhiteSpace(text) ? text.Trim() : null;
+    }
+
     private async Task<JsonElement> LoadPdfTemplateAsync(
         Guid workflowId,
         string activityId,

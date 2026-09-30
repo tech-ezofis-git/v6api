@@ -27,6 +27,16 @@ public interface IFtlAgentPipelineService
     Task<FtlDocumentGenerateResult> GenerateDocumentAsync(
         FtlAgentJobArgs args,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Preview only: remap jsonId formData to field names, call Python chat, return the PDF.
+    /// Does not archive or move the workflow.
+    /// </summary>
+    Task<FtlDocumentPreviewResult> PreviewDocumentAsync(
+        string? formId,
+        string formDataJson,
+        System.Text.Json.JsonElement templateJson,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>PDF archived from the document-generate Python call, plus the exact request sent.</summary>
@@ -35,3 +45,9 @@ public sealed record FtlDocumentGenerateResult(
     Guid ItemId,
     string FileName,
     WorkflowPdfPythonRequestDto PythonRequest);
+
+/// <summary>Python PDF preview. FormDataJson uses field names, not jsonIds.</summary>
+public sealed record FtlDocumentPreviewResult(
+    string FileName,
+    string PdfBase64,
+    string FormDataJson);
