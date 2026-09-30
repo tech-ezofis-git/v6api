@@ -131,15 +131,11 @@ public static class EzfbColumnNaming
         column = string.Empty;
         matchKind = EzfbColumnMatchKind.None;
 
-        if (!string.IsNullOrWhiteSpace(columnName))
+        if (!string.IsNullOrWhiteSpace(columnName)
+            && TryGetPhysicalColumn(ezfbColumns, columnName.Trim(), out column))
         {
-            var trimmedColumn = columnName.Trim();
-            if (ezfbColumns.Contains(trimmedColumn))
-            {
-                column = trimmedColumn;
-                matchKind = EzfbColumnMatchKind.StoredColumnName;
-                return true;
-            }
+            matchKind = EzfbColumnMatchKind.StoredColumnName;
+            return true;
         }
 
         return TryResolveEzfbColumn(name, jsonId, ezfbColumns, out column, out matchKind);
@@ -164,16 +160,15 @@ public static class EzfbColumnNaming
         if (!string.IsNullOrWhiteSpace(name))
         {
             var trimmedName = name.Trim();
-            if (ezfbColumns.Contains(trimmedName))
+            if (TryGetPhysicalColumn(ezfbColumns, trimmedName, out column))
             {
-                column = trimmedName;
                 matchKind = EzfbColumnMatchKind.ExactName;
                 return true;
             }
 
-            if (TryToColumnNameFromLabel(trimmedName, out var fromName) && ezfbColumns.Contains(fromName))
+            if (TryToColumnNameFromLabel(trimmedName, out var fromName)
+                && TryGetPhysicalColumn(ezfbColumns, fromName, out column))
             {
-                column = fromName;
                 matchKind = EzfbColumnMatchKind.SanitizedName;
                 return true;
             }
@@ -183,16 +178,15 @@ public static class EzfbColumnNaming
             return false;
 
         var trimmedJsonId = jsonId.Trim();
-        if (ezfbColumns.Contains(trimmedJsonId))
+        if (TryGetPhysicalColumn(ezfbColumns, trimmedJsonId, out column))
         {
-            column = trimmedJsonId;
             matchKind = EzfbColumnMatchKind.ExactJsonId;
             return true;
         }
 
-        if (TryToColumnName(trimmedJsonId, out var fromJsonId) && ezfbColumns.Contains(fromJsonId))
+        if (TryToColumnName(trimmedJsonId, out var fromJsonId)
+            && TryGetPhysicalColumn(ezfbColumns, fromJsonId, out column))
         {
-            column = fromJsonId;
             matchKind = EzfbColumnMatchKind.SanitizedJsonId;
             return true;
         }
@@ -202,14 +196,35 @@ public static class EzfbColumnNaming
             && char.IsDigit(baseName[0]))
         {
             var legacy = "F_" + baseName;
-            if (ezfbColumns.Contains(legacy))
+            if (TryGetPhysicalColumn(ezfbColumns, legacy, out column))
             {
-                column = legacy;
                 matchKind = EzfbColumnMatchKind.LegacyPrefixedJsonId;
                 return true;
             }
         }
 
+        return false;
+    }
+
+    /// <summary>
+    /// Quoted SQL uses the physical column's exact casing. A case-insensitive set match
+    /// (Customer_ID vs Customer_Id) must return the name that exists on the table.
+    /// </summary>
+    private static bool TryGetPhysicalColumn(IReadOnlySet<string> ezfbColumns, string candidate, out string physical)
+    {
+        if (ezfbColumns.Contains(candidate))
+        {
+            foreach (var existing in ezfbColumns)
+            {
+                if (string.Equals(existing, candidate, StringComparison.OrdinalIgnoreCase))
+                {
+                    physical = existing;
+                    return true;
+                }
+            }
+        }
+
+        physical = string.Empty;
         return false;
     }
 
