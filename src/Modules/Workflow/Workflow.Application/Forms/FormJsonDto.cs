@@ -44,8 +44,37 @@ public sealed class FormFieldDto
 {
     public string? Id { get; set; }
     public string? Label { get; set; }
+
+    /// <summary>Table columns store the title here and leave <see cref="Label"/> empty.</summary>
+    public string? Name { get; set; }
+
     public string? Type { get; set; }
     public FormFieldSettingsDto? Settings { get; set; }
+
+    /// <summary>
+    /// Title stored in wFormControl.name. Prefer a real label, then name.
+    /// A value that is only the field id is skipped when the other property has a title.
+    /// </summary>
+    public string ControlName()
+    {
+        var id = Id?.Trim();
+        var label = Label?.Trim();
+        var name = Name?.Trim();
+
+        if (IsDisplayTitle(label, id))
+            return label!;
+        if (IsDisplayTitle(name, id))
+            return name!;
+        if (!string.IsNullOrWhiteSpace(label))
+            return label!;
+        if (!string.IsNullOrWhiteSpace(name))
+            return name!;
+        return id ?? "";
+    }
+
+    private static bool IsDisplayTitle(string? value, string? id) =>
+        !string.IsNullOrWhiteSpace(value)
+        && (string.IsNullOrWhiteSpace(id) || !string.Equals(value, id, StringComparison.OrdinalIgnoreCase));
 }
 
 public sealed class FormFieldSettingsDto

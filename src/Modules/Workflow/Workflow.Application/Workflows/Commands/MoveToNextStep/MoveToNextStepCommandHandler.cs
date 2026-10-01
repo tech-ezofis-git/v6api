@@ -23,6 +23,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IUnitOfWork _unitOfWork;
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly IFtlAgentJobClient _ftlAgentJobClient;
+    private readonly IApAgentJobProgressService _apAgentJobProgress;
     private readonly ILogger<MoveToNextStepCommandHandler> _logger;
 
     public MoveToNextStepCommandHandler(
@@ -40,6 +41,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IUnitOfWork unitOfWork,
         ICurrentUserProvider currentUserProvider,
         IFtlAgentJobClient ftlAgentJobClient,
+        IApAgentJobProgressService apAgentJobProgress,
         ILogger<MoveToNextStepCommandHandler> logger)
     {
         _repository = repository;
@@ -56,6 +58,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _unitOfWork = unitOfWork;
         _currentUserProvider = currentUserProvider;
         _ftlAgentJobClient = ftlAgentJobClient;
+        _apAgentJobProgress = apAgentJobProgress;
         _logger = logger;
     }
 
@@ -482,8 +485,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             }
         }
 
+        string? ftlJobId = null;
         if (!isCompleted && nextDefinitionStep != null)
-            await TryEnqueueFtlAgentAsync(instance, workflow, nextDefinitionStep, userId, formId, cancellationToken);
+            ftlJobId = await TryEnqueueFtlAgentAsync(instance, workflow, nextDefinitionStep, userId, formId, cancellationToken);
 
         return new MoveToNextStepCommandResult(
             true,
@@ -498,10 +502,12 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             legacyNextTransactionGuid,
             GeneratedPdfAttachmentId: generatedPdf?.AttachmentId,
             GeneratedPdfFileName: generatedPdf?.FileName,
-            GeneratedPdfInput: generatedPdf?.PythonRequest);
+            GeneratedPdfInput: generatedPdf?.PythonRequest,
+            ApAgentJobId: ftlJobId,
+            ApAgentJobStatusUrl: string.IsNullOrWhiteSpace(ftlJobId) ? null : _ftlAgentJobClient.StatusUrl(ftlJobId));
     }
 
-    private async Task TryEnqueueFtlAgentAsync(
+    private async Task<string?> TryEnqueueFtlAgentAsync(
         WorkflowInstance instance,
         Domain.Entities.Workflow workflow,
         WorkflowStep nextStep,
@@ -510,8 +516,23 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         CancellationToken cancellationToken)
     {
         var mode = FtlAgentStepDetector.HangfireMode(nextStep);
-        if (mode == null || mode == FtlAgentStepDetector.Qualifier)
-            return;
+        if (mode == null)
+            return null;
+
+        if (mode == FtlAgentStepDetector.Qualifier)
+        {
+            var existingJobId = await _apAgentJobProgress.GetLatestActiveJobIdForInstanceAsync(
+                instance.Id,
+                cancellationToken);
+            if (!string.IsNullOrWhiteSpace(existingJobId))
+            {
+                _logger.LogInformation(
+                    "FTL qualifier job {JobId} already active for instance {InstanceId}; move-next returns that job.",
+                    existingJobId,
+                    instance.Id);
+                return existingJobId;
+            }
+        }
 
         var activityId = !string.IsNullOrWhiteSpace(nextStep.ActivityId)
             ? nextStep.ActivityId!
@@ -535,6 +556,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 jobId,
                 instance.Id,
                 activityId);
+            return jobId;
         }
         catch (Exception ex)
         {
@@ -543,6 +565,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 "FTL {Mode} enqueue failed for instance {InstanceId}. The ticket was already moved.",
                 mode,
                 instance.Id);
+            return null;
         }
     }
 
