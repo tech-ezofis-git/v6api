@@ -14,9 +14,6 @@ public sealed class RepositorySignRequestOptions
 
     public string EmailSubjectPrefix { get; set; } = "Please review and sign";
 
-    /// <summary>Optional absolute path to logo PNG. Default: Assets/ezofis-logo-mark.png next to the assembly.</summary>
-    public string? EmailLogoPath { get; set; }
-
     /// <summary>Shown in email security footer (mailto).</summary>
     public string SupportEmail { get; set; } = "support@ezofis.com";
 }

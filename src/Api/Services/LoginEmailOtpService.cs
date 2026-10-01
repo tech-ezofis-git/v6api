@@ -10,7 +10,7 @@ namespace SaaSApp.Api.Services;
 /// <summary>Sends login 2FA email OTPs using catalog mail settings (same path as signup OTP).</summary>
 public interface ILoginEmailOtpService
 {
-    /// <summary>Generate a 6-digit OTP, email it, and persist for audit. Returns the OTP for cache verification.</summary>
+    /// <summary>Generate an 8-digit OTP, email it, and persist for audit. Returns the OTP for cache verification.</summary>
     Task<string> SendLoginOtpAsync(string email, string? displayName, CancellationToken cancellationToken = default);
 }
 
@@ -52,22 +52,21 @@ public sealed class LoginEmailOtpService : ILoginEmailOtpService
             throw new InvalidOperationException("Mail settings have invalid SMTP configuration.");
         }
 
-        var otp = Random.Shared.Next(100000, 999999).ToString();
+        var otp = Random.Shared.Next(100000, 1000000).ToString();
         var firstName = ResolveFirstName(displayName, normalizedEmail);
-        var body = $"""
-            <p>Hi {WebUtility.HtmlEncode(firstName)},</p>
-            <p>Your login verification code is: <b>{WebUtility.HtmlEncode(otp)}</b></p>
-            <p>This code is valid for 5 minutes. If you did not try to sign in, you can ignore this email.</p>
-            """;
 
         using var mail = new MailMessage
         {
-            From = EzofisMailAddress.From(settings.EmailId, displayName),
-            Subject = "Your Ezofis login verification code",
-            IsBodyHtml = true,
-            Body = body
+            From = EzofisMailAddress.System(settings.EmailId),
+            Subject = EzofisOtpMail.Subject
         };
         mail.To.Add(normalizedEmail);
+        EzofisOtpMail.Apply(
+            mail,
+            firstName,
+            otp,
+            "Here is your Ezofis sudo authentication code:",
+            "5 minutes");
 
         using var smtp = new SmtpClient(settings.OutgoingServer, settings.OutgoingPort)
         {

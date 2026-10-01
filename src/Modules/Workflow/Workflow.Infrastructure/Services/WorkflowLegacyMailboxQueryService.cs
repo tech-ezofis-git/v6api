@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using Npgsql;
+using NpgsqlTypes;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
 
@@ -93,6 +94,121 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         await EnrichRepositoryItemAsync(pageItems, cancellationToken);
 
         return new LegacyMailboxListResult(pageItems, totalCount, page, pageSize, TableExists: true);
+    }
+
+    public async Task<LegacyMailboxListResult> ListByActivityIdsAsync(
+        LegacyMailboxByActivityRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var activityIds = request.ActivityIds
+            .Where(x => !string.IsNullOrWhiteSpace(x))
+            .Select(x => x.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        if (activityIds.Length == 0)
+        {
+            return new LegacyMailboxListResult(Array.Empty<LegacyMailboxRowDto>(), 0, 1, 0, TableExists: false);
+        }
+
+        var connectionString = _tenantContext.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+            throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        var suffix = request.WorkflowId.ToString("N")[..8];
+        var fullWorkflowKey = request.WorkflowId.ToString("N");
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var inboxRows = await ReadMailboxByActivityIdsAsync(
+            connection, LegacyMailboxTableKind.Inbox, "inbox", suffix, fullWorkflowKey, request, activityIds, cancellationToken);
+        var sentRows = await ReadMailboxByActivityIdsAsync(
+            connection, LegacyMailboxTableKind.Sent, "sent", suffix, fullWorkflowKey, request, activityIds, cancellationToken);
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var items = new List<LegacyMailboxRowDto>(activityIds.Length);
+        foreach (var row in inboxRows)
+        {
+            if (string.IsNullOrWhiteSpace(row.ActivityId) || !seen.Add(row.ActivityId))
+                continue;
+            items.Add(row);
+        }
+
+        foreach (var row in sentRows)
+        {
+            if (string.IsNullOrWhiteSpace(row.ActivityId) || !seen.Add(row.ActivityId))
+                continue;
+            items.Add(row);
+        }
+
+        var order = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < activityIds.Length; i++)
+            order[activityIds[i]] = i;
+        items.Sort((a, b) =>
+            order.GetValueOrDefault(a.ActivityId ?? string.Empty, int.MaxValue)
+                .CompareTo(order.GetValueOrDefault(b.ActivityId ?? string.Empty, int.MaxValue)));
+
+        await EnrichFormDataAsync(connection, items, cancellationToken);
+        await EnrichRepositoryItemAsync(items, cancellationToken);
+
+        var tableExists = inboxRows.Count > 0 || sentRows.Count > 0 || await MailboxTableExistsAsync(
+            connection, suffix, fullWorkflowKey, cancellationToken);
+        return new LegacyMailboxListResult(items, items.Count, 1, activityIds.Length, tableExists);
+    }
+
+    private async Task<bool> MailboxTableExistsAsync(
+        NpgsqlConnection connection,
+        string suffix,
+        string fullWorkflowKey,
+        CancellationToken cancellationToken)
+    {
+        var inbox = await ResolveMailboxTableAsync(connection, "inbox", suffix, fullWorkflowKey, cancellationToken);
+        if (inbox.Exists)
+            return true;
+        var sent = await ResolveMailboxTableAsync(connection, "sent", suffix, fullWorkflowKey, cancellationToken);
+        return sent.Exists;
+    }
+
+    private async Task<List<LegacyMailboxRowDto>> ReadMailboxByActivityIdsAsync(
+        NpgsqlConnection connection,
+        LegacyMailboxTableKind kind,
+        string tablePrefix,
+        string suffix,
+        string fullWorkflowKey,
+        LegacyMailboxByActivityRequest request,
+        string[] activityIds,
+        CancellationToken cancellationToken)
+    {
+        var (_, tableFull, tableExists) = await ResolveMailboxTableAsync(
+            connection, tablePrefix, suffix, fullWorkflowKey, cancellationToken);
+        if (!tableExists)
+            return [];
+
+        var transactionTableName = $"transaction_{suffix}";
+        var transactionTable = $"workflow.{transactionTableName}";
+        var transactionTableExists = await TableExistsAsync(connection, transactionTableName, cancellationToken);
+        var pageSize = Math.Min(Math.Max(activityIds.Length * 10, activityIds.Length), 500);
+        var listRequest = new LegacyMailboxListRequest(
+            kind,
+            request.WorkflowId,
+            InstanceId: null,
+            TransactionId: null,
+            request.CurrentUserId,
+            PageNumber: 1,
+            PageSize: pageSize);
+        var (whereSql, parameters) = BuildUserFilter(listRequest, transactionTable, transactionTableExists);
+        whereSql += " AND LOWER(BTRIM(m.activity_id)) = ANY(@ActivityIds)";
+        parameters.Add(new NpgsqlParameter("@ActivityIds", NpgsqlDbType.Array | NpgsqlDbType.Text)
+        {
+            Value = activityIds.Select(x => x.ToLowerInvariant()).ToArray()
+        });
+
+        var agentTable = $"agent_data_validation_{suffix}";
+        var agentJoin = await BuildAgentValidationApplyAsync(connection, agentTable, cancellationToken);
+        var currentStageJoin = BuildCurrentStageJoin(transactionTable, transactionTableExists);
+        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance: false);
+        var mailbox = kind == LegacyMailboxTableKind.Inbox ? "inbox" : "sent";
+        var rows = await ReadListPageAsync(connection, dataSql, parameters, 0, pageSize, cancellationToken);
+        return rows.Select(row => row with { Mailbox = mailbox }).ToList();
     }
 
     private async Task EnrichFormDataAsync(

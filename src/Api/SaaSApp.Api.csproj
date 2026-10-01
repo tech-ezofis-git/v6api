@@ -56,6 +56,12 @@
   </ItemGroup>
 
   <ItemGroup>
+    <Content Include="..\Modules\Repository\Repository.Infrastructure\Assets\ezofis-logo-mark.png" Link="Assets\ezofis-logo-mark.png">
+      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+    </Content>
+  </ItemGroup>
+
+  <ItemGroup>
     <!-- PHASE 4: source and Link both point at scripts\postgres\ now, matching the
          AppContext.BaseDirectory-relative lookups in PlaygroundApiKeyService.cs /
          TenantSignupService.cs. SQL Server originals stay on disk untouched at scripts\.

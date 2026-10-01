@@ -79,6 +79,9 @@ public sealed record LegacyMailboxRowDto(
     string? QuoteAgentResponse = null,
     /// <summary>1 = show verify/approve buttons; 0 = hide. Default 1.</summary>
     int Action = 1,
+    /// <summary>Set by the activity lookup: "inbox" or "sent". Omitted on the inbox and sent lists.</summary>
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    string? Mailbox = null,
     /// <summary>
     /// Archive item for <see cref="RepositoryId"/> + <see cref="ItemId"/> (file metadata + repo field columns).
     /// Null when ids are missing or the item is not found.
@@ -106,9 +109,22 @@ public sealed record LegacyMailboxInstanceCountResult(
     bool SentTableExists,
     bool CompletedTableExists);
 
+public sealed record LegacyMailboxByActivityRequest(
+    Guid WorkflowId,
+    IReadOnlyList<string> ActivityIds,
+    Guid CurrentUserId);
+
 public interface IWorkflowLegacyMailboxQueryService
 {
     Task<LegacyMailboxListResult> ListAsync(LegacyMailboxListRequest request, CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Rows for the given activity ids from inbox, then sent, in the same shape as those lists.
+    /// When an activity id is in both, the inbox row is returned.
+    /// </summary>
+    Task<LegacyMailboxListResult> ListByActivityIdsAsync(
+        LegacyMailboxByActivityRequest request,
+        CancellationToken cancellationToken = default);
 
     Task<LegacyMailboxInstanceCountResult> GetInstanceCountsAsync(
         LegacyMailboxInstanceCountRequest request,

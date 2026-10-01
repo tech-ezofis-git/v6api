@@ -299,7 +299,8 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             : isFilterShare
                 ? "filtered repository view"
                 : item?.FileName;
-        var senderName = await ResolveSenderNameAsync(sourceTenantId, sharedByUserId, cancellationToken);
+        var (senderName, senderEmail) = await ResolveSenderAsync(sourceTenantId, sharedByUserId, cancellationToken);
+        var orgName = await GetTenantNameAsync(sourceTenantId, cancellationToken);
         await TrySendShareEmailAsync(
             recipientEmail,
             label,
@@ -310,6 +311,8 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             isFilterShare,
             isDashboardShare,
             senderName,
+            senderEmail,
+            orgName,
             cancellationToken);
 
         return new CreateRepositoryItemShareResult(
@@ -681,6 +684,8 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         bool isFilterShare,
         bool isDashboardShare,
         string? senderName,
+        string? senderEmail,
+        string? orgName,
         CancellationToken cancellationToken)
     {
         try
@@ -702,33 +707,66 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
                 return;
             }
 
-            var subjectKind = isDashboardShare ? "dashboard" : isFilterShare ? "filtered repository" : "document";
-            var docLabel = isDashboardShare
-                ? "a dashboard"
+            var subjectKind = isDashboardShare ? "dashboard" : isFilterShare ? "filtered repository view" : "document";
+            var docName = isDashboardShare
+                ? "Dashboard"
                 : isFilterShare
-                    ? "a filtered repository view"
-                    : string.IsNullOrWhiteSpace(fileName) ? "a document" : $"'{fileName}'";
+                    ? "Filtered repository view"
+                    : string.IsNullOrWhiteSpace(fileName) ? "document" : fileName.Trim();
+            var messageBlock = string.IsNullOrWhiteSpace(message)
+                ? ""
+                : $"<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">{EzofisOtpMail.EncodeDisplayText(message)}</p>";
             var guestNote = !guestInvite
-                ? "<p>If you do not have an account, sign up with this email address, then open the link again after login.</p>"
+                ? "<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">If you do not have an account, sign up with this email address, then open the link again after login.</p>"
                 : isNew
-                    ? "<p>An account has been prepared for you. Open the link to <strong>set your password</strong> or sign in with Google/Microsoft, then view the shared content.</p>"
-                    : "<p>Open the link and <strong>sign in</strong> with your existing account to view the shared content.</p>";
+                    ? "<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">An account has been prepared for you. Open the link to <strong>set your password</strong> or sign in with Google/Microsoft, then view the shared content.</p>"
+                    : "<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">Open the link and <strong>sign in</strong> with your existing account to view the shared content.</p>";
+            var safeUrl = WebUtility.HtmlEncode(shareUrl);
+            var safeSenderEmail = WebUtility.HtmlEncode(senderEmail ?? "");
+            var senderEmailRow = string.IsNullOrWhiteSpace(senderEmail)
+                ? ""
+                : $"<li><strong>Sender Email:</strong> <a href=\"mailto:{safeSenderEmail}\" style=\"color:#0b57d0;text-decoration:underline;\">{safeSenderEmail}</a></li>";
             var body = $"""
-                <p>A {subjectKind} has been shared with you: <strong>{WebUtility.HtmlEncode(docLabel)}</strong>.</p>
-                {(string.IsNullOrWhiteSpace(message) ? "" : $"<p>{WebUtility.HtmlEncode(message)}</p>")}
-                <p><a href="{WebUtility.HtmlEncode(shareUrl)}">Open shared {(isDashboardShare ? "dashboard" : isFilterShare ? "view" : "document")}</a></p>
-                <p style="word-break:break-all;color:#555;font-size:12px">{WebUtility.HtmlEncode(shareUrl)}</p>
-                {guestNote}
+                <!DOCTYPE html>
+                <html>
+                <body style="margin:0;padding:0;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#222222;">
+                  <div style="max-width:560px;margin:0 auto;padding:28px 20px;">
+                    <div style="margin-bottom:28px;">
+                      <img src="{EzofisOtpMail.LogoUrl}" alt="ezofis" width="160" style="display:block;border:0;outline:none;text-decoration:none;height:auto;" />
+                    </div>
+                    <h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#1a1a1a;line-height:1.3;">A {WebUtility.HtmlEncode(subjectKind)} has been shared with you</h1>
+                    <p style="margin:0 0 20px;font-size:15px;line-height:1.5;color:#333;">We have received a request to share this {WebUtility.HtmlEncode(subjectKind)} with you.</p>
+                    <p style="margin:0 0 8px;font-size:15px;color:#333;">Take a moment to verify the following details</p>
+                    <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;line-height:1.8;color:#222;">
+                      <li><strong>Document name:</strong> {EzofisOtpMail.EncodeDisplayText(docName)}</li>
+                      <li><strong>Company:</strong> {WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(orgName) ? "ezofis" : orgName.Trim())}</li>
+                      <li><strong>Sender:</strong> {WebUtility.HtmlEncode(string.IsNullOrWhiteSpace(senderName) ? "Ezofis" : senderName.Trim())}</li>
+                      {senderEmailRow}
+                    </ul>
+                    {messageBlock}
+                    {guestNote}
+                    <p style="margin:24px 0 12px;font-size:15px;color:#333;">Select <strong>Continue</strong> if you recognize this request.</p>
+                    <p style="margin:0 0 24px;">
+                      <a href="{safeUrl}" style="display:inline-block;padding:12px 22px;background:#111111;color:#ffffff;text-decoration:none;border-radius:4px;font-size:14px;font-weight:600;">Continue</a>
+                    </p>
+                    <p style="margin:28px 0 8px;font-size:13px;line-height:1.5;color:#555;">If you do not recognize this request or have any concerns, do not continue and contact <a href="mailto:support@ezofis.com" style="color:#0b57d0;text-decoration:underline;">support@ezofis.com</a>.</p>
+                    <p style="margin:0;font-size:13px;line-height:1.5;color:#555;">Your security is our top priority and we appreciate your attention to this matter.</p>
+                  </div>
+                </body>
+                </html>
                 """;
 
+            var subject = string.IsNullOrWhiteSpace(fileName) || isDashboardShare || isFilterShare
+                ? _options.EmailSubject
+                : $"{_options.EmailSubject}: {fileName.Trim()}";
             using var mail = new MailMessage
             {
                 From = EzofisMailAddress.From(settings.EmailId, senderName),
-                Subject = _options.EmailSubject,
-                Body = body,
+                Subject = subject,
                 IsBodyHtml = true
             };
             mail.To.Add(recipientEmail);
+            mail.Body = body;
 
             using var smtp = new SmtpClient(settings.OutgoingServer, settings.OutgoingPort)
             {
@@ -746,30 +784,34 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         }
     }
 
-    private async Task<string?> ResolveSenderNameAsync(Guid tenantId, Guid userId, CancellationToken cancellationToken)
+    private async Task<(string? Name, string? Email)> ResolveSenderAsync(
+        Guid tenantId,
+        Guid userId,
+        CancellationToken cancellationToken)
     {
         if (userId == Guid.Empty)
-            return null;
+            return (null, null);
 
         try
         {
             var connectionString = await _connectionResolver.GetConnectionStringAsync(tenantId, cancellationToken);
             if (string.IsNullOrWhiteSpace(connectionString))
-                return null;
+                return (null, null);
 
             await using var connection = new NpgsqlConnection(connectionString);
             await connection.OpenAsync(cancellationToken);
             var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, userId, cancellationToken);
             if (profile == null)
-                return null;
-            return string.IsNullOrWhiteSpace(profile.Value.DisplayName)
+                return (null, null);
+            var name = string.IsNullOrWhiteSpace(profile.Value.DisplayName)
                 ? profile.Value.Email
                 : profile.Value.DisplayName;
+            return (name, profile.Value.Email);
         }
         catch (Exception ex)
         {
             _logger.LogWarning(ex, "Could not resolve share sender name for user {UserId}", userId);
-            return null;
+            return (null, null);
         }
     }
 
