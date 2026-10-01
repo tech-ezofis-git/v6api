@@ -107,7 +107,10 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         var now = DateTime.UtcNow;
         var expires = now.AddDays(expiryDays);
         var senderEmail = string.IsNullOrWhiteSpace(initiatedByEmail) ? "unknown@ezofis.com" : initiatedByEmail.Trim();
-        var senderName = string.IsNullOrWhiteSpace(initiatedByName) ? senderEmail : initiatedByName.Trim();
+        var displayName = await ResolveUserDisplayNameAsync(initiatedByUserId, cancellationToken);
+        var senderName = !string.IsNullOrWhiteSpace(displayName)
+            ? displayName
+            : string.IsNullOrWhiteSpace(initiatedByName) ? senderEmail : initiatedByName.Trim();
         var orgName = await GetTenantNameAsync(tenantId, cancellationToken);
 
         var signerRows = new List<(Guid Id, string Email, string? Name, int Order, string Status, string Token)>();
@@ -456,13 +459,19 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
         var code = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
         InviteOtps[OtpKey(inviteToken, normalized)] = new SignOtpEntry(code, normalized, DateTime.UtcNow.AddMinutes(5));
-        var body = WrapBrandedEmail($"""
-            <h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#1a1a1a;">Your signing code</h1>
-            <p style="margin:0 0 16px;font-size:15px;line-height:1.5;color:#333;">Use this code to open the document shared with {WebUtility.HtmlEncode(normalized)}.</p>
-            <p style="margin:0 0 16px;font-size:28px;font-weight:700;letter-spacing:4px;color:#111;">{WebUtility.HtmlEncode(code)}</p>
-            <p style="margin:0;font-size:14px;color:#555;">This code expires in 5 minutes.</p>
-            """);
-        await TrySendEmailAsync(normalized, $"{_options.EmailSubjectPrefix}: verification code", body, ctx.InitiatedByName, cancellationToken);
+        var (html, plain) = EzofisOtpMail.Create(
+            FirstNameFromEmail(normalized),
+            code,
+            "Here is your Ezofis sudo authentication code:",
+            "5 minutes");
+        await TrySendEmailAsync(
+            normalized,
+            EzofisOtpMail.Subject,
+            html,
+            null,
+            cancellationToken,
+            systemFrom: true,
+            plainText: plain);
     }
 
     public Task<SignInviteOtpSessionDto> VerifyInviteOtpAsync(
@@ -982,7 +991,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             SELECT s."Id", s."InviteToken", r."Id", r."TenantId", r."RepositoryId", r."ItemId", r."FileName", r."SigningMode", r."Status",
                    s."Status", s."Email", s."SortOrder",
                    (SELECT COUNT(1) FROM repository."SignRequestSigners" x WHERE x."SignRequestId" = r."Id" AND x."IsDeleted" = false),
-                   r."InitiatedByEmail", r."InitiatedByName", r."Message", r."ExpiresAtUtc"
+                   r."InitiatedByEmail", r."InitiatedByName", r."Message", r."ExpiresAtUtc", r."InitiatedByUserId"
             FROM repository."SignRequestSigners" s
             INNER JOIN repository."SignRequests" r ON r."Id" = s."SignRequestId"
             WHERE r."Id" = @RequestId
@@ -1001,6 +1010,11 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         if (expires <= DateTime.UtcNow)
             return null;
 
+        var initiatedByUserId = reader.IsDBNull(17) ? Guid.Empty : reader.GetGuid(17);
+        var storedName = reader.GetString(14);
+        var displayName = await ResolveUserDisplayNameAsync(initiatedByUserId, cancellationToken);
+        var initiatedName = string.IsNullOrWhiteSpace(displayName) ? storedName : displayName;
+
         return new InviteContext(
             reader.GetGuid(0),
             reader.GetString(1),
@@ -1016,7 +1030,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             reader.GetInt32(11),
             reader.GetInt32(12),
             reader.GetString(13),
-            reader.GetString(14),
+            initiatedName,
             reader.IsDBNull(15) ? null : reader.GetString(15),
             expires);
     }
@@ -1059,7 +1073,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             SELECT s."Id", s."InviteToken", r."Id", r."TenantId", r."RepositoryId", r."ItemId", r."FileName", r."SigningMode", r."Status",
                    s."Status", s."Email", s."SortOrder",
                    (SELECT COUNT(1) FROM repository."SignRequestSigners" x WHERE x."SignRequestId" = r."Id" AND x."IsDeleted" = false),
-                   r."InitiatedByEmail", r."InitiatedByName", r."Message", r."ExpiresAtUtc"
+                   r."InitiatedByEmail", r."InitiatedByName", r."Message", r."ExpiresAtUtc", r."InitiatedByUserId"
             FROM repository."SignRequestSigners" s
             INNER JOIN repository."SignRequests" r ON r."Id" = s."SignRequestId"
             WHERE s."InviteToken" = @Token AND s."IsDeleted" = false AND r."IsDeleted" = false
@@ -1072,6 +1086,11 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         var expires = reader.GetDateTime(16);
         if (expires <= DateTime.UtcNow)
             return null;
+
+        var initiatedByUserId = reader.IsDBNull(17) ? Guid.Empty : reader.GetGuid(17);
+        var storedName = reader.GetString(14);
+        var displayName = await ResolveUserDisplayNameAsync(initiatedByUserId, cancellationToken);
+        var initiatedName = string.IsNullOrWhiteSpace(displayName) ? storedName : displayName;
 
         return new InviteContext(
             reader.GetGuid(0),
@@ -1088,7 +1107,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             reader.GetInt32(11),
             reader.GetInt32(12),
             reader.GetString(13),
-            reader.GetString(14),
+            initiatedName,
             reader.IsDBNull(15) ? null : reader.GetString(15),
             expires);
     }
@@ -1199,6 +1218,29 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
     private static string? NullIfWhite(string? value) =>
         string.IsNullOrWhiteSpace(value) ? null : value.Trim();
 
+    private async Task<string?> ResolveUserDisplayNameAsync(Guid userId, CancellationToken cancellationToken)
+    {
+        if (userId == Guid.Empty)
+            return null;
+
+        var connectionString = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return null;
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(connectionString);
+            await connection.OpenAsync(cancellationToken);
+            var profile = await RepositoryUserNameResolver.ResolveProfileAsync(connection, userId, cancellationToken);
+            return string.IsNullOrWhiteSpace(profile?.DisplayName) ? null : profile.Value.DisplayName.Trim();
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Could not resolve mail display name for user {UserId}", userId);
+            return null;
+        }
+    }
+
     private async Task<string?> GetTenantNameAsync(Guid tenantId, CancellationToken cancellationToken)
     {
         await using var catalog = await _catalogFactory.CreateDbContextAsync(cancellationToken);
@@ -1226,7 +1268,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         var company = orgName ?? "ezofis";
         var messageBlock = string.IsNullOrWhiteSpace(message)
             ? ""
-            : $"<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">{WebUtility.HtmlEncode(message)}</p>";
+            : $"<p style=\"margin:16px 0 0;font-size:14px;color:#444;\">{EzofisOtpMail.EncodeDisplayText(message)}</p>";
         var body = WrapBrandedEmail($"""
             <h1 style="margin:0 0 12px;font-size:22px;font-weight:700;color:#1a1a1a;line-height:1.3;">Do you recognize this document?</h1>
             <p style="margin:0 0 20px;font-size:15px;line-height:1.5;color:#333;">We have received a request to send you a document for signature{(string.IsNullOrWhiteSpace(recipientName) ? "" : $", {WebUtility.HtmlEncode(recipientName)}")}.</p>
@@ -1235,10 +1277,9 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             <p style="margin:12px 0 0;font-size:14px;color:#555;">Your role: Signer {order} of {total} ({WebUtility.HtmlEncode(mode)})</p>
             {messageBlock}
             <p style="margin:24px 0 12px;font-size:15px;color:#333;">Select <strong>Continue</strong> if you recognize this request.</p>
-            <p style="margin:0 0 16px;">
+            <p style="margin:0 0 24px;">
               <a href="{WebUtility.HtmlEncode(inviteUrl)}" style="display:inline-block;padding:12px 22px;background:#111111;color:#ffffff;text-decoration:none;border-radius:4px;font-size:14px;font-weight:600;">Continue</a>
             </p>
-            <p style="margin:0 0 24px;word-break:break-all;color:#777;font-size:12px;">{WebUtility.HtmlEncode(inviteUrl)}</p>
             {BuildSecurityFooter(isInitiator: false)}
             """);
         await TrySendEmailAsync(recipientEmail, subject, body, senderName, cancellationToken);
@@ -1296,7 +1337,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         var email = WebUtility.HtmlEncode(senderEmail);
         return $"""
             <ul style="margin:0 0 8px;padding-left:20px;font-size:15px;line-height:1.8;color:#222;">
-              <li><strong>Document name:</strong> {WebUtility.HtmlEncode(fileName)}</li>
+              <li><strong>Document name:</strong> {EzofisOtpMail.EncodeDisplayText(fileName)}</li>
               <li><strong>Company:</strong> {WebUtility.HtmlEncode(company)}</li>
               <li><strong>Sender:</strong> {WebUtility.HtmlEncode(senderName)}</li>
               <li><strong>Sender Email:</strong> <a href="mailto:{email}" style="color:#0b57d0;text-decoration:underline;">{email}</a></li>
@@ -1323,7 +1364,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         <body style="margin:0;padding:0;background:#ffffff;font-family:Arial,Helvetica,sans-serif;color:#222222;">
           <div style="max-width:560px;margin:0 auto;padding:28px 20px;">
             <div style="margin-bottom:28px;">
-              <img src="cid:{LogoContentId}" alt="ezofis" width="80" style="display:block;border:0;outline:none;text-decoration:none;height:auto;" />
+              <img src="{EzofisOtpMail.LogoUrl}" alt="ezofis" width="160" style="display:block;border:0;outline:none;text-decoration:none;height:auto;" />
             </div>
             {innerHtml}
           </div>
@@ -1331,19 +1372,13 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         </html>
         """;
 
-    private const string LogoContentId = "ezofis-logo";
-
-    private string? ResolveEmailLogoPath()
+    private static string FirstNameFromEmail(string email)
     {
-        if (!string.IsNullOrWhiteSpace(_options.EmailLogoPath) && File.Exists(_options.EmailLogoPath))
-            return _options.EmailLogoPath;
-
-        var candidates = new[]
-        {
-            Path.Combine(AppContext.BaseDirectory, "Assets", "ezofis-logo-mark.png"),
-            Path.Combine(AppContext.BaseDirectory, "wwwroot", "branding", "ezofis-logo-mark.png"),
-        };
-        return candidates.FirstOrDefault(File.Exists);
+        var local = email.Split('@')[0];
+        var part = local.Split('.', StringSplitOptions.RemoveEmptyEntries).FirstOrDefault();
+        if (string.IsNullOrWhiteSpace(part))
+            return "there";
+        return char.ToUpperInvariant(part[0]) + (part.Length > 1 ? part[1..].ToLowerInvariant() : "");
     }
 
     private async Task TrySendEmailAsync(
@@ -1351,7 +1386,9 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
         string subject,
         string htmlBody,
         string? senderName,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool systemFrom = false,
+        string? plainText = null)
     {
         try
         {
@@ -1374,28 +1411,33 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
 
             using var mail = new MailMessage
             {
-                From = EzofisMailAddress.From(settings.EmailId, senderName),
+                From = systemFrom
+                    ? EzofisMailAddress.System(settings.EmailId)
+                    : EzofisMailAddress.From(settings.EmailId, senderName),
                 Subject = subject,
-                IsBodyHtml = true
+                IsBodyHtml = string.IsNullOrWhiteSpace(plainText)
             };
             mail.To.Add(recipientEmail);
-
-            var logoPath = ResolveEmailLogoPath();
-            if (logoPath != null)
+            if (!string.IsNullOrWhiteSpace(plainText))
             {
-                var htmlView = AlternateView.CreateAlternateViewFromString(htmlBody, null, "text/html");
-                var logo = new LinkedResource(logoPath, "image/png")
-                {
-                    ContentId = LogoContentId,
-                    TransferEncoding = System.Net.Mime.TransferEncoding.Base64
-                };
-                htmlView.LinkedResources.Add(logo);
-                mail.AlternateViews.Add(htmlView);
+                mail.Body = string.Empty;
+                mail.IsBodyHtml = false;
+                mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
+                    plainText,
+                    System.Text.Encoding.UTF8,
+                    System.Net.Mime.MediaTypeNames.Text.Plain));
+            }
+
+            if (string.IsNullOrWhiteSpace(plainText))
+            {
+                mail.Body = htmlBody;
             }
             else
             {
-                _logger.LogWarning("Sign-request email logo not found; sending without logo.");
-                mail.Body = htmlBody.Replace($"cid:{LogoContentId}", "", StringComparison.Ordinal);
+                mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
+                    htmlBody,
+                    null,
+                    "text/html"));
             }
 
             using var smtp = new SmtpClient(settings.OutgoingServer, settings.OutgoingPort)

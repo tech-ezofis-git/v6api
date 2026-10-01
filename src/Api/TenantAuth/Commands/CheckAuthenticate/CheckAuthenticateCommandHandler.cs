@@ -1,4 +1,3 @@
-using Azure.Storage.Blobs;
 using System.Net;
 using System.Net.Mail;
 using MediatR;
@@ -13,20 +12,14 @@ namespace SaaSApp.Api.TenantAuth.Commands.CheckAuthenticate;
 public sealed class CheckAuthenticateCommandHandler : IRequestHandler<CheckAuthenticateCommand, CheckAuthenticateResult>
 {
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
-    private readonly IConfiguration _configuration;
     private readonly IDistributedCache _cache;
-    private readonly ILogger<CheckAuthenticateCommandHandler> _logger;
 
     public CheckAuthenticateCommandHandler(
         IDbContextFactory<CatalogDbContext> catalogFactory,
-        IConfiguration configuration,
-        IDistributedCache cache,
-        ILogger<CheckAuthenticateCommandHandler> logger)
+        IDistributedCache cache)
     {
         _catalogFactory = catalogFactory;
-        _configuration = configuration;
         _cache = cache;
-        _logger = logger;
     }
 
     public async Task<CheckAuthenticateResult> Handle(CheckAuthenticateCommand request, CancellationToken cancellationToken)
@@ -71,19 +64,21 @@ public sealed class CheckAuthenticateCommandHandler : IRequestHandler<CheckAuthe
             return new CheckAuthenticateResult(400, "mailsettings has invalid SMTP configuration.");
         }
 
-        var otp = Random.Shared.Next(100000, 999999).ToString();
+        var otp = Random.Shared.Next(100000, 1000000).ToString();
         var firstName = GetFirstNameFromEmail(email);
-
-        var htmlBody = await BuildOtpHtmlBodyAsync(email, firstName, otp, cancellationToken);
 
         using var mail = new MailMessage
         {
-            From = EzofisMailAddress.From(settings.EmailId, firstName),
-            Subject = "Your One-Time Password (OTP) Code",
-            IsBodyHtml = true,
-            Body = htmlBody
+            From = EzofisMailAddress.System(settings.EmailId),
+            Subject = EzofisOtpMail.Subject
         };
         mail.To.Add(email);
+        EzofisOtpMail.Apply(
+            mail,
+            firstName,
+            otp,
+            "Here is your Ezofis sudo authentication code:",
+            "5 minutes");
 
         using var smtp = new SmtpClient(settings.OutgoingServer, settings.OutgoingPort)
         {
@@ -148,84 +143,4 @@ public sealed class CheckAuthenticateCommandHandler : IRequestHandler<CheckAuthe
         return char.ToUpperInvariant(first[0]) + first[1..].ToLowerInvariant();
     }
 
-    private async Task<string> BuildOtpHtmlBodyAsync(string email, string firstName, string otp, CancellationToken cancellationToken)
-    {
-        var htmlFile = @"HTMLFiles\OTP Alert.html";
-        var container = _configuration["OtpTemplate:Container"] ?? "ezofis";
-        var commonPath = _configuration["CommonPath"] ?? string.Empty;
-        var htmlBody = string.Empty;
-
-        if (!string.IsNullOrWhiteSpace(commonPath))
-        {
-            var mapPath = Path.Combine(commonPath, htmlFile);
-            if (File.Exists(mapPath))
-                htmlBody = await File.ReadAllTextAsync(mapPath, cancellationToken);
-        }
-        else
-        {
-            var assetStorageConnection = ResolveOtpAssetStorageConnection();
-            if (!string.IsNullOrWhiteSpace(assetStorageConnection))
-            {
-                try
-                {
-                    var blobServiceClient = new BlobServiceClient(assetStorageConnection);
-                    var containerClient = blobServiceClient.GetBlobContainerClient(container);
-                    var blobClient = containerClient.GetBlobClient(htmlFile.Replace('\\', '/'));
-                    var blobDownloadInfo = await blobClient.DownloadAsync(cancellationToken);
-                    await using var content = blobDownloadInfo.Value.Content;
-                    using var memoryStream = new MemoryStream();
-                    await content.CopyToAsync(memoryStream, cancellationToken);
-                    var buffer = memoryStream.ToArray();
-                    if (buffer.Length > 0)
-                        htmlBody = System.Text.Encoding.UTF8.GetString(buffer);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(
-                        ex,
-                        "Could not load OTP HTML template from blob container {Container}; using built-in template",
-                        container);
-                }
-            }
-            else
-            {
-                _logger.LogInformation(
-                    "OTP blob template not configured (OtpTemplate:DefaultAssetStorageConnection); using built-in template");
-            }
-        }
-
-        if (string.IsNullOrWhiteSpace(htmlBody))
-        {
-            htmlBody = """
-                       <p>Hi #Parameter1#,</p>
-                       <p>Your OTP Code is: <b>#Parameter2#</b></p>
-                       <p>Please enter this code to complete verification. This code is valid for 5 minutes.</p>
-                       <p>Date: #Date#</p>
-                       """;
-        }
-
-        htmlBody = htmlBody
-            .Replace("#Parameter1#", WebUtility.HtmlEncode(firstName), StringComparison.Ordinal)
-            .Replace("#Parameter2#", WebUtility.HtmlEncode(otp), StringComparison.Ordinal)
-            .Replace("#Date#", DateTime.Now.ToString("dd MMM yyyy"), StringComparison.Ordinal)
-            .Replace("#TENANTLOGO#", _configuration["OtpTemplate:TenantLogoUrl"] ?? string.Empty, StringComparison.Ordinal);
-
-        return htmlBody;
-    }
-
-    private string? ResolveOtpAssetStorageConnection()
-    {
-        var serverForOcr = (_configuration["ServerForOcr"] ?? string.Empty).ToLowerInvariant();
-        if (serverForOcr == "trial")
-        {
-            return _configuration["OtpTemplate:TrialAssetStorageConnection"]
-                ?? _configuration["OtpTemplate:DefaultAssetStorageConnection"]
-                ?? _configuration["EzofisBlobStorage:ConnectionString"]
-                ?? _configuration["WorkflowJsonStorage:Blob:ConnectionString"];
-        }
-
-        return _configuration["OtpTemplate:DefaultAssetStorageConnection"]
-            ?? _configuration["EzofisBlobStorage:ConnectionString"]
-            ?? _configuration["WorkflowJsonStorage:Blob:ConnectionString"];
-    }
 }
