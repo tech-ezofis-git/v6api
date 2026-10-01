@@ -9,6 +9,16 @@ public static class FtlAgentStepDetector
     public const string Quote = "quote";
     public const string Document = "document";
 
+    /// <summary>Customer-facing status text for ap-agent/jobs. FTL is a customer name, not the agent name.</summary>
+    public static string StatusLabel(string? mode) =>
+        mode switch
+        {
+            Qualifier => "Qualify agent",
+            Quote => "Quote agent",
+            Document => "Document agent",
+            _ => "AP Agent"
+        };
+
     public static bool IsQualifyAgent(WorkflowStep step) =>
         IsStage(step, "QUALIFY_AGENT");
 

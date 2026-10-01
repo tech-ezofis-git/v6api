@@ -2,6 +2,7 @@ using Hangfire;
 using Microsoft.Extensions.Options;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Infrastructure.Options;
 
 namespace SaaSApp.Workflow.Infrastructure.Jobs;
@@ -34,12 +35,14 @@ public sealed class FtlAgentJobClient : IFtlAgentJobClient
     {
         var tenantDisplay = await _tenantDisplay.ResolveAsync(args.TenantId, cancellationToken);
         var jobId = BackgroundJob.Enqueue<RunFtlAgentJob>(j => j.Execute(tenantDisplay, args, null));
+        var label = FtlAgentStepDetector.StatusLabel(args.Mode);
         await _progress.RegisterQueuedAsync(
             jobId,
             args.TenantId,
             args.WorkflowId,
             args.InstanceId,
-            cancellationToken);
+            cancellationToken,
+            $"{label} queued");
         return jobId;
     }
 }
