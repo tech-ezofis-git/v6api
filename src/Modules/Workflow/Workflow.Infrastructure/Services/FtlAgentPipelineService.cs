@@ -586,25 +586,35 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         using var priorDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(prior) ? "{}" : prior);
         var qualifier = FindProperty(priorDoc.RootElement, "qualifier_result");
 
+        var statusUrl = StatusUrl(jobId);
+        var progressUrl = ProgressUrl(args);
         var payload = new Dictionary<string, object?>
         {
             ["template_type"] = "inflow",
             ["workflowId"] = args.WorkflowId.ToString("D"),
             ["tenantId"] = args.TenantId.ToString("D"),
             ["instanceId"] = args.InstanceId.ToString("D"),
+            ["activityId"] = args.ActivityId,
             ["repositoryId"] = args.RepositoryId,
             ["formId"] = args.FormId,
             ["apAgentJobId"] = jobId,
-            ["apAgentJobStatusUrl"] = StatusUrl(jobId)
+            ["apAgentJobStatusUrl"] = statusUrl,
+            ["apAgentProgressUrl"] = progressUrl
         };
         if (qualifier.ValueKind != JsonValueKind.Undefined)
             payload["qualifier_result"] = JsonSerializer.Deserialize<object>(qualifier.GetRawText());
 
-        var body = JsonSerializer.Serialize(new
+        var body = JsonSerializer.Serialize(new Dictionary<string, object?>
         {
-            session_id = jobId,
-            intent = "ftl_quote_estimator",
-            payload
+            ["session_id"] = jobId,
+            ["intent"] = "ftl_quote_estimator",
+            ["workflowId"] = args.WorkflowId.ToString("D"),
+            ["instanceId"] = args.InstanceId.ToString("D"),
+            ["activityId"] = args.ActivityId,
+            ["apAgentJobId"] = jobId,
+            ["apAgentJobStatusUrl"] = statusUrl,
+            ["apAgentProgressUrl"] = progressUrl,
+            ["payload"] = payload
         });
         using var content = new StringContent(body, Encoding.UTF8, "application/json");
         return await PostAsync(chatUrl, content, cancellationToken);
@@ -628,6 +638,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         form.Add(new StringContent(args.TenantId.ToString("D")), "tenantId");
         form.Add(new StringContent(args.TenantId.ToString("D")), "tenant_id");
         form.Add(new StringContent(args.InstanceId.ToString("D")), "instanceId");
+        form.Add(new StringContent(args.ActivityId), "activityId");
         if (!string.IsNullOrWhiteSpace(args.RepositoryId))
             form.Add(new StringContent(args.RepositoryId), "repositoryId");
         if (!string.IsNullOrWhiteSpace(args.FormId))
@@ -636,12 +647,23 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         var status = StatusUrl(jobId);
         if (!string.IsNullOrWhiteSpace(status))
             form.Add(new StringContent(status), "apAgentJobStatusUrl");
+        var progress = ProgressUrl(args);
+        if (!string.IsNullOrWhiteSpace(progress))
+            form.Add(new StringContent(progress), "apAgentProgressUrl");
     }
 
     private string? StatusUrl(string jobId)
     {
         var baseUrl = _apAgentOptions.Value.ApiBaseUrl?.TrimEnd('/');
         return string.IsNullOrWhiteSpace(baseUrl) ? null : $"{baseUrl}/ap-agent/jobs/{jobId}";
+    }
+
+    private string? ProgressUrl(FtlAgentJobArgs args)
+    {
+        var baseUrl = _apAgentOptions.Value.ApiBaseUrl?.TrimEnd('/');
+        return string.IsNullOrWhiteSpace(baseUrl)
+            ? null
+            : $"{baseUrl}/{args.WorkflowId:D}/instances/{args.InstanceId:D}/ap-agent/progress";
     }
 
     private async Task<(byte[] Bytes, string FileName, string? ContentType)> ReadFirstAttachmentAsync(

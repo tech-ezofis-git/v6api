@@ -452,7 +452,7 @@ public sealed partial class FormService : IFormService
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", formId);
         cmd.Parameters.AddWithValue("@JsonId", field.Id!);
-        cmd.Parameters.AddWithValue("@Name", (object?)field.Label ?? field.Id!);
+        cmd.Parameters.AddWithValue("@Name", field.ControlName());
         cmd.Parameters.AddWithValue("@ColumnName", (object?)columnName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Type", (object?)field.Type ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@Mandatory", isMandatory);
@@ -613,7 +613,7 @@ public sealed partial class FormService : IFormService
 
         foreach (var field in fields)
         {
-            var label = !string.IsNullOrWhiteSpace(field.Label) ? field.Label! : field.Id!;
+            var label = field.ControlName();
             if (!EzfbColumnNaming.TryToColumnNameFromLabel(label, out var baseColumn) || string.IsNullOrWhiteSpace(baseColumn))
                 baseColumn = EscapeSqlIdentifier(field.Id!);
 

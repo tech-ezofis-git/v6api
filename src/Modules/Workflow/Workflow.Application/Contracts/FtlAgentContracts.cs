@@ -14,6 +14,9 @@ public sealed record FtlAgentJobArgs(
 public interface IFtlAgentJobClient
 {
     Task<string> EnqueueAsync(FtlAgentJobArgs args, CancellationToken cancellationToken = default);
+
+    /// <summary>Public status URL for the Hangfire job, when ApAgent:ApiBaseUrl is set.</summary>
+    string? StatusUrl(string jobId);
 }
 
 public interface IFtlAgentPipelineService

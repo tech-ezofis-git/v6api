@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Text.Json;
+using Microsoft.Extensions.Logging;
 using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Contracts;
@@ -24,15 +25,21 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IUserEmailLookup _userEmails;
     private readonly IFormEntryService _formEntryService;
+    private readonly IFormJsonStorageService _formJsonStorage;
+    private readonly ILogger<WorkflowTicketSearchService> _logger;
 
     public WorkflowTicketSearchService(
         ITenantConnectionProvider connectionProvider,
         IUserEmailLookup userEmails,
-        IFormEntryService formEntryService)
+        IFormEntryService formEntryService,
+        IFormJsonStorageService formJsonStorage,
+        ILogger<WorkflowTicketSearchService> logger)
     {
         _connectionProvider = connectionProvider;
         _userEmails = userEmails;
         _formEntryService = formEntryService;
+        _formJsonStorage = formJsonStorage;
+        _logger = logger;
     }
 
     public async Task<WorkflowTicketFilterSchemaDto?> GetFilterFieldsAsync(
@@ -54,6 +61,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
         var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
         var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
+        var titles = await LoadFieldTitlesAsync(normalizedFormId, cancellationToken);
 
         // Resolve against the real ezfb table when it exists so the reported "column" is the
         // actual physical column (Label-sanitized for new forms, jsonId-sanitized for old forms).
@@ -79,12 +87,18 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             if (!seen.Add(column))
                 continue;
 
-            var name = string.IsNullOrWhiteSpace(control.Name) ? column : control.Name.Trim();
+            var name = DisplayName(control, titles);
+            if (name == null)
+                continue;
+
+            // Old table columns were stored as the field id. Report the title instead of that id.
+            // Search still resolves the title back to the existing database column.
+            var reportedColumn = IsHumanTitle(column, control.JsonId) ? column : name;
             var rawType = string.IsNullOrWhiteSpace(control.Type) ? null : control.Type.Trim();
             var operatorKind = InferDataType(control.Type);
             fields.Add(new WorkflowTicketFilterFieldDto(
                 name,
-                column,
+                reportedColumn,
                 rawType,
                 GetSupportedOperators(operatorKind)));
         }
@@ -183,6 +197,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var offset = (page - 1) * pageSize;
         var ezfbColumns = await LoadTableColumnsAsync(connection, ezfbTable, cancellationToken);
         var controls = await LoadFormControlsAsync(connection, normalizedFormId, cancellationToken);
+        var titles = await LoadFieldTitlesAsync(normalizedFormId, cancellationToken);
 
         var ezfbWhereParts = new List<string> { "(e.item_id IS NOT NULL)", "(e.is_deleted = false OR e.is_deleted IS NULL)" };
         var filterParameters = new List<NpgsqlParameter>();
@@ -190,7 +205,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var index = 0;
         foreach (var filter in filters)
         {
-            if (!TryResolveColumn(filter.Criteria, controls, ezfbColumns, out var column))
+            if (!TryResolveColumn(filter.Criteria, controls, ezfbColumns, titles, out var column))
                 throw new ArgumentException($"Unknown filter field '{filter.Criteria}'.");
 
             if (!TryBuildOperatorCondition(
@@ -406,7 +421,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
         return new WorkflowTicketSearchOutcome(
             WorkflowTicketSearchStatus.Found,
-            ToGroupedResult(items, totalItems, page, pageSize, request.GroupBy, tableExists: true, controls, ezfbColumns));
+            ToGroupedResult(items, totalItems, page, pageSize, request.GroupBy, tableExists: true, controls, ezfbColumns, titles));
     }
 
     /// <summary>
@@ -461,9 +476,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         string? groupBy,
         bool tableExists,
         IReadOnlyList<FormControlRow>? controls,
-        IReadOnlySet<string>? ezfbColumns) =>
+        IReadOnlySet<string>? ezfbColumns,
+        IReadOnlyDictionary<string, string>? titles = null) =>
         new(
-            GroupItems(items, groupBy, controls, ezfbColumns),
+            GroupItems(items, groupBy, controls, ezfbColumns, titles),
             new WorkflowFilterSearchMeta(page, pageSize, totalItems),
             tableExists);
 
@@ -471,7 +487,8 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         IReadOnlyList<LegacyMailboxRowDto> items,
         string? groupBy,
         IReadOnlyList<FormControlRow>? controls,
-        IReadOnlySet<string>? ezfbColumns)
+        IReadOnlySet<string>? ezfbColumns,
+        IReadOnlyDictionary<string, string>? titles)
     {
         var g = (groupBy ?? string.Empty).Trim();
         if (g.Length == 0)
@@ -484,7 +501,7 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
 
         string? formColumn = null;
         if (controls != null && ezfbColumns != null)
-            TryResolveColumn(g, controls, ezfbColumns, out formColumn);
+            TryResolveColumn(g, controls, ezfbColumns, titles ?? new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase), out formColumn);
 
         var isMailbox = IsMailboxGroupBy(g);
         if (!isMailbox && string.IsNullOrWhiteSpace(formColumn))
@@ -786,10 +803,135 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         return rows;
     }
 
+    private async Task<Dictionary<string, string>> LoadFieldTitlesAsync(
+        string formId,
+        CancellationToken cancellationToken)
+    {
+        var titles = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            var json = await _formJsonStorage.GetFormJsonAsync(formId, cancellationToken);
+            if (string.IsNullOrWhiteSpace(json))
+                return titles;
+
+            using var doc = JsonDocument.Parse(json);
+            CollectFieldTitles(doc.RootElement, titles);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Form title load failed for form {FormId}. Filter fields keep saved control names.", formId);
+        }
+
+        return titles;
+    }
+
+    private static void CollectFieldTitles(JsonElement element, Dictionary<string, string> titles)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                if (TryGetPropertyIgnoreCase(element, "id", out var idEl)
+                    && idEl.ValueKind == JsonValueKind.String)
+                {
+                    var id = idEl.GetString()?.Trim();
+                    var title = ReadFieldTitle(element, id);
+                    if (!string.IsNullOrWhiteSpace(id) && !string.IsNullOrWhiteSpace(title))
+                        AddTitle(titles, id, title);
+                }
+
+                foreach (var prop in element.EnumerateObject())
+                    CollectFieldTitles(prop.Value, titles);
+                break;
+            case JsonValueKind.Array:
+                foreach (var item in element.EnumerateArray())
+                    CollectFieldTitles(item, titles);
+                break;
+        }
+    }
+
+    private static string? ReadFieldTitle(JsonElement element, string? id)
+    {
+        var label = ReadStringProperty(element, "label");
+        var name = ReadStringProperty(element, "name");
+        if (IsHumanTitle(label, id))
+            return label;
+        if (IsHumanTitle(name, id))
+            return name;
+        return null;
+    }
+
+    private static string? ReadStringProperty(JsonElement element, string name)
+    {
+        if (!TryGetPropertyIgnoreCase(element, name, out var value) || value.ValueKind != JsonValueKind.String)
+            return null;
+        var text = value.GetString()?.Trim();
+        return string.IsNullOrWhiteSpace(text) ? null : text;
+    }
+
+    private static void AddTitle(Dictionary<string, string> titles, string id, string title)
+    {
+        titles[id] = title;
+        if (!Guid.TryParse(id, out var guid))
+            return;
+        titles[guid.ToString("D")] = title;
+        titles[guid.ToString("N")] = title;
+    }
+
+    private static string? DisplayName(FormControlRow control, IReadOnlyDictionary<string, string> titles)
+    {
+        var stored = control.Name?.Trim();
+        if (IsHumanTitle(stored, control.JsonId))
+            return stored;
+
+        if (titles.TryGetValue(control.JsonId.Trim(), out var title) && IsHumanTitle(title, control.JsonId))
+            return title;
+
+        return null;
+    }
+
+    private static bool IsHumanTitle(string? value, string? jsonId)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return false;
+
+        var text = value.Trim();
+        if (Guid.TryParse(text, out _))
+            return false;
+
+        if (string.IsNullOrWhiteSpace(jsonId))
+            return true;
+
+        var id = jsonId.Trim();
+        if (string.Equals(text, id, StringComparison.OrdinalIgnoreCase))
+            return false;
+
+        return !Guid.TryParse(id, out var idGuid)
+            || !Guid.TryParse(text, out var textGuid)
+            || idGuid != textGuid;
+    }
+
+    private static bool TryGetPropertyIgnoreCase(JsonElement element, string name, out JsonElement value)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                value = prop.Value;
+                return true;
+            }
+        }
+
+        value = default;
+        return false;
+    }
+
     private static bool TryResolveColumn(
         string criteria,
         IReadOnlyList<FormControlRow> controls,
         IReadOnlySet<string> ezfbColumns,
+        IReadOnlyDictionary<string, string> titles,
         out string column)
     {
         column = string.Empty;
@@ -799,6 +941,15 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         var key = criteria.Trim();
         foreach (var control in controls)
         {
+            var displayName = DisplayName(control, titles);
+            if (!string.IsNullOrWhiteSpace(displayName)
+                && string.Equals(displayName, key, StringComparison.OrdinalIgnoreCase)
+                && EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out column))
+            {
+                return true;
+            }
+
             if (!string.IsNullOrWhiteSpace(control.Name)
                 && string.Equals(control.Name.Trim(), key, StringComparison.OrdinalIgnoreCase)
                 && EzfbColumnNaming.TryResolveEzfbColumn(

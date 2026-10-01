@@ -33,5 +33,9 @@ public record MoveToNextStepCommandResult(
     Guid? GeneratedPdfAttachmentId = null,
     string? GeneratedPdfFileName = null,
     /// <summary>Python PDF request input (formData / fileName / metadata / templateJson) for cross-check.</summary>
-    WorkflowPdfPythonRequestDto? GeneratedPdfInput = null
+    WorkflowPdfPythonRequestDto? GeneratedPdfInput = null,
+    /// <summary>Hangfire job id when the next step is qualify, quote, or document generate. Frontend polls this like AP Agent.</summary>
+    string? ApAgentJobId = null,
+    /// <summary>Status URL for <see cref="ApAgentJobId"/> when ApAgent:ApiBaseUrl is configured.</summary>
+    string? ApAgentJobStatusUrl = null
 );
