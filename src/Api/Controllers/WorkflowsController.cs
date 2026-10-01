@@ -31,6 +31,7 @@ using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Forms;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetLegacyMailboxInstanceCount;
 using SaaSApp.Workflow.Application.Workflows.Queries.GetLegacyMailboxList;
+using SaaSApp.Workflow.Application.Workflows.Queries.GetMailboxByActivityIds;
 using SaaSApp.Workflow.Application.Workflows.Commands.AddComment;
 using SaaSApp.Workflow.Application.Workflows.Commands.AddAttachment;
 using SaaSApp.Workflow.Application.Workflows.Commands.ApproveStep;
@@ -1537,6 +1538,36 @@ public sealed class WorkflowsController : ControllerBase
         CancellationToken cancellationToken = default) =>
         GetLegacyMailboxList(LegacyMailboxTableKind.Completed, workflowId, instanceId, transactionId, pageNumber, pageSize, skipTotal, cancellationToken);
 
+    /// <summary>
+    /// Inbox or sent row for each activity id, in the same shape as inbox and sent.
+    /// When the same activity id is in both, the inbox row is returned. Each item includes mailbox: inbox or sent.
+    /// </summary>
+    [HttpPost("by-activity")]
+    [ProducesResponseType(typeof(LegacyMailboxListResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetMailboxByActivity(
+        [FromBody] MailboxByActivityRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.WorkflowId == Guid.Empty)
+            return BadRequest(new { error = "workflowId is required." });
+
+        var activityIds = (request.ActivityIds ?? [])
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (activityIds.Count == 0)
+            return BadRequest(new { error = "activityIds is required." });
+        if (activityIds.Count > 100)
+            return BadRequest(new { error = "activityIds cannot exceed 100." });
+
+        var result = await _mediator.Send(
+            new GetMailboxByActivityIdsQuery(request.WorkflowId, activityIds),
+            cancellationToken);
+        return Ok(result);
+    }
+
     private async Task<IActionResult> GetLegacyMailboxList(
         LegacyMailboxTableKind kind,
         Guid workflowId,
@@ -2574,6 +2605,9 @@ public sealed class RaiseTicketFromRepositoryRequest
     [JsonPropertyName("formJsonId")]
     public string? FormJsonId { get; set; }
 }
+
+/// <summary>Look up specific activity ids in the current user's inbox and sent lists.</summary>
+public sealed record MailboxByActivityRequest(Guid WorkflowId, List<string>? ActivityIds);
 
 /// <summary>Request to set SLA policy for a workflow.</summary>
 public record SetWorkflowSlaRequest(SlaPriority Priority, int ResponseTimeMinutes, int ResolutionTimeMinutes, int? EscalationTimeMinutes = null, Guid? EscalateToUserId = null, string? EscalateToRole = null, bool SendNotificationOnBreach = true, string? NotificationEmails = null);
