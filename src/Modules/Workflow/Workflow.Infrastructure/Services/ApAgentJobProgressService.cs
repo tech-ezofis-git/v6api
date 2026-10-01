@@ -22,38 +22,43 @@ public sealed class ApAgentJobProgressService : IApAgentJobProgressService
         Guid tenantId,
         Guid workflowId,
         Guid instanceId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? message = null)
     {
         await EnsureTableAsync(cancellationToken);
+        var queuedMessage = string.IsNullOrWhiteSpace(message) ? "AP Agent job queued" : message.Trim();
         var sql = $"""
             INSERT INTO {TableName}
                 ("JobId", "TenantId", "WorkflowId", "InstanceId", "HangfireState", "Stage", "Message", "ProgressPercent", "ErrorMessage", "CreatedAtUtc", "UpdatedAtUtc")
             VALUES
-                (@JobId, @TenantId, @WorkflowId, @InstanceId, 'Enqueued', 'QUEUED', 'AP Agent job queued', NULL, NULL, now(), now());
+                (@JobId, @TenantId, @WorkflowId, @InstanceId, 'Enqueued', 'QUEUED', @Message, NULL, NULL, now(), now());
             """;
 
         try
         {
-            await ExecuteAsync(sql, cmd =>
-            {
-                cmd.Parameters.AddWithValue("@JobId", jobId);
-                cmd.Parameters.AddWithValue("@TenantId", tenantId);
-                cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
-                cmd.Parameters.AddWithValue("@InstanceId", instanceId);
-            }, cancellationToken);
+            await ExecuteAsync(sql, cmd => AddQueuedParameters(cmd, jobId, tenantId, workflowId, instanceId, queuedMessage), cancellationToken);
         }
         catch (PostgresException ex) when (ex.SqlState == PostgresErrorCodes.UndefinedTable)
         {
             TableEnsured.TryRemove(_tenantContext.ConnectionString?.Trim() ?? string.Empty, out _);
             await EnsureTableAsync(cancellationToken, force: true);
-            await ExecuteAsync(sql, cmd =>
-            {
-                cmd.Parameters.AddWithValue("@JobId", jobId);
-                cmd.Parameters.AddWithValue("@TenantId", tenantId);
-                cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
-                cmd.Parameters.AddWithValue("@InstanceId", instanceId);
-            }, cancellationToken);
+            await ExecuteAsync(sql, cmd => AddQueuedParameters(cmd, jobId, tenantId, workflowId, instanceId, queuedMessage), cancellationToken);
         }
+    }
+
+    private static void AddQueuedParameters(
+        NpgsqlCommand cmd,
+        string jobId,
+        Guid tenantId,
+        Guid workflowId,
+        Guid instanceId,
+        string message)
+    {
+        cmd.Parameters.AddWithValue("@JobId", jobId);
+        cmd.Parameters.AddWithValue("@TenantId", tenantId);
+        cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
+        cmd.Parameters.AddWithValue("@InstanceId", instanceId);
+        cmd.Parameters.AddWithValue("@Message", message);
     }
 
     public Task UpdateProgressAsync(

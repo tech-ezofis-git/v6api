@@ -30,7 +30,8 @@ public interface IApAgentJobProgressService
         Guid tenantId,
         Guid workflowId,
         Guid instanceId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? message = null);
 
     Task UpdateProgressAsync(
         string jobId,

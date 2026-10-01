@@ -4,6 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 
 namespace SaaSApp.Workflow.Infrastructure.Jobs;
 
@@ -47,21 +48,22 @@ public sealed class RunFtlAgentJob
         services.GetRequiredService<JobExecutionContext>().Set(args.TenantId, args.UserId);
         var progress = services.GetRequiredService<IApAgentJobProgressService>();
 
+        var label = FtlAgentStepDetector.StatusLabel(args.Mode);
         try
         {
-            await progress.SetHangfireStateAsync(jobId, "Processing", "Calling FTL agent", cancellationToken: default);
+            await progress.SetHangfireStateAsync(jobId, "Processing", $"{label} started", cancellationToken: default);
             await progress.UpdateProgressAsync(
                 jobId,
-                new ApAgentJobProgressUpdate("PROCESSING", $"FTL {args.Mode} started"),
+                new ApAgentJobProgressUpdate("PROCESSING", $"{label} started"),
                 default);
 
             await services.GetRequiredService<IFtlAgentPipelineService>()
                 .ExecuteAsync(args, jobId);
 
-            await progress.SetHangfireStateAsync(jobId, "Succeeded", $"FTL {args.Mode} completed", cancellationToken: default);
+            await progress.SetHangfireStateAsync(jobId, "Succeeded", $"{label} completed", cancellationToken: default);
             await progress.UpdateProgressAsync(
                 jobId,
-                new ApAgentJobProgressUpdate("COMPLETED", $"FTL {args.Mode} completed", 100),
+                new ApAgentJobProgressUpdate("COMPLETED", $"{label} completed", 100),
                 default);
         }
         catch (Exception ex)
@@ -69,10 +71,10 @@ public sealed class RunFtlAgentJob
             _logger.LogError(ex, "FTL {Mode} job {JobId} failed for instance {InstanceId}", args.Mode, jobId, args.InstanceId);
             try
             {
-                await progress.SetHangfireStateAsync(jobId, "Failed", "FTL agent failed", ex.Message);
+                await progress.SetHangfireStateAsync(jobId, "Failed", $"{label} failed", ex.Message);
                 await progress.UpdateProgressAsync(
                     jobId,
-                    new ApAgentJobProgressUpdate("FAILED", ex.Message),
+                    new ApAgentJobProgressUpdate("FAILED", $"{label} failed"),
                     default);
             }
             catch (Exception progressEx)
