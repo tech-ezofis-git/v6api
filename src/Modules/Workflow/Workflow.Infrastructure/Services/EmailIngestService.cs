@@ -48,6 +48,7 @@ public sealed class EmailIngestService : IEmailIngestService
     private readonly IMediator _mediator;
     private readonly IWorkflowRepository _workflowRepository;
     private readonly IEmailIngestNormalWorkflowStarter _normalWorkflowStarter;
+    private readonly IMjbUsMailWorkflowStarter _mjbWorkflowStarter;
     private readonly EmailIngestActorResolver _actorResolver;
     private readonly JobExecutionContext _jobContext;
     private readonly IOptions<EmailIngestOptions> _options;
@@ -62,6 +63,7 @@ public sealed class EmailIngestService : IEmailIngestService
         IMediator mediator,
         IWorkflowRepository workflowRepository,
         IEmailIngestNormalWorkflowStarter normalWorkflowStarter,
+        IMjbUsMailWorkflowStarter mjbWorkflowStarter,
         EmailIngestActorResolver actorResolver,
         JobExecutionContext jobContext,
         IOptions<EmailIngestOptions> options,
@@ -75,6 +77,7 @@ public sealed class EmailIngestService : IEmailIngestService
         _mediator = mediator;
         _workflowRepository = workflowRepository;
         _normalWorkflowStarter = normalWorkflowStarter;
+        _mjbWorkflowStarter = mjbWorkflowStarter;
         _actorResolver = actorResolver;
         _jobContext = jobContext;
         _options = options;
@@ -443,6 +446,12 @@ public sealed class EmailIngestService : IEmailIngestService
                 cancellationToken);
 
             var extensions = ParseExtensions(mailbox.AttachmentExtensions);
+            var isMjbWorkflow = MjbUsAgent.IsThisWorkflow(workflow.Id, tenantId);
+            if (isMjbWorkflow)
+            {
+                foreach (var extension in MjbUsAgent.AttachmentExtensions)
+                    extensions.Add(extension);
+            }
             foreach (var message in messages.Items)
             {
                 scanned++;
@@ -521,7 +530,18 @@ public sealed class EmailIngestService : IEmailIngestService
                                 ["masterConnectorId"] = mailbox.MasterConnectorId
                             });
 
-                            var startResult = isApWorkflow
+                            var startResult = isMjbWorkflow
+                                ? await _mjbWorkflowStarter.StartAsync(
+                                    workflow,
+                                    bytes,
+                                    fileName ?? att.FileName ?? "document.bin",
+                                    contentType ?? att.MimeType,
+                                    message.From,
+                                    message.Subject,
+                                    message.ReceivedAtUtc,
+                                    message.Id,
+                                    cancellationToken)
+                                : isApWorkflow
                                 ? await _mediator.Send(new StartWorkflowCommand(
                                     mailbox.WorkflowId,
                                     Context: contextJson,
@@ -924,6 +944,8 @@ public sealed class EmailIngestService : IEmailIngestService
         return mime switch
         {
             "application/pdf" => ".pdf",
+            "application/msword" => ".doc",
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document" => ".docx",
             "image/tiff" or "image/tif" => ".tiff",
             "image/png" => ".png",
             "image/jpeg" or "image/jpg" => ".jpg",
