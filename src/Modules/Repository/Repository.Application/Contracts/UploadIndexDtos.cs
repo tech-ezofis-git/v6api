@@ -3,6 +3,13 @@ namespace SaaSApp.Repository.Application.Contracts;
 /// <summary>v5 fieldWithValues shape.</summary>
 public sealed record UploadIndexFieldDto(string Name, string? Value, string? Type = null);
 
+/// <summary>Monitor file returned as base64 when <c>base64=true</c> on the by-path download.</summary>
+public sealed record MonitorFileBase64Result(
+    string FileName,
+    string ContentType,
+    long FileSize,
+    string Base64);
+
 /// <summary>v5 resPostUpload response.</summary>
 public sealed record UploadIndexUploadResult(
     string FileId,

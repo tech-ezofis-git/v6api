@@ -123,22 +123,10 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
             connection, LegacyMailboxTableKind.Inbox, "inbox", suffix, fullWorkflowKey, request, activityIds, cancellationToken);
         var sentRows = await ReadMailboxByActivityIdsAsync(
             connection, LegacyMailboxTableKind.Sent, "sent", suffix, fullWorkflowKey, request, activityIds, cancellationToken);
+        var completedRows = await ReadMailboxByActivityIdsAsync(
+            connection, LegacyMailboxTableKind.Completed, "completed", suffix, fullWorkflowKey, request, activityIds, cancellationToken);
 
-        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        var items = new List<LegacyMailboxRowDto>(activityIds.Length);
-        foreach (var row in inboxRows)
-        {
-            if (string.IsNullOrWhiteSpace(row.ActivityId) || !seen.Add(row.ActivityId))
-                continue;
-            items.Add(row);
-        }
-
-        foreach (var row in sentRows)
-        {
-            if (string.IsNullOrWhiteSpace(row.ActivityId) || !seen.Add(row.ActivityId))
-                continue;
-            items.Add(row);
-        }
+        var items = KeepCurrentStageRows(inboxRows, sentRows, completedRows);
 
         var order = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < activityIds.Length; i++)
@@ -150,9 +138,35 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         await EnrichFormDataAsync(connection, items, cancellationToken);
         await EnrichRepositoryItemAsync(items, cancellationToken);
 
-        var tableExists = inboxRows.Count > 0 || sentRows.Count > 0 || await MailboxTableExistsAsync(
-            connection, suffix, fullWorkflowKey, cancellationToken);
+        var tableExists = inboxRows.Count > 0 || sentRows.Count > 0 || completedRows.Count > 0
+            || await MailboxTableExistsAsync(connection, suffix, fullWorkflowKey, cancellationToken);
         return new LegacyMailboxListResult(items, items.Count, 1, activityIds.Length, tableExists);
+    }
+
+    public async Task<LegacyMailboxActivityCountResult> CountByActivityIdsAsync(
+        LegacyMailboxByActivityRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var listed = await ListByActivityIdsAsync(request, cancellationToken);
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        foreach (var id in request.ActivityIds.Where(x => !string.IsNullOrWhiteSpace(x)).Select(x => x.Trim()).Distinct(StringComparer.OrdinalIgnoreCase))
+            counts[id] = 0;
+
+        foreach (var row in listed.Items)
+        {
+            var activityId = row.ActivityId?.Trim();
+            if (string.IsNullOrWhiteSpace(activityId))
+                continue;
+
+            var key = counts.Keys.FirstOrDefault(id => ActivityKeysMatch(id, activityId)) ?? activityId;
+            counts[key] = counts.GetValueOrDefault(key) + 1;
+        }
+
+        var items = counts.Select(pair => new LegacyMailboxActivityCountItem(pair.Key, pair.Value)).ToList();
+        return new LegacyMailboxActivityCountResult(
+            request.WorkflowId,
+            items.Sum(item => item.Count),
+            items);
     }
 
     private async Task<bool> MailboxTableExistsAsync(
@@ -165,7 +179,49 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         if (inbox.Exists)
             return true;
         var sent = await ResolveMailboxTableAsync(connection, "sent", suffix, fullWorkflowKey, cancellationToken);
-        return sent.Exists;
+        if (sent.Exists)
+            return true;
+        var completed = await ResolveMailboxTableAsync(connection, "completed", suffix, fullWorkflowKey, cancellationToken);
+        return completed.Exists;
+    }
+
+    /// <summary>One row per ticket: the mailbox row for the stage the ticket is on now.</summary>
+    private static List<LegacyMailboxRowDto> KeepCurrentStageRows(
+        IReadOnlyList<LegacyMailboxRowDto> inboxRows,
+        IReadOnlyList<LegacyMailboxRowDto> sentRows,
+        IReadOnlyList<LegacyMailboxRowDto> completedRows)
+    {
+        var byInstance = new Dictionary<string, LegacyMailboxRowDto>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in inboxRows.Concat(sentRows).Concat(completedRows))
+        {
+            var key = string.IsNullOrWhiteSpace(row.WorkflowInstanceId)
+                ? $"row:{row.Id}"
+                : row.WorkflowInstanceId.Trim();
+            if (!byInstance.TryGetValue(key, out var existing) || MailboxRank(row.Mailbox) < MailboxRank(existing.Mailbox))
+                byInstance[key] = row;
+        }
+
+        return byInstance.Values.ToList();
+    }
+
+    private static int MailboxRank(string? mailbox) =>
+        mailbox switch
+        {
+            "inbox" => 0,
+            "sent" => 1,
+            "completed" => 2,
+            _ => 3
+        };
+
+    private static bool ActivityKeysMatch(string left, string right)
+    {
+        var a = left.Trim();
+        var b = right.Trim();
+        if (string.Equals(a, b, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return Guid.TryParse(a, out var aId)
+            && Guid.TryParse(b, out var bId)
+            && aId == bId;
     }
 
     private async Task<List<LegacyMailboxRowDto>> ReadMailboxByActivityIdsAsync(
@@ -186,7 +242,7 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var transactionTableName = $"transaction_{suffix}";
         var transactionTable = $"workflow.{transactionTableName}";
         var transactionTableExists = await TableExistsAsync(connection, transactionTableName, cancellationToken);
-        var pageSize = Math.Min(Math.Max(activityIds.Length * 10, activityIds.Length), 500);
+        var pageSize = 5000;
         var listRequest = new LegacyMailboxListRequest(
             kind,
             request.WorkflowId,
@@ -201,14 +257,53 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         {
             Value = activityIds.Select(x => x.ToLowerInvariant()).ToArray()
         });
+        if (transactionTableExists)
+            whereSql += " AND " + BuildCurrentActivityMatchSql(transactionTable);
 
         var agentTable = $"agent_data_validation_{suffix}";
         var agentJoin = await BuildAgentValidationApplyAsync(connection, agentTable, cancellationToken);
         var currentStageJoin = BuildCurrentStageJoin(transactionTable, transactionTableExists);
-        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance: false);
-        var mailbox = kind == LegacyMailboxTableKind.Inbox ? "inbox" : "sent";
+        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance: true);
+        var mailbox = kind switch
+        {
+            LegacyMailboxTableKind.Inbox => "inbox",
+            LegacyMailboxTableKind.Sent => "sent",
+            _ => "completed"
+        };
         var rows = await ReadListPageAsync(connection, dataSql, parameters, 0, pageSize, cancellationToken);
         return rows.Select(row => row with { Mailbox = mailbox }).ToList();
+    }
+
+    /// <summary>
+    /// Keeps a mailbox row only when its activity is the ticket's current stage.
+    /// Open step wins. After workflow success, the END stage (Workflow Success) wins,
+    /// so an older sent row is not returned on a previous stage.
+    /// </summary>
+    private static string BuildCurrentActivityMatchSql(string transactionTable)
+    {
+        var instanceJoin = $"{TryCastInstanceId("m.workflow_instance_id")} = cur.workflow_instance_id";
+        return $"""
+EXISTS (
+    SELECT 1
+    FROM (
+        SELECT DISTINCT ON (tx.workflow_instance_id)
+            tx.workflow_instance_id,
+            tx.activity_id
+        FROM {transactionTable} tx
+        WHERE tx.is_deleted = false
+        ORDER BY tx.workflow_instance_id,
+            CASE
+                WHEN tx.action_status = 0 AND UPPER(TRIM(COALESCE(tx.stage_type, ''))) <> 'END' THEN 0
+                WHEN UPPER(TRIM(COALESCE(tx.stage_type, ''))) = 'END' THEN 1
+                ELSE 2
+            END,
+            tx.id DESC
+    ) cur
+    WHERE {instanceJoin}
+      AND REPLACE(LOWER(BTRIM(COALESCE(cur.activity_id, ''))), '-', '')
+        = REPLACE(LOWER(BTRIM(COALESCE(m.activity_id, ''))), '-', '')
+)
+""";
     }
 
     private async Task EnrichFormDataAsync(
