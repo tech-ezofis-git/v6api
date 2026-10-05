@@ -314,6 +314,69 @@ public sealed class UploadAndIndexController : ControllerBase
     }
 
     /// <summary>
+    /// View or download a staged monitor file by blob path. No fileId.
+    /// <c>path</c> example: <c>monitor/{repositoryId}/{timestamp}/{fileName}</c>.
+    /// <c>disposition=inline</c> (default) views the file; <c>attachment</c> downloads it.
+    /// <c>base64=true</c> returns JSON <c>fileName</c>, <c>contentType</c>, <c>fileSize</c>, and <c>base64</c> instead of the file bytes.
+    /// </summary>
+    [HttpGet("/api/uploadAndIndex/files/by-path")]
+    [EndpointName("IndexFileByMonitorPath")]
+    [ProducesResponseType(StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(MonitorFileBase64Result), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> IndexFileByMonitorPath(
+        [FromQuery] string path,
+        [FromQuery] string disposition = "inline",
+        [FromQuery] bool base64 = false,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return BadRequest(new { error = "path is required." });
+
+        var tenantId = RequireTenantId();
+        try
+        {
+            var content = await _uploadIndex.OpenMonitorFileByPathAsync(path, tenantId, cancellationToken);
+            if (content == null)
+                return NotFound(new { error = "Monitor file not found." });
+
+            if (base64)
+            {
+                await using (content.Stream)
+                {
+                    using var buffer = new MemoryStream();
+                    await content.Stream.CopyToAsync(buffer, cancellationToken);
+                    var bytes = buffer.ToArray();
+                    return Ok(new MonitorFileBase64Result(
+                        content.FileName,
+                        content.ContentType,
+                        bytes.LongLength,
+                        Convert.ToBase64String(bytes)));
+                }
+            }
+
+            var inline = string.Equals(disposition, "inline", StringComparison.OrdinalIgnoreCase);
+            return new FileStreamResult(content.Stream, content.ContentType)
+            {
+                FileDownloadName = inline ? null : content.FileName,
+                EnableRangeProcessing = true
+            };
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (FileNotFoundException)
+        {
+            return NotFound(new { error = "Monitor file not found." });
+        }
+    }
+
+    /// <summary>
     /// IndexFilesDownload — view or download a staged (monitor) index file by <c>fileId</c>.
     /// <c>?disposition=inline</c> (default) = view; <c>attachment</c> = download.
     /// After export use <c>GET /api/repositories/{repositoryId}/items/{itemId}/file</c>.

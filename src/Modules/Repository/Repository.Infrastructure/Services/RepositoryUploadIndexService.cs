@@ -804,6 +804,46 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             row.FileSize);
     }
 
+    public async Task<RepositoryItemFileContent?> OpenMonitorFileByPathAsync(
+        string monitorPath,
+        Guid tenantId,
+        CancellationToken cancellationToken = default)
+    {
+        var path = NormalizeMonitorPath(monitorPath);
+        if (path == null)
+            throw new ArgumentException("path must be a monitor file path, for example monitor/{repositoryId}/{timestamp}/{fileName}.");
+
+        var stream = await _fileStorage.OpenReadAsync(tenantId, path, "EZOFIS", cancellationToken);
+        var fileName = Path.GetFileName(path.TrimEnd('/'));
+        if (string.IsNullOrWhiteSpace(fileName))
+            fileName = "file.bin";
+
+        return new RepositoryItemFileContent(
+            stream,
+            fileName,
+            RepositoryOcrFileSupport.ResolveContentType(fileName),
+            null);
+    }
+
+    private static string? NormalizeMonitorPath(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw))
+            return null;
+
+        var path = raw.Trim().Replace('\\', '/');
+        while (path.StartsWith('/'))
+            path = path[1..];
+
+        if (path.Contains("..", StringComparison.Ordinal))
+            return null;
+
+        var root = RepositoryFilePathHelper.MonitorRoot + "/";
+        if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase))
+            return null;
+
+        return path;
+    }
+
     private static IReadOnlyList<UploadIndexFieldDto> BuildListFields(
         RepositoryDetailDto repo,
         RepositoryStageRow row)

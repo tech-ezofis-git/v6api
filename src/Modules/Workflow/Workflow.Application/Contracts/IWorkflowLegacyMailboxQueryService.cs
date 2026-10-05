@@ -114,15 +114,28 @@ public sealed record LegacyMailboxByActivityRequest(
     IReadOnlyList<string> ActivityIds,
     Guid CurrentUserId);
 
+public sealed record LegacyMailboxActivityCountItem(string ActivityId, int Count);
+
+public sealed record LegacyMailboxActivityCountResult(
+    Guid WorkflowId,
+    int FullCount,
+    IReadOnlyList<LegacyMailboxActivityCountItem> Items);
+
 public interface IWorkflowLegacyMailboxQueryService
 {
     Task<LegacyMailboxListResult> ListAsync(LegacyMailboxListRequest request, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Rows for the given activity ids from inbox, then sent, in the same shape as those lists.
-    /// When an activity id is in both, the inbox row is returned.
+    /// Current-stage rows for the given activity ids from inbox, sent, and completed.
+    /// A ticket is returned once, on the stage it is on now. Inbox wins over sent when both match.
+    /// Completed tickets are included on the workflow success (END) stage.
     /// </summary>
     Task<LegacyMailboxListResult> ListByActivityIdsAsync(
+        LegacyMailboxByActivityRequest request,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Ticket counts per activity id, using the same current-stage rules as <see cref="ListByActivityIdsAsync"/>.</summary>
+    Task<LegacyMailboxActivityCountResult> CountByActivityIdsAsync(
         LegacyMailboxByActivityRequest request,
         CancellationToken cancellationToken = default);
 

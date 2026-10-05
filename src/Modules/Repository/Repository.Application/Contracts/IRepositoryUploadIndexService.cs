@@ -63,6 +63,12 @@ public interface IRepositoryUploadIndexService
         Guid tenantId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Open a staged monitor file by its blob path (monitor/...), with no fileId.</summary>
+    Task<RepositoryItemFileContent?> OpenMonitorFileByPathAsync(
+        string monitorPath,
+        Guid tenantId,
+        CancellationToken cancellationToken = default);
+
     Task<UploadIndexArchiveQueuedResult?> QueueArchiveAsync(
         Guid stageId,
         Guid tenantId,

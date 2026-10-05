@@ -1539,8 +1539,8 @@ public sealed class WorkflowsController : ControllerBase
         GetLegacyMailboxList(LegacyMailboxTableKind.Completed, workflowId, instanceId, transactionId, pageNumber, pageSize, skipTotal, cancellationToken);
 
     /// <summary>
-    /// Inbox or sent row for each activity id, in the same shape as inbox and sent.
-    /// When the same activity id is in both, the inbox row is returned. Each item includes mailbox: inbox or sent.
+    /// Current tickets for the given stage activity ids, in the same shape as inbox, sent, and completed.
+    /// A ticket is returned once, on the stage it is on now. Workflow success rows come from completed.
     /// </summary>
     [HttpPost("by-activity")]
     [ProducesResponseType(typeof(LegacyMailboxListResult), StatusCodes.Status200OK)]
@@ -1564,6 +1564,36 @@ public sealed class WorkflowsController : ControllerBase
 
         var result = await _mediator.Send(
             new GetMailboxByActivityIdsQuery(request.WorkflowId, activityIds),
+            cancellationToken);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Counts for the same activity ids as by-activity. One count per stage, for the current user.
+    /// A ticket is counted on its current stage only, including workflow success (completed).
+    /// </summary>
+    [HttpPost("by-activity/counts")]
+    [ProducesResponseType(typeof(LegacyMailboxActivityCountResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetMailboxCountsByActivity(
+        [FromBody] MailboxByActivityRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (request.WorkflowId == Guid.Empty)
+            return BadRequest(new { error = "workflowId is required." });
+
+        var activityIds = (request.ActivityIds ?? [])
+            .Where(id => !string.IsNullOrWhiteSpace(id))
+            .Select(id => id.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (activityIds.Count == 0)
+            return BadRequest(new { error = "activityIds is required." });
+        if (activityIds.Count > 100)
+            return BadRequest(new { error = "activityIds cannot exceed 100." });
+
+        var result = await _mediator.Send(
+            new GetMailboxActivityCountsQuery(request.WorkflowId, activityIds),
             cancellationToken);
         return Ok(result);
     }
