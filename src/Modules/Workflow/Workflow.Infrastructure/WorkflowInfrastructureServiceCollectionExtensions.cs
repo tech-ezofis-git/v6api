@@ -162,6 +162,14 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IFtlAgentPipelineService, FtlAgentPipelineService>();
         services.AddScoped<IFtlAgentJobClient, FtlAgentJobClient>();
         services.AddScoped<RunFtlAgentJob>();
+        services.AddHttpClient(nameof(MjbUsAgentPipelineService), client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        });
+        services.AddScoped<IMjbUsMailWorkflowStarter, MjbUsMailWorkflowStarter>();
+        services.AddScoped<IMjbUsAgentPipelineService, MjbUsAgentPipelineService>();
+        services.AddScoped<IMjbUsAgentJobClient, MjbUsAgentJobClient>();
+        services.AddScoped<RunMjbUsAgentJob>();
 
         services.AddHttpClient(nameof(FieldMappingService), client =>
         {
