@@ -106,10 +106,13 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         var attachment = (await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken))
             .FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
         var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
-        var fields = ExtractFormFields(storedJson);
-        var lineItemsJson = ExtractLineItems(storedJson);
+        var isQuote = string.Equals(args.Mode, FtlAgentStepDetector.Quote, StringComparison.OrdinalIgnoreCase);
+        var fields = isQuote
+            ? ExtractQuoteFormFields(storedJson)
+            : ExtractFormFields(storedJson);
+        var lineItemsJson = isQuote ? ExtractQuoteLineItems(storedJson) : null;
         var mapped = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson, cancellationToken);
-        if (string.Equals(args.Mode, FtlAgentStepDetector.Quote, StringComparison.OrdinalIgnoreCase))
+        if (isQuote)
         {
             var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
             var protectedIds = NonEmptyFormKeys(existingFormData);
@@ -778,12 +781,17 @@ LIMIT 1;
         writer.WriteStringValue(value);
     }
 
-    private static string? ExtractLineItems(string json)
+    /// <summary>
+    /// Quote Line Item rows come only from quote_result. Never use qualifier matched_items.
+    /// </summary>
+    private static string? ExtractQuoteLineItems(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        var lineItems = FindLongestNamedArray(doc.RootElement, "line_items");
-        if (lineItems.ValueKind != JsonValueKind.Array)
-            lineItems = FindProperty(doc.RootElement, "matched_items");
+        var quote = FindProperty(doc.RootElement, "quote_result");
+        if (quote.ValueKind != JsonValueKind.Object)
+            return null;
+
+        var lineItems = FindLongestNamedArray(quote, "line_items", "Line Item", "Line Items");
         if (lineItems.ValueKind == JsonValueKind.Array && lineItems.GetArrayLength() > 0)
             return lineItems.GetRawText();
         return null;
@@ -878,9 +886,13 @@ LIMIT 1;
         var tableFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var formDataFields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var tableColumns = new List<FtlTableColumn>();
+        // Quote remap passes lineItemsJson. Never map qualifier matched_items onto the form.
+        var ignoreMatchedItems = !string.IsNullOrWhiteSpace(lineItemsJson);
         foreach (var (key, value) in fields)
         {
             if (string.IsNullOrWhiteSpace(value) || string.Equals(value, "null", StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (ignoreMatchedItems && IsMatchedItemsField(key))
                 continue;
 
             var control = ResolveQualifierControl(key, roots);
@@ -899,7 +911,9 @@ LIMIT 1;
         var lineItemTable = roots.FirstOrDefault(c =>
             c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
             && NormalizeFieldKey(c.Label) is "lineitem" or "lineitems");
-        if (lineItemTable is not null && !string.IsNullOrWhiteSpace(lineItemsJson))
+        if (lineItemTable is not null
+            && !string.IsNullOrWhiteSpace(lineItemsJson)
+            && !HasLongerOrEqualTable(formDataFields, lineItemTable.JsonId, lineItemsJson))
             AddMappedControl(lineItemTable, lineItemsJson, controls, tableFields, formDataFields, tableColumns);
 
         foreach (var root in roots)
@@ -931,6 +945,12 @@ LIMIT 1;
             if (string.IsNullOrWhiteSpace(tableJson))
                 return;
 
+            if (formDataFields.TryGetValue(control.JsonId, out var existing)
+                && CountJsonArrayRows(existing) >= CountJsonArrayRows(tableJson))
+                return;
+
+            tableColumns.RemoveAll(column =>
+                string.Equals(column.JsonId, control.JsonId, StringComparison.OrdinalIgnoreCase));
             tableColumns.Add(new FtlTableColumn(control.ColumnName, control.Label, control.JsonId, tableJson));
             formDataFields[control.JsonId] = tableJson;
             return;
@@ -1771,7 +1791,35 @@ LIMIT 1;
         return fields;
     }
 
-    private static void CopyFlat(JsonElement element, Dictionary<string, string> fields)
+    /// <summary>
+    /// Quote save uses only quote_result. Matched items from qualifier/payload are ignored.
+    /// </summary>
+    private static Dictionary<string, string> ExtractQuoteFormFields(string json)
+    {
+        var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        using var doc = JsonDocument.Parse(json);
+        CopyFlat(FindProperty(doc.RootElement, "quote_result"), fields, skipMatchedItems: true);
+        if (doc.RootElement.TryGetProperty("estimate_number", out var estimate)
+            && estimate.ValueKind == JsonValueKind.String)
+            fields["estimate_number"] = estimate.GetString() ?? string.Empty;
+        if (fields.TryGetValue("estimate_number", out _) is false
+            && fields.TryGetValue("Order Number", out var orderNumber)
+            && !string.IsNullOrWhiteSpace(orderNumber))
+            fields["estimate_number"] = orderNumber;
+        return fields;
+    }
+
+    private static bool IsMatchedItemsField(string name)
+    {
+        var key = NormalizeFieldKey(name);
+        return key is "matcheditems" or "matcheditem"
+            || key.StartsWith("matchedit", StringComparison.Ordinal);
+    }
+
+    private static void CopyFlat(
+        JsonElement element,
+        Dictionary<string, string> fields,
+        bool skipMatchedItems = false)
     {
         if (element.ValueKind != JsonValueKind.Object)
             return;
@@ -1780,6 +1828,8 @@ LIMIT 1;
             if (prop.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
                 continue;
             if (prop.NameEquals("pdf_base64"))
+                continue;
+            if (skipMatchedItems && IsMatchedItemsField(prop.Name))
                 continue;
             fields[prop.Name] = prop.Value.ValueKind == JsonValueKind.String
                 ? prop.Value.GetString() ?? string.Empty
@@ -1804,7 +1854,7 @@ LIMIT 1;
         return default;
     }
 
-    private static JsonElement FindLongestNamedArray(JsonElement element, string name)
+    private static JsonElement FindLongestNamedArray(JsonElement element, params string[] names)
     {
         JsonElement best = default;
         var bestLength = 0;
@@ -1818,7 +1868,8 @@ LIMIT 1;
 
             foreach (var prop in current.EnumerateObject())
             {
-                if (prop.NameEquals(name) && prop.Value.ValueKind == JsonValueKind.Array)
+                if (prop.Value.ValueKind == JsonValueKind.Array
+                    && names.Any(name => prop.NameEquals(name)))
                 {
                     var length = prop.Value.GetArrayLength();
                     if (length > bestLength)
@@ -1832,6 +1883,33 @@ LIMIT 1;
 
                 Walk(prop.Value);
             }
+        }
+    }
+
+    private static bool HasLongerOrEqualTable(
+        IReadOnlyDictionary<string, string> formDataFields,
+        string jsonId,
+        string candidateJson)
+    {
+        if (!formDataFields.TryGetValue(jsonId, out var existing))
+            return false;
+        return CountJsonArrayRows(existing) >= CountJsonArrayRows(candidateJson);
+    }
+
+    private static int CountJsonArrayRows(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.GetArrayLength()
+                : 0;
+        }
+        catch (JsonException)
+        {
+            return 0;
         }
     }
 
