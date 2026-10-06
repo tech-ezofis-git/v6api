@@ -161,16 +161,44 @@ WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL);";
                 }
 
                 if (writtenKeys.Add(outputKey))
-                    writer.WriteString(outputKey, value);
+                    WriteFormValue(writer, outputKey, value);
 
                 if (aliasKey != null && writtenKeys.Add(aliasKey))
-                    writer.WriteString(aliasKey, value);
+                    WriteFormValue(writer, aliasKey, value);
             }
 
             writer.WriteEndObject();
         }
 
         return Encoding.UTF8.GetString(stream.ToArray());
+    }
+
+    /// <summary>
+    /// Table columns such as Line Item are stored as a JSON array string.
+    /// The form table binds only when that value is a JSON array, not a quoted string.
+    /// </summary>
+    private static void WriteFormValue(Utf8JsonWriter writer, string key, string value)
+    {
+        writer.WritePropertyName(key);
+        var trimmed = value.Trim();
+        if ((trimmed.StartsWith('[') && trimmed.EndsWith(']'))
+            || (trimmed.StartsWith('{') && trimmed.EndsWith('}')))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                if (doc.RootElement.ValueKind is JsonValueKind.Array or JsonValueKind.Object)
+                {
+                    doc.RootElement.WriteTo(writer);
+                    return;
+                }
+            }
+            catch (JsonException)
+            {
+            }
+        }
+
+        writer.WriteStringValue(value);
     }
 
     private static bool IsSystemColumn(string column) => SystemColumns.Contains(column);
