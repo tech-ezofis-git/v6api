@@ -113,9 +113,16 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         {
             var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
             var protectedIds = NonEmptyFormKeys(existingFormData);
+            var lineItemIds = mapped.TableColumns
+                .Where(column => NormalizeFieldKey(column.Label) is "lineitem" or "lineitems")
+                .Select(column => column.JsonId)
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+            foreach (var id in lineItemIds)
+                protectedIds.Remove(id);
+
             mapped = mapped with
             {
-                FormDataFields = MergeQuoteFormData(existingFormData, mapped.FormDataFields),
+                FormDataFields = MergeQuoteFormData(existingFormData, mapped.FormDataFields, lineItemIds),
                 TableFields = KeepAddedFields(mapped.TableFields, mapped.FormDataFields, protectedIds),
                 TableColumns = mapped.TableColumns.Where(column => !protectedIds.Contains(column.JsonId)).ToList()
             };
@@ -774,7 +781,7 @@ LIMIT 1;
     private static string? ExtractLineItems(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        var lineItems = FindProperty(doc.RootElement, "line_items");
+        var lineItems = FindLongestNamedArray(doc.RootElement, "line_items");
         if (lineItems.ValueKind != JsonValueKind.Array)
             lineItems = FindProperty(doc.RootElement, "matched_items");
         if (lineItems.ValueKind == JsonValueKind.Array && lineItems.GetArrayLength() > 0)
@@ -1465,7 +1472,8 @@ LIMIT 1;
 
     private static Dictionary<string, string> MergeQuoteFormData(
         string? existingJson,
-        IReadOnlyDictionary<string, string> incoming)
+        IReadOnlyDictionary<string, string> incoming,
+        IReadOnlySet<string>? replaceKeys = null)
     {
         var merged = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         if (!string.IsNullOrWhiteSpace(existingJson))
@@ -1490,6 +1498,12 @@ LIMIT 1;
 
         foreach (var (key, value) in incoming)
         {
+            if (replaceKeys is not null && replaceKeys.Contains(key) && !IsEmptyFormValue(value))
+            {
+                merged[key] = value;
+                continue;
+            }
+
             if (merged.TryGetValue(key, out var current) && !IsEmptyFormValue(current))
                 continue;
 
@@ -1788,6 +1802,37 @@ LIMIT 1;
         }
 
         return default;
+    }
+
+    private static JsonElement FindLongestNamedArray(JsonElement element, string name)
+    {
+        JsonElement best = default;
+        var bestLength = 0;
+        Walk(element);
+        return best;
+
+        void Walk(JsonElement current)
+        {
+            if (current.ValueKind != JsonValueKind.Object)
+                return;
+
+            foreach (var prop in current.EnumerateObject())
+            {
+                if (prop.NameEquals(name) && prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    var length = prop.Value.GetArrayLength();
+                    if (length > bestLength)
+                    {
+                        best = prop.Value;
+                        bestLength = length;
+                    }
+
+                    continue;
+                }
+
+                Walk(prop.Value);
+            }
+        }
     }
 
     private static string StripPdf(string json)
