@@ -1,6 +1,7 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using Azure.Storage.Blobs;
 using MediatR;
 using Microsoft.Extensions.Configuration;
@@ -206,6 +207,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
 
         if (!string.IsNullOrWhiteSpace(formId) && formEntryId is { } savedEntry && savedEntry != Guid.Empty)
             await WriteFormTableColumnsAsync(formId, savedEntry, mapped.TableColumns, cancellationToken);
+
+        await SyncLineItemsToMailboxAsync(args.WorkflowId, args.InstanceId, mapped.TableColumns, cancellationToken);
 
         _logger.LogInformation(
             "FTL {Mode} moved instance {InstanceId} with review {Review} to {NextStep}.",
@@ -944,9 +947,12 @@ LIMIT 1;
                 && CountJsonArrayRows(existing) >= CountJsonArrayRows(tableJson))
                 return;
 
+            // Inbox form_data binds by child jsonId. The ezfb form table binds by child name
+            // (Product, Qty, Price), the same way Matched Items is stored.
+            var ezfbJson = RemapTableKeysToControlNames(tableJson, control, controls) ?? tableJson;
             tableColumns.RemoveAll(column =>
                 string.Equals(column.JsonId, control.JsonId, StringComparison.OrdinalIgnoreCase));
-            tableColumns.Add(new FtlTableColumn(control.ColumnName, control.Label, control.JsonId, tableJson));
+            tableColumns.Add(new FtlTableColumn(control.ColumnName, control.Label, control.JsonId, tableJson, ezfbJson));
             formDataFields[control.JsonId] = tableJson;
             return;
         }
@@ -1004,10 +1010,100 @@ LIMIT 1;
             await using var update = new NpgsqlCommand(
                 $"UPDATE {table} SET \"{escaped}\" = @Value WHERE item_id = @ItemId;",
                 connection);
-            update.Parameters.AddWithValue("@Value", column.Json);
+            update.Parameters.AddWithValue("@Value", string.IsNullOrWhiteSpace(column.EzfbJson) ? column.Json : column.EzfbJson);
             update.Parameters.AddWithValue("@ItemId", formEntryId);
             await update.ExecuteNonQueryAsync(cancellationToken);
             existing.Add(physical);
+        }
+    }
+
+    /// <summary>
+    /// Inbox form_data is what the open ticket renders. ezfb is updated separately, so copy the
+    /// same Line Item array onto the mailbox row or the table stays on the previous payload.
+    /// </summary>
+    private async Task SyncLineItemsToMailboxAsync(
+        Guid workflowId,
+        Guid instanceId,
+        IReadOnlyList<FtlTableColumn> columns,
+        CancellationToken cancellationToken)
+    {
+        var lineItems = columns
+            .Where(column => NormalizeFieldKey(column.Label) is "lineitem" or "lineitems")
+            .Where(column => !string.IsNullOrWhiteSpace(column.JsonId) && !string.IsNullOrWhiteSpace(column.Json))
+            .ToList();
+        if (lineItems.Count == 0)
+            return;
+
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return;
+
+        var suffix = workflowId.ToString("N")[..8];
+        var instanceKey = instanceId.ToString("N");
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+        foreach (var prefix in new[] { "inbox", "sent", "completed" })
+        {
+            var table = $"workflow.{prefix}_{suffix}";
+            string? current;
+            try
+            {
+                await using var read = new NpgsqlCommand(
+                    $"""
+                    SELECT form_data
+                    FROM {table}
+                    WHERE REPLACE(LOWER(workflow_instance_id::text), '-', '') = @InstanceId
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    connection);
+                read.Parameters.AddWithValue("@InstanceId", instanceKey);
+                var value = await read.ExecuteScalarAsync(cancellationToken);
+                current = value == null || value == DBNull.Value ? null : Convert.ToString(value);
+            }
+            catch (PostgresException)
+            {
+                continue;
+            }
+
+            if (string.IsNullOrWhiteSpace(current))
+                continue;
+
+            JsonObject? root;
+            try
+            {
+                root = JsonNode.Parse(current) as JsonObject;
+            }
+            catch (JsonException)
+            {
+                continue;
+            }
+
+            if (root == null)
+                continue;
+
+            foreach (var column in lineItems)
+            {
+                try
+                {
+                    root[column.JsonId] = JsonNode.Parse(column.Json);
+                }
+                catch (JsonException)
+                {
+                    root[column.JsonId] = column.Json;
+                }
+            }
+
+            await using var update = new NpgsqlCommand(
+                $"""
+                UPDATE {table}
+                SET form_data = @FormData
+                WHERE REPLACE(LOWER(workflow_instance_id::text), '-', '') = @InstanceId
+                """,
+                connection);
+            update.Parameters.AddWithValue("@FormData", root.ToJsonString());
+            update.Parameters.AddWithValue("@InstanceId", instanceKey);
+            await update.ExecuteNonQueryAsync(cancellationToken);
         }
     }
 
@@ -1277,6 +1373,62 @@ LIMIT 1;
         catch (JsonException)
         {
             return null;
+        }
+    }
+
+    private static string? RemapTableKeysToControlNames(
+        string tableJson,
+        FtlFormControl table,
+        IReadOnlyList<FtlFormControl> controls)
+    {
+        var names = controls
+            .Where(child => child.ParentId == table.Id)
+            .ToDictionary(
+                child => child.JsonId,
+                child => !string.IsNullOrWhiteSpace(child.Name)
+                    && !string.Equals(child.Name, child.JsonId, StringComparison.OrdinalIgnoreCase)
+                    ? child.Name.Trim()
+                    : child.Label,
+                StringComparer.OrdinalIgnoreCase);
+        if (names.Count == 0)
+            return tableJson;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(tableJson);
+            if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                return tableJson;
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartArray();
+                foreach (var row in doc.RootElement.EnumerateArray())
+                {
+                    if (row.ValueKind != JsonValueKind.Object)
+                    {
+                        row.WriteTo(writer);
+                        continue;
+                    }
+
+                    writer.WriteStartObject();
+                    foreach (var prop in row.EnumerateObject())
+                    {
+                        writer.WritePropertyName(names.TryGetValue(prop.Name, out var name) ? name : prop.Name);
+                        prop.Value.WriteTo(writer);
+                    }
+
+                    writer.WriteEndObject();
+                }
+
+                writer.WriteEndArray();
+            }
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+        catch (JsonException)
+        {
+            return tableJson;
         }
     }
 
@@ -1761,7 +1913,7 @@ LIMIT 1;
 
     private sealed record FtlFormControl(int Id, int ParentId, string JsonId, string Label, string Type, string? ColumnName, string? Name);
 
-    private sealed record FtlTableColumn(string? ColumnName, string Label, string JsonId, string Json);
+    private sealed record FtlTableColumn(string? ColumnName, string Label, string JsonId, string Json, string? EzfbJson = null);
 
     private sealed record FtlMappedForm(
         Dictionary<string, string> TableFields,
