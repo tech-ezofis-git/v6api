@@ -18,7 +18,7 @@ using SaaSApp.Workflow.Infrastructure.Options;
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
 /// <summary>
-/// FTL qualifier (file), quote estimator (JSON), and document PDF.
+/// FTL qualifier (file), quote estimator (RFQ file + qualifier payload), and document PDF.
 /// Does not call the AP Agent pipeline.
 /// </summary>
 public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
@@ -96,8 +96,16 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             _ => throw new InvalidOperationException($"Unknown FTL mode '{args.Mode}'.")
         };
 
-        var storedJson = StripPdf(responseJson);
+        var storedJson = PreferLongestQuoteLineItems(StripPdf(responseJson));
         EnsureAgentOutput(args.Mode, storedJson);
+        if (string.Equals(args.Mode, FtlAgentStepDetector.Quote, StringComparison.OrdinalIgnoreCase))
+        {
+            _logger.LogInformation(
+                "FTL quote agent Line Item rows for instance {InstanceId}: {Count}",
+                args.InstanceId,
+                CountJsonArrayRows(ExtractQuoteLineItems(storedJson)));
+        }
+
         var formId = args.FormId ?? workflow.FormId;
         var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
         if (string.IsNullOrWhiteSpace(formId))
@@ -590,46 +598,34 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         string chatUrl,
         CancellationToken cancellationToken)
     {
+        // Agents ftl_quote_estimator prices the RFQ .eml/PDF file. JSON-only calls omit the
+        // attachment and often return quote_result["Line Item"]: [] (freight/tax only).
+        var file = await ReadFirstAttachmentAsync(args, cancellationToken);
         var prior = await LoadLatestAgentResponseAsync(
             args.WorkflowId,
             args.InstanceId,
             cancellationToken,
             "QUALIFY_AGENT");
         using var priorDoc = JsonDocument.Parse(string.IsNullOrWhiteSpace(prior) ? "{}" : prior);
-        var qualifier = FindProperty(priorDoc.RootElement, "qualifier_result");
+        var qualifier = FindRootOrNestedObject(priorDoc.RootElement, "qualifier_result");
 
-        var statusUrl = StatusUrl(jobId);
-        var progressUrl = ProgressUrl(args);
-        var payload = new Dictionary<string, object?>
+        using var form = new MultipartFormDataContent();
+        form.Add(new StringContent(jobId), "session_id");
+        form.Add(new StringContent("ftl_quote_estimator"), "intent");
+        form.Add(new StringContent("inflow"), "template_type");
+        AddTrackingFields(form, args, jobId);
+        if (qualifier.ValueKind == JsonValueKind.Object)
         {
-            ["template_type"] = "inflow",
-            ["workflowId"] = args.WorkflowId.ToString("D"),
-            ["tenantId"] = args.TenantId.ToString("D"),
-            ["instanceId"] = args.InstanceId.ToString("D"),
-            ["activityId"] = args.ActivityId,
-            ["repositoryId"] = args.RepositoryId,
-            ["formId"] = args.FormId,
-            ["apAgentJobId"] = jobId,
-            ["apAgentJobStatusUrl"] = statusUrl,
-            ["apAgentProgressUrl"] = progressUrl
-        };
-        if (qualifier.ValueKind != JsonValueKind.Undefined)
-            payload["qualifier_result"] = JsonSerializer.Deserialize<object>(qualifier.GetRawText());
+            form.Add(
+                new StringContent(qualifier.GetRawText(), Encoding.UTF8, "application/json"),
+                "qualifier_result");
+        }
 
-        var body = JsonSerializer.Serialize(new Dictionary<string, object?>
-        {
-            ["session_id"] = jobId,
-            ["intent"] = "ftl_quote_estimator",
-            ["workflowId"] = args.WorkflowId.ToString("D"),
-            ["instanceId"] = args.InstanceId.ToString("D"),
-            ["activityId"] = args.ActivityId,
-            ["apAgentJobId"] = jobId,
-            ["apAgentJobStatusUrl"] = statusUrl,
-            ["apAgentProgressUrl"] = progressUrl,
-            ["payload"] = payload
-        });
-        using var content = new StringContent(body, Encoding.UTF8, "application/json");
-        return await PostAsync(chatUrl, content, cancellationToken);
+        var fileContent = new ByteArrayContent(file.Bytes);
+        fileContent.Headers.ContentType = new MediaTypeHeaderValue(
+            string.IsNullOrWhiteSpace(file.ContentType) ? "application/octet-stream" : file.ContentType);
+        form.Add(fileContent, "file", file.FileName);
+        return await PostAsync(chatUrl, form, cancellationToken);
     }
 
     private async Task<string> PostAsync(string chatUrl, HttpContent content, CancellationToken cancellationToken)
@@ -684,7 +680,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     {
         var rows = await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken);
         var row = rows.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r.FilePath))
-            ?? throw new InvalidOperationException("No archived file found for the FTL qualifier.");
+            ?? throw new InvalidOperationException("No archived RFQ file found for the FTL agent.");
 
         var connectionString = _configuration["EzofisBlobStorage:ConnectionString"]
             ?? _configuration["WorkflowJsonStorage:Blob:ConnectionString"]
@@ -785,15 +781,12 @@ LIMIT 1;
 
     /// <summary>
     /// Quote Line Item rows come only from quote_result. Never use qualifier matched_items.
+    /// Prefers the longest Line Item array in case nested quote_result copies are empty.
     /// </summary>
     private static string? ExtractQuoteLineItems(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        var quote = FindProperty(doc.RootElement, "quote_result");
-        if (quote.ValueKind != JsonValueKind.Object)
-            return null;
-
-        var lineItems = FindLongestNamedArray(quote, "line_items", "Line Item", "Line Items");
+        var lineItems = FindLongestNamedArray(doc.RootElement, "line_items", "Line Item", "Line Items");
         if (lineItems.ValueKind == JsonValueKind.Array && lineItems.GetArrayLength() > 0)
             return lineItems.GetRawText();
         return null;
@@ -808,7 +801,7 @@ LIMIT 1;
         var resultName = string.Equals(mode, FtlAgentStepDetector.Qualifier, StringComparison.OrdinalIgnoreCase)
             ? "qualifier_result"
             : "quote_result";
-        var result = FindProperty(doc.RootElement, resultName);
+        var result = FindRootOrNestedObject(doc.RootElement, resultName);
         if (result.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
         {
             throw new InvalidOperationException(
@@ -1800,7 +1793,7 @@ LIMIT 1;
     {
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var doc = JsonDocument.Parse(json);
-        CopyFlat(FindProperty(doc.RootElement, "quote_result"), fields, skipMatchedItems: true);
+        CopyFlat(FindRootOrNestedObject(doc.RootElement, "quote_result"), fields, skipMatchedItems: true);
         if (doc.RootElement.TryGetProperty("estimate_number", out var estimate)
             && estimate.ValueKind == JsonValueKind.String)
             fields["estimate_number"] = estimate.GetString() ?? string.Empty;
@@ -1854,6 +1847,119 @@ LIMIT 1;
         }
 
         return default;
+    }
+
+    /// <summary>Prefer a root-level object property before any nested copy with the same name.</summary>
+    private static JsonElement FindRootOrNestedObject(JsonElement element, string name)
+    {
+        if (element.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in element.EnumerateObject())
+            {
+                if (prop.NameEquals(name) && prop.Value.ValueKind == JsonValueKind.Object)
+                    return prop.Value;
+            }
+        }
+
+        return FindProperty(element, name);
+    }
+
+    /// <summary>
+    /// Rewrite root quote_result["Line Item"] to the longest line-item array in the payload so
+    /// agent_data_validation does not keep an empty nested copy while the agent returned rows.
+    /// </summary>
+    private static string PreferLongestQuoteLineItems(string json)
+    {
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return json;
+
+            var best = FindLongestNamedArray(doc.RootElement, "line_items", "Line Item", "Line Items");
+            if (best.ValueKind != JsonValueKind.Array || best.GetArrayLength() == 0)
+                return json;
+
+            var rootQuote = FindRootOrNestedObject(doc.RootElement, "quote_result");
+            if (rootQuote.ValueKind != JsonValueKind.Object)
+                return json;
+
+            var current = FindLongestNamedArray(rootQuote, "line_items", "Line Item", "Line Items");
+            if (current.ValueKind == JsonValueKind.Array
+                && current.GetArrayLength() >= best.GetArrayLength())
+                return json;
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+            {
+                writer.WriteStartObject();
+                var wroteQuote = false;
+                foreach (var prop in doc.RootElement.EnumerateObject())
+                {
+                    if (prop.NameEquals("quote_result") && prop.Value.ValueKind == JsonValueKind.Object)
+                    {
+                        writer.WritePropertyName(prop.Name);
+                        WriteQuoteWithLineItems(prop.Value, best, writer);
+                        wroteQuote = true;
+                        continue;
+                    }
+
+                    writer.WritePropertyName(prop.Name);
+                    prop.Value.WriteTo(writer);
+                }
+
+                if (!wroteQuote)
+                {
+                    writer.WritePropertyName("quote_result");
+                    writer.WriteStartObject();
+                    writer.WritePropertyName("Line Item");
+                    best.WriteTo(writer);
+                    writer.WriteEndObject();
+                }
+
+                writer.WriteEndObject();
+            }
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+        catch (JsonException)
+        {
+            return json;
+        }
+    }
+
+    private static void WriteQuoteWithLineItems(
+        JsonElement quote,
+        JsonElement lineItems,
+        Utf8JsonWriter writer)
+    {
+        writer.WriteStartObject();
+        var wroteLineItem = false;
+        foreach (var prop in quote.EnumerateObject())
+        {
+            if (prop.NameEquals("Line Item")
+                || prop.NameEquals("Line Items")
+                || prop.NameEquals("line_items"))
+            {
+                if (wroteLineItem)
+                    continue;
+                writer.WritePropertyName("Line Item");
+                lineItems.WriteTo(writer);
+                wroteLineItem = true;
+                continue;
+            }
+
+            writer.WritePropertyName(prop.Name);
+            prop.Value.WriteTo(writer);
+        }
+
+        if (!wroteLineItem)
+        {
+            writer.WritePropertyName("Line Item");
+            lineItems.WriteTo(writer);
+        }
+
+        writer.WriteEndObject();
     }
 
     private static JsonElement FindLongestNamedArray(JsonElement element, params string[] names)
