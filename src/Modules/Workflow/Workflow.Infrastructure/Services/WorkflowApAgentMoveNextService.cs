@@ -2360,6 +2360,20 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 return col;
         }
 
+        // FTL quote forms use a TABLE labeled "Line Item" (physical ezfb column often lineitem).
+        foreach (var row in controls)
+        {
+            if (!IsDynamicTableControl(row))
+                continue;
+
+            var nameKey = NormalizeFieldName(row.Name ?? string.Empty);
+            if (nameKey is not ("LineItem" or "LineItems"))
+                continue;
+
+            if (EzfbColumnNaming.TryResolveEzfbColumn(row.ColumnName, row.Name, row.JsonId, ezfbColumns, out var ftlCol))
+                return ftlCol;
+        }
+
         FormControlRow? onlyDynamic = null;
         var dynamicCount = 0;
         foreach (var row in controls)

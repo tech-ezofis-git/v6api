@@ -203,6 +203,13 @@ public static class EzfbColumnNaming
             }
         }
 
+        // "Line Item" → Line_Item must still hit physical columns like lineitem (no underscore).
+        if (TryGetPhysicalColumnNormalized(ezfbColumns, name, jsonId, out column))
+        {
+            matchKind = EzfbColumnMatchKind.SanitizedName;
+            return true;
+        }
+
         return false;
     }
 
@@ -226,6 +233,58 @@ public static class EzfbColumnNaming
 
         physical = string.Empty;
         return false;
+    }
+
+    /// <summary>
+    /// Match when only letters/digits differ by separators — e.g. Label "Line Item" / Line_Item
+    /// vs physical column <c>lineitem</c> on ezfb_*_items.
+    /// </summary>
+    private static bool TryGetPhysicalColumnNormalized(
+        IReadOnlySet<string> ezfbColumns,
+        string? name,
+        string? jsonId,
+        out string physical)
+    {
+        physical = string.Empty;
+        foreach (var candidate in NormalizedColumnCandidates(name, jsonId))
+        {
+            var key = NormalizeAlphaNumeric(candidate);
+            if (key.Length == 0)
+                continue;
+
+            foreach (var existing in ezfbColumns)
+            {
+                if (!string.Equals(NormalizeAlphaNumeric(existing), key, StringComparison.Ordinal))
+                    continue;
+                physical = existing;
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static IEnumerable<string> NormalizedColumnCandidates(string? name, string? jsonId)
+    {
+        if (!string.IsNullOrWhiteSpace(name))
+        {
+            yield return name.Trim();
+            if (TryToColumnNameFromLabel(name, out var fromLabel))
+                yield return fromLabel;
+        }
+
+        if (!string.IsNullOrWhiteSpace(jsonId))
+        {
+            yield return jsonId.Trim();
+            if (TryToColumnName(jsonId, out var fromJsonId))
+                yield return fromJsonId;
+        }
+    }
+
+    private static string NormalizeAlphaNumeric(string value)
+    {
+        var chars = value.Where(char.IsLetterOrDigit).ToArray();
+        return new string(chars).ToLowerInvariant();
     }
 
     /// <summary>Convenience overload with stored columnName; ignores match-kind detail.</summary>
