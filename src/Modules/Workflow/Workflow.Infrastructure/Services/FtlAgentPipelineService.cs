@@ -177,6 +177,12 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             ? ResolveQualifyReview(storedJson, step)
             : "Submit";
 
+        // Move-next ApplyFormDataToEzfb writes FormDataFields by jsonId, including Line Item
+        // table JSON onto ezfb_*_items.lineitem. TableFields alone are scalars and skip it.
+        var lineItemJson = mapped.TableColumns
+            .FirstOrDefault(column => NormalizeFieldKey(column.Label) is "lineitem" or "lineitems")
+            ?.Json;
+
         var moved = await _mediator.Send(
             new MoveToNextStepCommand(
                 args.InstanceId,
@@ -186,8 +192,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 ActivityUserId: args.UserId,
                 FormId: formId,
                 FormEntryId: formEntryId,
-                FormDataFields: mapped.TableFields,
-                FormLineItemsJson: null,
+                FormDataFields: mapped.FormDataFields,
+                FormLineItemsJson: lineItemJson,
                 SubmittedFormDataJson: BuildFormFieldsJson(mapped.FormDataFields, null)),
             cancellationToken);
 
