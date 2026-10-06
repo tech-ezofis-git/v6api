@@ -781,9 +781,17 @@ LIMIT 1;
     private static string? ExtractLineItems(string json)
     {
         using var doc = JsonDocument.Parse(json);
-        var lineItems = FindLongestNamedArray(doc.RootElement, "line_items");
-        if (lineItems.ValueKind != JsonValueKind.Array)
-            lineItems = FindProperty(doc.RootElement, "matched_items");
+        // Agents title-case quote keys ("Line Item"). Prefer quote_result, never
+        // fall back to qualifier matched_items (often one row) or the first short array.
+        var quote = FindProperty(doc.RootElement, "quote_result");
+        if (quote.ValueKind == JsonValueKind.Object)
+        {
+            var fromQuote = FindLongestNamedArray(quote, "line_items", "Line Item", "Line Items");
+            if (fromQuote.ValueKind == JsonValueKind.Array && fromQuote.GetArrayLength() > 0)
+                return fromQuote.GetRawText();
+        }
+
+        var lineItems = FindLongestNamedArray(doc.RootElement, "line_items", "Line Item", "Line Items");
         if (lineItems.ValueKind == JsonValueKind.Array && lineItems.GetArrayLength() > 0)
             return lineItems.GetRawText();
         return null;
@@ -899,7 +907,9 @@ LIMIT 1;
         var lineItemTable = roots.FirstOrDefault(c =>
             c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
             && NormalizeFieldKey(c.Label) is "lineitem" or "lineitems");
-        if (lineItemTable is not null && !string.IsNullOrWhiteSpace(lineItemsJson))
+        if (lineItemTable is not null
+            && !string.IsNullOrWhiteSpace(lineItemsJson)
+            && !HasLongerOrEqualTable(formDataFields, lineItemTable.JsonId, lineItemsJson))
             AddMappedControl(lineItemTable, lineItemsJson, controls, tableFields, formDataFields, tableColumns);
 
         foreach (var root in roots)
@@ -931,6 +941,12 @@ LIMIT 1;
             if (string.IsNullOrWhiteSpace(tableJson))
                 return;
 
+            if (formDataFields.TryGetValue(control.JsonId, out var existing)
+                && CountJsonArrayRows(existing) >= CountJsonArrayRows(tableJson))
+                return;
+
+            tableColumns.RemoveAll(column =>
+                string.Equals(column.JsonId, control.JsonId, StringComparison.OrdinalIgnoreCase));
             tableColumns.Add(new FtlTableColumn(control.ColumnName, control.Label, control.JsonId, tableJson));
             formDataFields[control.JsonId] = tableJson;
             return;
@@ -1804,7 +1820,7 @@ LIMIT 1;
         return default;
     }
 
-    private static JsonElement FindLongestNamedArray(JsonElement element, string name)
+    private static JsonElement FindLongestNamedArray(JsonElement element, params string[] names)
     {
         JsonElement best = default;
         var bestLength = 0;
@@ -1818,7 +1834,8 @@ LIMIT 1;
 
             foreach (var prop in current.EnumerateObject())
             {
-                if (prop.NameEquals(name) && prop.Value.ValueKind == JsonValueKind.Array)
+                if (prop.Value.ValueKind == JsonValueKind.Array
+                    && names.Any(name => prop.NameEquals(name)))
                 {
                     var length = prop.Value.GetArrayLength();
                     if (length > bestLength)
@@ -1832,6 +1849,33 @@ LIMIT 1;
 
                 Walk(prop.Value);
             }
+        }
+    }
+
+    private static bool HasLongerOrEqualTable(
+        IReadOnlyDictionary<string, string> formDataFields,
+        string jsonId,
+        string candidateJson)
+    {
+        if (!formDataFields.TryGetValue(jsonId, out var existing))
+            return false;
+        return CountJsonArrayRows(existing) >= CountJsonArrayRows(candidateJson);
+    }
+
+    private static int CountJsonArrayRows(string? json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+            return 0;
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            return doc.RootElement.ValueKind == JsonValueKind.Array
+                ? doc.RootElement.GetArrayLength()
+                : 0;
+        }
+        catch (JsonException)
+        {
+            return 0;
         }
     }
 
