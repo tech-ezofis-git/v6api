@@ -14,6 +14,7 @@ internal static class RepositoryCrossTenantItemReader
     {
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        await RepositoryPiiRedaction.EnsureColumnsAsync(connection, cancellationToken);
 
         const string sql = """
             SELECT
@@ -27,7 +28,10 @@ internal static class RepositoryCrossTenantItemReader
                 r."IsDefaultRepository",
                 r."IsDeleted",
                 sp."Code" AS "StorageProviderCode",
-                sp."Name" AS "StorageProviderName"
+                sp."Name" AS "StorageProviderName",
+                r."PiiRedactionEnabled",
+                r."PiiRedactionFieldIds",
+                r."PiiRedactionUsers"
             FROM repository."Repositories" r
             LEFT JOIN repository."StorageProviders" sp ON sp."Id" = r."StorageProviderId" AND sp."IsDeleted" = false
             WHERE r."Id" = @Id AND r."TenantId" = @TenantId;
@@ -47,6 +51,9 @@ internal static class RepositoryCrossTenantItemReader
         bool isDeleted;
         string? storageProviderCode;
         string? storageProviderName;
+        bool piiRedactionEnabled;
+        string? piiFieldIdsJson;
+        string? piiUsersJson;
 
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
@@ -64,10 +71,14 @@ internal static class RepositoryCrossTenantItemReader
             isDeleted = !reader.IsDBNull(8) && reader.GetBoolean(8);
             storageProviderCode = reader.IsDBNull(9) ? null : reader.GetString(9);
             storageProviderName = reader.IsDBNull(10) ? null : reader.GetString(10);
+            piiRedactionEnabled = !reader.IsDBNull(11) && reader.GetBoolean(11);
+            piiFieldIdsJson = reader.IsDBNull(12) ? null : reader.GetString(12);
+            piiUsersJson = reader.IsDBNull(13) ? null : reader.GetString(13);
         }
 
         var fields = await LoadFieldsAsync(connection, repositoryId, cancellationToken);
         var fileCount = await CountItemsAsync(connection, itemsTableName, cancellationToken);
+        var pii = RepositoryPiiRedaction.Read(piiRedactionEnabled, piiFieldIdsJson, piiUsersJson);
 
         return new RepositoryDetailDto(
             id,
@@ -82,7 +93,11 @@ internal static class RepositoryCrossTenantItemReader
             fileCount,
             Status: isDeleted ? "Inactive" : "Active",
             StorageProviderCode: storageProviderCode,
-            StorageProviderName: storageProviderName);
+            StorageProviderName: storageProviderName,
+            PiiRedactionEnabled: pii.Enabled,
+            PiiRedactionFieldIds: pii.FieldIds,
+            PiiRedactionUserIds: pii.UserIds,
+            PiiRedactionUsers: pii.Users);
     }
 
     private static async Task<int> CountItemsAsync(

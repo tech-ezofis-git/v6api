@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS repository."Repositories" (
 CREATE INDEX IF NOT EXISTS "IX_Repositories_TenantId_IsDeleted" ON repository."Repositories" ("TenantId", "IsDeleted");
 CREATE UNIQUE INDEX IF NOT EXISTS "UX_Repositories_TenantId_Name" ON repository."Repositories" ("TenantId", "Name") WHERE "IsDeleted" = false;
 ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "IsDefaultRepository" boolean NOT NULL DEFAULT true;
+ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionEnabled" boolean NOT NULL DEFAULT false;
+ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionFieldIds" text NULL;
+ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionUsers" text NULL;
 
 CREATE TABLE IF NOT EXISTS repository."RepositoryFields" (
     "Id" uuid NOT NULL DEFAULT gen_random_uuid() CONSTRAINT "PK_RepositoryFields" PRIMARY KEY,
