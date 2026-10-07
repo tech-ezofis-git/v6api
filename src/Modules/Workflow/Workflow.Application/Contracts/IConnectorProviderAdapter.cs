@@ -91,6 +91,12 @@ public interface IConnectorProviderAdapter
         string attachmentId,
         CancellationToken cancellationToken = default);
 
+    /// <summary>Gmail users.watch. Returns historyId and watch expiration.</summary>
+    Task<(string HistoryId, DateTime? ExpirationUtc)> WatchGmailAsync(
+        string accessToken,
+        string topicName,
+        CancellationToken cancellationToken = default);
+
     Task<IReadOnlyList<(string Id, string Type, string? DisplayName, string? Email, bool Active, string? RawJson)>> ListQuickBooksMastersAsync(
         string accessToken,
         string realmId,

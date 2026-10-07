@@ -376,6 +376,13 @@ public sealed class ConnectorOAuthService : IConnectorOAuthService
         return await adapter.DownloadGmailAttachmentAsync(accessToken, messageId, attachmentId, cancellationToken);
     }
 
+    public async Task<(string HistoryId, DateTime? ExpirationUtc)> WatchGmailAsync(
+        Guid connectorId, string topicName, CancellationToken cancellationToken = default)
+    {
+        var (adapter, accessToken, _) = await PrepareOpsAsync(connectorId, files: false, gmail: true, quickBooks: false, cancellationToken);
+        return await adapter.WatchGmailAsync(accessToken, topicName, cancellationToken);
+    }
+
     public async Task<ConnectorQuickBooksMasterListResponse> ListQuickBooksMastersAsync(
         Guid connectorId, string masterType, int maxResults, CancellationToken cancellationToken = default)
     {

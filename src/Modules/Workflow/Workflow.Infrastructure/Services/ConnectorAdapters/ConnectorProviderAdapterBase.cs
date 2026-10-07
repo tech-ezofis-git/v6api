@@ -105,6 +105,10 @@ internal abstract class ConnectorProviderAdapterBase : IConnectorProviderAdapter
         string accessToken, string messageId, string attachmentId, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException($"{ProviderCode} does not support Gmail attachments.");
 
+    public virtual Task<(string HistoryId, DateTime? ExpirationUtc)> WatchGmailAsync(
+        string accessToken, string topicName, CancellationToken cancellationToken = default) =>
+        throw new NotSupportedException($"{ProviderCode} does not support Gmail watch.");
+
     public virtual Task<IReadOnlyList<(string Id, string Type, string? DisplayName, string? Email, bool Active, string? RawJson)>> ListQuickBooksMastersAsync(
         string accessToken, string realmId, string masterType, int maxResults, string? extraConfigJson, CancellationToken cancellationToken = default) =>
         throw new NotSupportedException($"{ProviderCode} does not support QuickBooks masters.");

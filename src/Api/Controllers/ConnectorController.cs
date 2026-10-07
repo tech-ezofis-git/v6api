@@ -13,19 +13,37 @@ public sealed class ConnectorController : ControllerBase
 {
     private readonly IConnectorService _connectorService;
     private readonly IConnectorOAuthService _oauthService;
+    private readonly IGmailPushService _gmailPush;
     private readonly ISapPurchaseOrderLookupService _sapPurchaseOrderLookup;
     private readonly IHanaCloudPurchaseOrderService _hanaPurchaseOrders;
 
     public ConnectorController(
         IConnectorService connectorService,
         IConnectorOAuthService oauthService,
+        IGmailPushService gmailPush,
         ISapPurchaseOrderLookupService sapPurchaseOrderLookup,
         IHanaCloudPurchaseOrderService hanaPurchaseOrders)
     {
         _connectorService = connectorService;
         _oauthService = oauthService;
+        _gmailPush = gmailPush;
         _sapPurchaseOrderLookup = sapPurchaseOrderLookup;
         _hanaPurchaseOrders = hanaPurchaseOrders;
+    }
+
+    /// <summary>Tell Gmail to publish new inbox mail to Pub/Sub for this connector.</summary>
+    [HttpPost("{id:guid}/gmail-push/enable")]
+    public async Task<IActionResult> EnableGmailPush(Guid id, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var result = await _gmailPush.EnableAsync(id, cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     /// <summary>Create a new connector (v5 POST /api/connector).</summary>

@@ -147,6 +147,8 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.Configure<ApAgentOptions>(configuration.GetSection(ApAgentOptions.SectionName));
         services.Configure<WorkflowPdfGenerationOptions>(configuration.GetSection(WorkflowPdfGenerationOptions.SectionName));
         services.Configure<EmailIngestOptions>(configuration.GetSection(EmailIngestOptions.SectionName));
+        services.Configure<GmailPushOptions>(configuration.GetSection(GmailPushOptions.SectionName));
+        services.AddScoped<IGmailPushService, GmailPushService>();
         services.AddHttpClient(nameof(ApAgentPythonPipelineService), client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;

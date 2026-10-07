@@ -2,7 +2,6 @@ using System.Globalization;
 using System.Text.Json;
 using MediatR;
 using Microsoft.Extensions.Logging;
-using Npgsql;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
@@ -15,7 +14,6 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
 {
     private readonly ITenantContext _tenantContext;
-    private readonly ITenantConnectionProvider _connectionProvider;
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly IRepositoryFileStorage _fileStorage;
     private readonly IMediator _mediator;
@@ -24,7 +22,6 @@ public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
 
     public MjbUsMailWorkflowStarter(
         ITenantContext tenantContext,
-        ITenantConnectionProvider connectionProvider,
         ICurrentUserProvider currentUserProvider,
         IRepositoryFileStorage fileStorage,
         IMediator mediator,
@@ -32,7 +29,6 @@ public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
         ILogger<MjbUsMailWorkflowStarter> logger)
     {
         _tenantContext = tenantContext;
-        _connectionProvider = connectionProvider;
         _currentUserProvider = currentUserProvider;
         _fileStorage = fileStorage;
         _mediator = mediator;
@@ -57,24 +53,13 @@ public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
         if (!MjbUsAgent.IsThisWorkflow(workflow.Id, tenantId))
             throw new InvalidOperationException("This starter only runs the MJB_US workflow.");
 
-        if (string.IsNullOrWhiteSpace(workflow.RepositoryId))
-            throw new InvalidOperationException("Workflow RepositoryId is not configured.");
-
-        var connectionString = _tenantContext.ConnectionString
-            ?? _connectionProvider.ConnectionString
-            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
-
-        var repositoryId = await ResolveRepositoryGuidAsync(
-                connectionString, tenantId, workflow.RepositoryId, cancellationToken)
-            ?? throw new InvalidOperationException($"Could not resolve repository id '{workflow.RepositoryId}'.");
-
         var safeName = SanitizeFileName(fileName);
         var blobPath = $"monitor/{MjbUsAgent.MonitorFolder}/{DateTime.UtcNow:yyyyMMddHHmmssfff}/{safeName}";
         await using (var stream = new MemoryStream(attachmentBytes, writable: false))
         {
             await _fileStorage.SaveAsync(
                 tenantId,
-                repositoryId,
+                Guid.Empty,
                 Guid.NewGuid(),
                 safeName,
                 stream,
@@ -127,7 +112,7 @@ public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
                 subject,
                 receivedAt,
                 messageId,
-                repositoryId.ToString("D"),
+                RepositoryId: null,
                 workflow.FormId ?? MjbUsAgent.FormId.ToString("D")),
             cancellationToken);
 
@@ -150,42 +135,5 @@ public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
             name = name.Replace(invalid, '_');
 
         return name.Length > 180 ? name[..180] : name;
-    }
-
-    private static async Task<Guid?> ResolveRepositoryGuidAsync(
-        string connectionString,
-        Guid tenantGuid,
-        string? repositoryIdLink,
-        CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(repositoryIdLink))
-            return null;
-
-        var trimmed = repositoryIdLink.Trim();
-        if (Guid.TryParse(trimmed, out var parsed))
-            return parsed;
-
-        if (trimmed.Length == 32 && Guid.TryParseExact(trimmed, "N", out parsed))
-            return parsed;
-
-        if (!int.TryParse(trimmed, NumberStyles.Integer, CultureInfo.InvariantCulture, out var legacyInt))
-            return null;
-
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
-
-        const string byTableSql = """
-            SELECT "Id"
-            FROM repository."Repositories"
-            WHERE "TenantId" = @TenantId AND "IsDeleted" = false
-              AND ("ItemsTableName" LIKE @LegacyPattern OR "StageTableName" LIKE @LegacyPattern)
-            LIMIT 1;
-            """;
-
-        await using var cmd = new NpgsqlCommand(byTableSql, connection);
-        cmd.Parameters.AddWithValue("@TenantId", tenantGuid);
-        cmd.Parameters.AddWithValue("@LegacyPattern", $"%_{legacyInt}_%");
-        var value = await cmd.ExecuteScalarAsync(cancellationToken);
-        return value is Guid id ? id : null;
     }
 }

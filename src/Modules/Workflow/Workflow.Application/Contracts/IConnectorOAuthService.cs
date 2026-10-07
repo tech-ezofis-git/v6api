@@ -73,6 +73,11 @@ public interface IConnectorOAuthService
         string attachmentId,
         CancellationToken cancellationToken = default);
 
+    Task<(string HistoryId, DateTime? ExpirationUtc)> WatchGmailAsync(
+        Guid connectorId,
+        string topicName,
+        CancellationToken cancellationToken = default);
+
     Task<ConnectorQuickBooksMasterListResponse> ListQuickBooksMastersAsync(
         Guid connectorId,
         string masterType,

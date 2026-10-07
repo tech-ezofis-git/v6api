@@ -164,6 +164,37 @@ internal sealed class GmailConnectorAdapter : ConnectorProviderAdapterBase
         return (total, unread);
     }
 
+    public override async Task<(string HistoryId, DateTime? ExpirationUtc)> WatchGmailAsync(
+        string accessToken, string topicName, CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(topicName))
+            throw new ArgumentException("topicName is required.");
+
+        using var client = CreateClient();
+        using var req = new HttpRequestMessage(HttpMethod.Post, "https://gmail.googleapis.com/gmail/v1/users/me/watch");
+        req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", accessToken);
+        req.Content = new StringContent(
+            JsonSerializer.Serialize(new { topicName, labelIds = new[] { "INBOX" } }),
+            Encoding.UTF8,
+            "application/json");
+        using var res = await client.SendAsync(req, cancellationToken);
+        var body = await res.Content.ReadAsStringAsync(cancellationToken);
+        if (!res.IsSuccessStatusCode)
+            throw new InvalidOperationException($"Gmail watch failed ({(int)res.StatusCode}): {body}");
+
+        using var doc = JsonDocument.Parse(body);
+        var historyId = doc.RootElement.TryGetProperty("historyId", out var history) ? history.ToString() : "";
+        DateTime? expiration = null;
+        if (doc.RootElement.TryGetProperty("expiration", out var exp))
+        {
+            var raw = exp.ValueKind == JsonValueKind.String ? exp.GetString() : exp.ToString();
+            if (long.TryParse(raw, out var millis))
+                expiration = DateTimeOffset.FromUnixTimeMilliseconds(millis).UtcDateTime;
+        }
+
+        return (historyId, expiration);
+    }
+
     public override async Task<IReadOnlyList<(string Id, string? ThreadId, string? Subject, string? From, string? Snippet, DateTime? ReceivedAtUtc, bool IsUnread, IReadOnlyList<(string Id, string? FileName, string? MimeType, long? SizeBytes)> Attachments)>> ListGmailMessagesAsync(
         string accessToken, int maxResults, string? query, bool unreadOnly, CancellationToken cancellationToken = default)
     {
