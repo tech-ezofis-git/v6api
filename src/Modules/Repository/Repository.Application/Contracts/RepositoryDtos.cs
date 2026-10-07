@@ -3,6 +3,27 @@ using System.Text.Json.Serialization;
 
 namespace SaaSApp.Repository.Application.Contracts;
 
+public sealed record PiiRedactionUserDto(Guid UserId, string? Password);
+
+/// <summary>Writes <c>[]</c> when a PII list was never saved, so old folders still return the key.</summary>
+public sealed class EmptyReadOnlyListJsonConverter<T> : JsonConverter<IReadOnlyList<T>?>
+{
+    public override IReadOnlyList<T>? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options) =>
+        JsonSerializer.Deserialize<List<T>>(ref reader, options);
+
+    public override void Write(Utf8JsonWriter writer, IReadOnlyList<T>? value, JsonSerializerOptions options)
+    {
+        writer.WriteStartArray();
+        if (value != null)
+        {
+            foreach (var item in value)
+                JsonSerializer.Serialize(writer, item, options);
+        }
+
+        writer.WriteEndArray();
+    }
+}
+
 public sealed record CreateRepositoryRequest(
     string Name,
     string? Description = null,
@@ -12,7 +33,11 @@ public sealed record CreateRepositoryRequest(
     string? StorageDrive = null,
     /// <summary>When true (default), repository definition is system/default and should not be edited in UI.</summary>
     bool IsDefaultRepository = true,
-    IReadOnlyList<RepositoryFieldDefinitionDto>? Fields = null);
+    IReadOnlyList<RepositoryFieldDefinitionDto>? Fields = null,
+    bool PiiRedactionEnabled = false,
+    IReadOnlyList<Guid>? PiiRedactionFieldIds = null,
+    IReadOnlyList<Guid>? PiiRedactionUserIds = null,
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
 
 public sealed record StorageProviderDto(Guid Id, string Code, string Name, bool IsActive);
 
@@ -23,7 +48,11 @@ public sealed record UpdateRepositoryRequest(
     string? StorageProviderCode = null,
     string? StorageDrive = null,
     /// <summary>When set, replaces active field definitions (include <c>id</c> to update; omit <c>id</c> to add).</summary>
-    IReadOnlyList<RepositoryFieldDefinitionDto>? Fields = null);
+    IReadOnlyList<RepositoryFieldDefinitionDto>? Fields = null,
+    bool? PiiRedactionEnabled = null,
+    IReadOnlyList<Guid>? PiiRedactionFieldIds = null,
+    IReadOnlyList<Guid>? PiiRedactionUserIds = null,
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
 
 public sealed record RepositoryFieldDefinitionDto(
     string Name,
@@ -58,7 +87,14 @@ public sealed record RepositorySummaryDto(
     Guid? CreatedBy = null,
     Guid? ModifiedBy = null,
     string? CreatedByName = null,
-    string? ModifiedByName = null);
+    string? ModifiedByName = null,
+    bool PiiRedactionEnabled = false,
+    [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<Guid>))]
+    IReadOnlyList<Guid>? PiiRedactionFieldIds = null,
+    [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<Guid>))]
+    IReadOnlyList<Guid>? PiiRedactionUserIds = null,
+    [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<PiiRedactionUserDto>))]
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
 
 public sealed record RepositoryDetailDto(
     Guid Id,
@@ -77,7 +113,14 @@ public sealed record RepositoryDetailDto(
     /// <summary>Storage provider code — e.g. EZOFIS, ONEDRIVE, GCP.</summary>
     string? StorageProviderCode = null,
     /// <summary>Display name — e.g. EZOFIS Storage, Microsoft OneDrive, Google Cloud Storage.</summary>
-    string? StorageProviderName = null);
+    string? StorageProviderName = null,
+    bool PiiRedactionEnabled = false,
+    [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<Guid>))]
+    IReadOnlyList<Guid>? PiiRedactionFieldIds = null,
+    [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<Guid>))]
+    IReadOnlyList<Guid>? PiiRedactionUserIds = null,
+    [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<PiiRedactionUserDto>))]
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
 
 public sealed record RepositoryFieldDto(
     Guid Id,

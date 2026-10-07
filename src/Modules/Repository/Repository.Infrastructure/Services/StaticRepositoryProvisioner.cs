@@ -81,14 +81,18 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
 
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        await RepositoryPiiRedaction.EnsureColumnsAsync(connection, cancellationToken);
         await using var tx = await connection.BeginTransactionAsync(cancellationToken);
 
         try
         {
+            var piiUsers = RepositoryPiiRedaction.MergeUsers(request.PiiRedactionUsers, request.PiiRedactionUserIds, existing: null);
             const string insertRepo = """
                 INSERT INTO repository."Repositories"
-                ("Id", "TenantId", "Name", "Description", "FieldsType", "StorageProviderId", "StorageDrive", "ItemsTableName", "StageTableName", "IsDefaultRepository", "CreatedBy")
-                VALUES (@Id, @TenantId, @Name, @Description, 'STATIC', @StorageProviderId, @StorageDrive, @ItemsTableName, @StageTableName, @IsDefaultRepository, @CreatedBy);
+                ("Id", "TenantId", "Name", "Description", "FieldsType", "StorageProviderId", "StorageDrive", "ItemsTableName", "StageTableName", "IsDefaultRepository", "CreatedBy",
+                 "PiiRedactionEnabled", "PiiRedactionFieldIds", "PiiRedactionUsers")
+                VALUES (@Id, @TenantId, @Name, @Description, 'STATIC', @StorageProviderId, @StorageDrive, @ItemsTableName, @StageTableName, @IsDefaultRepository, @CreatedBy,
+                        @PiiRedactionEnabled, @PiiRedactionFieldIds, @PiiRedactionUsers);
                 """;
 
             await using (var cmd = new NpgsqlCommand(insertRepo, connection, tx))
@@ -103,6 +107,9 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 cmd.Parameters.AddWithValue("@StageTableName", stageTable);
                 cmd.Parameters.AddWithValue("@IsDefaultRepository", request.IsDefaultRepository);
                 cmd.Parameters.AddWithValue("@CreatedBy", (object?)userId ?? DBNull.Value);
+                cmd.Parameters.AddWithValue("@PiiRedactionEnabled", request.PiiRedactionEnabled);
+                cmd.Parameters.AddWithValue("@PiiRedactionFieldIds", RepositoryPiiRedaction.SerializeFieldIds(request.PiiRedactionFieldIds));
+                cmd.Parameters.AddWithValue("@PiiRedactionUsers", RepositoryPiiRedaction.SerializeUsers(piiUsers));
                 await cmd.ExecuteNonQueryAsync(cancellationToken);
             }
 
@@ -112,9 +119,10 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 const string insertField = """
                     INSERT INTO repository."RepositoryFields"
                     ("Id", "RepositoryId", "Name", "SqlColumnName", "DataType", "Level", "IsMandatory", "IncludeInFolderStructure", "OptionsJson", "OrderId", "IsReadOnly", "CreatedBy")
-                    VALUES (gen_random_uuid(), @RepositoryId, @Name, @SqlColumnName, @DataType, @Level, @IsMandatory, @IncludeInFolderStructure, @OptionsJson, @OrderId, @IsReadOnly, @CreatedBy);
+                    VALUES (@Id, @RepositoryId, @Name, @SqlColumnName, @DataType, @Level, @IsMandatory, @IncludeInFolderStructure, @OptionsJson, @OrderId, @IsReadOnly, @CreatedBy);
                     """;
                 await using var fcmd = new NpgsqlCommand(insertField, connection, tx);
+                fcmd.Parameters.AddWithValue("@Id", field.Id is Guid clientFieldId && clientFieldId != Guid.Empty ? clientFieldId : Guid.NewGuid());
                 fcmd.Parameters.AddWithValue("@RepositoryId", repoId);
                 fcmd.Parameters.AddWithValue("@Name", field.Name.Trim());
                 fcmd.Parameters.AddWithValue("@SqlColumnName", sqlCol);
@@ -159,6 +167,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         var connectionString = RequireConnectionString();
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        await RepositoryPiiRedaction.EnsureColumnsAsync(connection, cancellationToken);
 
         const string sql = """
             SELECT
@@ -172,7 +181,10 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 r."IsDefaultRepository",
                 r."IsDeleted",
                 sp."Code" AS "StorageProviderCode",
-                sp."Name" AS "StorageProviderName"
+                sp."Name" AS "StorageProviderName",
+                r."PiiRedactionEnabled",
+                r."PiiRedactionFieldIds",
+                r."PiiRedactionUsers"
             FROM repository."Repositories" r
             LEFT JOIN repository."StorageProviders" sp ON sp."Id" = r."StorageProviderId" AND sp."IsDeleted" = false
             WHERE r."Id" = @Id AND r."TenantId" = @TenantId;
@@ -192,6 +204,9 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         bool isDeleted;
         string? storageProviderCode;
         string? storageProviderName;
+        bool piiRedactionEnabled;
+        string? piiFieldIdsJson;
+        string? piiUsersJson;
 
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
@@ -208,10 +223,14 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             isDeleted = !reader.IsDBNull(8) && reader.GetBoolean(8);
             storageProviderCode = reader.IsDBNull(9) ? null : reader.GetString(9);
             storageProviderName = reader.IsDBNull(10) ? null : reader.GetString(10);
+            piiRedactionEnabled = !reader.IsDBNull(11) && reader.GetBoolean(11);
+            piiFieldIdsJson = reader.IsDBNull(12) ? null : reader.GetString(12);
+            piiUsersJson = reader.IsDBNull(13) ? null : reader.GetString(13);
         }
 
         var fields = await LoadFieldsAsync(connection, repositoryId, cancellationToken);
         var fileCount = await CountItemsAsync(connection, itemsTableName, cancellationToken);
+        var pii = RepositoryPiiRedaction.Read(piiRedactionEnabled, piiFieldIdsJson, piiUsersJson);
 
         return new RepositoryDetailDto(
             id, name, description, storageProviderId, storageDrive, itemsTableName, stageTableName,
@@ -220,7 +239,11 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             fileCount,
             Status: isDeleted ? "Inactive" : "Active",
             StorageProviderCode: storageProviderCode,
-            StorageProviderName: storageProviderName);
+            StorageProviderName: storageProviderName,
+            PiiRedactionEnabled: pii.Enabled,
+            PiiRedactionFieldIds: pii.FieldIds,
+            PiiRedactionUserIds: pii.UserIds,
+            PiiRedactionUsers: pii.Users);
     }
 
     public async Task<IReadOnlyList<RepositorySummaryDto>> ListRepositoriesAsync(Guid tenantId, CancellationToken cancellationToken = default)
@@ -228,6 +251,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         var connectionString = RequireConnectionString();
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
+        await RepositoryPiiRedaction.EnsureColumnsAsync(connection, cancellationToken);
 
         const string sql = """
             SELECT
@@ -244,7 +268,10 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 r."CreatedBy",
                 r."ModifiedBy",
                 cb."Email" AS "CreatedByName",
-                COALESCE(mb."Email", cb."Email") AS "ModifiedByName"
+                COALESCE(mb."Email", cb."Email") AS "ModifiedByName",
+                r."PiiRedactionEnabled",
+                r."PiiRedactionFieldIds",
+                r."PiiRedactionUsers"
             FROM repository."Repositories" r
             LEFT JOIN repository."StorageProviders" sp ON sp."Id" = r."StorageProviderId" AND sp."IsDeleted" = false
             LEFT JOIN users."Users" cb ON cb."Id" = r."CreatedBy" AND cb."IsDeleted" = false
@@ -267,7 +294,10 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             Guid? CreatedBy,
             Guid? ModifiedBy,
             string? CreatedByName,
-            string? ModifiedByName)>();
+            string? ModifiedByName,
+            bool PiiRedactionEnabled,
+            string? PiiFieldIdsJson,
+            string? PiiUsersJson)>();
 
         await using (var cmd = new NpgsqlCommand(sql, connection))
         {
@@ -289,7 +319,10 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                     reader.IsDBNull(10) ? null : reader.GetGuid(10),
                     reader.IsDBNull(11) ? null : reader.GetGuid(11),
                     reader.IsDBNull(12) ? null : reader.GetString(12),
-                    reader.IsDBNull(13) ? null : reader.GetString(13)));
+                    reader.IsDBNull(13) ? null : reader.GetString(13),
+                    !reader.IsDBNull(14) && reader.GetBoolean(14),
+                    reader.IsDBNull(15) ? null : reader.GetString(15),
+                    reader.IsDBNull(16) ? null : reader.GetString(16)));
             }
         }
 
@@ -297,6 +330,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         foreach (var row in rows)
         {
             var fileCount = await CountItemsAsync(connection, row.ItemsTableName, cancellationToken);
+            var pii = RepositoryPiiRedaction.Read(row.PiiRedactionEnabled, row.PiiFieldIdsJson, row.PiiUsersJson);
             list.Add(new RepositorySummaryDto(
                 row.Id,
                 row.Name,
@@ -312,7 +346,11 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                 CreatedBy: row.CreatedBy,
                 ModifiedBy: row.ModifiedBy,
                 CreatedByName: row.CreatedByName,
-                ModifiedByName: row.ModifiedByName));
+                ModifiedByName: row.ModifiedByName,
+                PiiRedactionEnabled: pii.Enabled,
+                PiiRedactionFieldIds: pii.FieldIds,
+                PiiRedactionUserIds: pii.UserIds,
+                PiiRedactionUsers: pii.Users));
         }
 
         return list;
@@ -423,8 +461,10 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
+        await RepositoryPiiRedaction.EnsureColumnsAsync(connection, cancellationToken);
+
         const string loadSql = """
-            SELECT "ItemsTableName", "StageTableName", "StorageProviderId"
+            SELECT "ItemsTableName", "StageTableName", "StorageProviderId", "PiiRedactionUsers"
             FROM repository."Repositories"
             WHERE "Id" = @Id AND "TenantId" = @TenantId AND "IsDeleted" = false;
             """;
@@ -440,6 +480,7 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             var itemsTable = reader.GetString(0);
             var stageTable = reader.GetString(1);
             var currentStorageProviderId = reader.GetGuid(2);
+            var existingPiiUsers = RepositoryPiiRedaction.ReadUsers(reader.IsDBNull(3) ? null : reader.GetString(3));
             await reader.CloseAsync();
 
             Guid? storageProviderId = null;
@@ -452,12 +493,21 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
             await using var tx = await connection.BeginTransactionAsync(cancellationToken);
             try
             {
+                var updatePiiFields = request.PiiRedactionFieldIds != null;
+                var updatePiiUsers = request.PiiRedactionUsers != null || request.PiiRedactionUserIds != null;
+                var piiUsers = updatePiiUsers
+                    ? RepositoryPiiRedaction.MergeUsers(request.PiiRedactionUsers, request.PiiRedactionUserIds, existingPiiUsers)
+                    : Array.Empty<PiiRedactionUserDto>();
+
                 const string updateRepo = """
                     UPDATE repository."Repositories"
                     SET "Name" = COALESCE(@Name, "Name"),
                         "Description" = COALESCE(@Description, "Description"),
                         "StorageProviderId" = COALESCE(@StorageProviderId, "StorageProviderId"),
                         "StorageDrive" = COALESCE(@StorageDrive, "StorageDrive"),
+                        "PiiRedactionEnabled" = COALESCE(@PiiRedactionEnabled, "PiiRedactionEnabled"),
+                        "PiiRedactionFieldIds" = CASE WHEN @UpdatePiiFields THEN @PiiRedactionFieldIds ELSE "PiiRedactionFieldIds" END,
+                        "PiiRedactionUsers" = CASE WHEN @UpdatePiiUsers THEN @PiiRedactionUsers ELSE "PiiRedactionUsers" END,
                         "ModifiedAtUtc" = now(),
                         "ModifiedBy" = @ModifiedBy
                     WHERE "Id" = @Id AND "TenantId" = @TenantId AND "IsDeleted" = false;
@@ -471,6 +521,14 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
                     cmd.Parameters.AddWithValue("@Description", (object?)request.Description ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@StorageProviderId", (object?)storageProviderId ?? DBNull.Value);
                     cmd.Parameters.AddWithValue("@StorageDrive", (object?)request.StorageDrive ?? DBNull.Value);
+                    cmd.Parameters.Add(new NpgsqlParameter("@PiiRedactionEnabled", NpgsqlTypes.NpgsqlDbType.Boolean)
+                    {
+                        Value = (object?)request.PiiRedactionEnabled ?? DBNull.Value
+                    });
+                    cmd.Parameters.AddWithValue("@UpdatePiiFields", updatePiiFields);
+                    cmd.Parameters.AddWithValue("@PiiRedactionFieldIds", RepositoryPiiRedaction.SerializeFieldIds(request.PiiRedactionFieldIds));
+                    cmd.Parameters.AddWithValue("@UpdatePiiUsers", updatePiiUsers);
+                    cmd.Parameters.AddWithValue("@PiiRedactionUsers", RepositoryPiiRedaction.SerializeUsers(piiUsers));
                     cmd.Parameters.AddWithValue("@ModifiedBy", (object?)userId ?? DBNull.Value);
                     if (await cmd.ExecuteNonQueryAsync(cancellationToken) == 0)
                     {
@@ -725,10 +783,11 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         const string insertField = """
             INSERT INTO repository."RepositoryFields"
             ("Id", "RepositoryId", "Name", "SqlColumnName", "DataType", "Level", "IsMandatory", "IncludeInFolderStructure", "OptionsJson", "OrderId", "IsReadOnly", "CreatedBy")
-            VALUES (gen_random_uuid(), @RepositoryId, @Name, @SqlColumnName, @DataType, @Level, @IsMandatory, @IncludeInFolderStructure, @OptionsJson, @OrderId, @IsReadOnly, @CreatedBy);
+            VALUES (@Id, @RepositoryId, @Name, @SqlColumnName, @DataType, @Level, @IsMandatory, @IncludeInFolderStructure, @OptionsJson, @OrderId, @IsReadOnly, @CreatedBy);
             """;
 
         await using var cmd = new NpgsqlCommand(insertField, connection, tx);
+        cmd.Parameters.AddWithValue("@Id", field.Id is Guid clientFieldId && clientFieldId != Guid.Empty ? clientFieldId : Guid.NewGuid());
         cmd.Parameters.AddWithValue("@RepositoryId", repositoryId);
         cmd.Parameters.AddWithValue("@Name", field.Name.Trim());
         cmd.Parameters.AddWithValue("@SqlColumnName", sqlCol);
