@@ -12,10 +12,35 @@ namespace SaaSApp.Api.Controllers;
 public sealed class EmailIngestController : ControllerBase
 {
     private readonly IEmailIngestService _emailIngest;
+    private readonly IGmailPushService _gmailPush;
 
-    public EmailIngestController(IEmailIngestService emailIngest)
+    public EmailIngestController(IEmailIngestService emailIngest, IGmailPushService gmailPush)
     {
         _emailIngest = emailIngest;
+        _gmailPush = gmailPush;
+    }
+
+    /// <summary>Google Pub/Sub push. When mail arrives, poll the linked mailbox and start the workflow.</summary>
+    [AllowAnonymous]
+    [HttpPost("gmail/push")]
+    public async Task<IActionResult> GmailPush([FromQuery] string? token, CancellationToken cancellationToken)
+    {
+        using var reader = new StreamReader(Request.Body);
+        var body = await reader.ReadToEndAsync(cancellationToken);
+        var headerToken = Request.Headers["X-Gmail-Push-Token"].FirstOrDefault();
+        try
+        {
+            await _gmailPush.HandlePushAsync(body, string.IsNullOrWhiteSpace(token) ? headerToken : token, cancellationToken);
+            return Ok(new { accepted = true });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Unauthorized();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     [HttpGet("mailboxes")]
