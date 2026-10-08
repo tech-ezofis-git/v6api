@@ -90,9 +90,11 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         var ocrText = ReadString(classification, "ocr_text");
         var documentType = ReadNested(classification, "classification", "documentType") ?? "UNKNOWN";
         JsonElement ocr = default;
+        var pythonFailed = false;
 
         if (!invoice || string.IsNullOrWhiteSpace(ocrText))
         {
+            pythonFailed = true;
             if (invoice && string.IsNullOrWhiteSpace(ocrText))
             {
                 MjbUsForm.Set(fields, MjbUsForm.ClassificationStatus, MjbUsForm.ClassificationStatusId, MjbUsForm.StatusFailed);
@@ -120,7 +122,10 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
             CopyAgentFields(ocr, fields);
             var ocrReview = IsSucceeded(ocr, "Extraction Status") ? "SUCCEEDED" : "Failed";
             if (!string.Equals(ocrReview, "SUCCEEDED", StringComparison.OrdinalIgnoreCase))
+            {
+                pythonFailed = true;
                 MjbUsForm.Set(fields, MjbUsForm.RequestStatus, MjbUsForm.RequestStatusId, MjbUsForm.RequestForceClose);
+            }
 
             activityId = await MoveByReviewAsync(
                 args, steps, activityId, ocrReview, fields, formId, "MJB OCR", cancellationToken)
@@ -140,7 +145,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         var ftpError = ReadString(ftp, "ERROR") ?? ReadString(ftp, "ERROR CODE");
         if (!string.IsNullOrWhiteSpace(ftpError))
             MjbUsForm.Set(fields, MjbUsForm.ErrorCode, MjbUsForm.ErrorCodeId, ftpError);
-        if (string.Equals(ftpStatus, MjbUsForm.FtpSuccess, StringComparison.OrdinalIgnoreCase))
+        if (!pythonFailed && string.Equals(ftpStatus, MjbUsForm.FtpSuccess, StringComparison.OrdinalIgnoreCase))
             MjbUsForm.Set(fields, MjbUsForm.RequestStatus, MjbUsForm.RequestStatusId, MjbUsForm.RequestSuccess);
 
         await MoveByReviewAsync(args, steps, activityId, "SUCCESS", fields, formId, "MJB FTP", cancellationToken);
@@ -448,17 +453,30 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         if (root.ValueKind != JsonValueKind.Object)
             return root;
 
-        if (HasAny(root, "Classification Status", "Extraction Status", "FTP status", "FTP Status", "agent"))
+        if (HasFormStatus(root))
             return root;
 
-        foreach (var name in new[] { "payload", "result", "data", "output" })
+        JsonElement? fallback = null;
+        foreach (var name in new[]
         {
-            if (TryGet(root, name, out var child) && child.ValueKind == JsonValueKind.Object)
+            "classification_result", "ramco_ocr_result", "ftp_result",
+            "payload", "result", "data", "output"
+        })
+        {
+            if (!TryGet(root, name, out var child) || child.ValueKind != JsonValueKind.Object)
+                continue;
+
+            if (HasFormStatus(child))
                 return child;
+
+            fallback ??= child;
         }
 
-        return root;
+        return fallback ?? root;
     }
+
+    private static bool HasFormStatus(JsonElement element) =>
+        HasAny(element, "Classification Status", "Extraction Status", "FTP status", "FTP Status");
 
     private static bool HasAny(JsonElement element, params string[] names) =>
         names.Any(name => TryGet(element, name, out _));
