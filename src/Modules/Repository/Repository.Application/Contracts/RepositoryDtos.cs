@@ -35,9 +35,11 @@ public sealed record CreateRepositoryRequest(
     bool IsDefaultRepository = true,
     IReadOnlyList<RepositoryFieldDefinitionDto>? Fields = null,
     bool PiiRedactionEnabled = false,
-    IReadOnlyList<Guid>? PiiRedactionFieldIds = null,
+    /// <summary>Field ids or field names from <c>fields</c>. Names are saved as the matching field id.</summary>
+    IReadOnlyList<string>? PiiRedactionFieldIds = null,
     IReadOnlyList<Guid>? PiiRedactionUserIds = null,
-    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null,
+    string? PiiRedactionLevel = null);
 
 public sealed record StorageProviderDto(Guid Id, string Code, string Name, bool IsActive);
 
@@ -50,9 +52,11 @@ public sealed record UpdateRepositoryRequest(
     /// <summary>When set, replaces active field definitions (include <c>id</c> to update; omit <c>id</c> to add).</summary>
     IReadOnlyList<RepositoryFieldDefinitionDto>? Fields = null,
     bool? PiiRedactionEnabled = null,
-    IReadOnlyList<Guid>? PiiRedactionFieldIds = null,
+    /// <summary>Field ids or field names. Names are saved as the matching field id.</summary>
+    IReadOnlyList<string>? PiiRedactionFieldIds = null,
     IReadOnlyList<Guid>? PiiRedactionUserIds = null,
-    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null,
+    string? PiiRedactionLevel = null);
 
 public sealed record RepositoryFieldDefinitionDto(
     string Name,
@@ -94,7 +98,8 @@ public sealed record RepositorySummaryDto(
     [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<Guid>))]
     IReadOnlyList<Guid>? PiiRedactionUserIds = null,
     [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<PiiRedactionUserDto>))]
-    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null,
+    string? PiiRedactionLevel = null);
 
 public sealed record RepositoryDetailDto(
     Guid Id,
@@ -120,7 +125,8 @@ public sealed record RepositoryDetailDto(
     [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<Guid>))]
     IReadOnlyList<Guid>? PiiRedactionUserIds = null,
     [property: JsonConverter(typeof(EmptyReadOnlyListJsonConverter<PiiRedactionUserDto>))]
-    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null);
+    IReadOnlyList<PiiRedactionUserDto>? PiiRedactionUsers = null,
+    string? PiiRedactionLevel = null);
 
 public sealed record RepositoryFieldDto(
     Guid Id,

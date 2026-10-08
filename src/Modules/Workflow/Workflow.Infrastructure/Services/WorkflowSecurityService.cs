@@ -437,7 +437,7 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         }
 
         _logger.LogInformation(
-            "Granted workflow {WorkflowId} access to user {UserId} (by {GrantedBy}) for Forward",
+            "Granted workflow {WorkflowId} access to user {UserId} (by {GrantedBy})",
             workflowId,
             userId,
             grantedBy);
