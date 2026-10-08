@@ -58,7 +58,8 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
 
         const string sql = """
             SELECT "Id", "FolderId", "CanView", "CanUpload", "CanDownload", "CanPrint", "CanDelete",
-                   "CanEditMetadata", "CanEditDocument", "CanCheckOut", "CanCheckIn", "CanSendForSignature"
+                   "CanEditMetadata", "CanEditDocument", "CanCheckOut", "CanCheckIn", "CanSendForSignature",
+                   "CanAllVersionDocuments", "CanPiiRedaction"
             FROM repository."FolderSecurityPolicies"
             WHERE "RepositoryId" = @RepositoryId AND "IsDeleted" = false
             ORDER BY "CreatedAtUtc"
@@ -84,7 +85,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                         reader.GetBoolean(8),
                         reader.GetBoolean(9),
                         reader.GetBoolean(10),
-                        reader.GetBoolean(11))));
+                        reader.GetBoolean(11),
+                        reader.GetBoolean(12),
+                        reader.GetBoolean(13))));
             }
         }
 
@@ -153,10 +156,12 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                     INSERT INTO repository."FolderSecurityPolicies"
                         ("Id", "RepositoryId", "FolderId", "CanView", "CanUpload", "CanDownload", "CanPrint", "CanDelete",
                          "CanEditMetadata", "CanEditDocument", "CanCheckOut", "CanCheckIn", "CanSendForSignature",
+                         "CanAllVersionDocuments", "CanPiiRedaction",
                          "CreatedAtUtc", "CreatedBy", "IsDeleted")
                     VALUES
                         (@Id, @RepositoryId, NULL, @CanView, @CanUpload, @CanDownload, @CanPrint, @CanDelete,
                          @CanEditMetadata, @CanEditDocument, @CanCheckOut, @CanCheckIn, @CanSendForSignature,
+                         @CanAllVersionDocuments, @CanPiiRedaction,
                          now(), @CreatedBy, false)
                     """, connection, tx))
                 {
@@ -172,6 +177,8 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                     insert.Parameters.AddWithValue("@CanCheckOut", perms.CheckOut);
                     insert.Parameters.AddWithValue("@CanCheckIn", perms.CheckIn);
                     insert.Parameters.AddWithValue("@CanSendForSignature", perms.SendForSignature);
+                    insert.Parameters.AddWithValue("@CanAllVersionDocuments", perms.AllVersionDocuments);
+                    insert.Parameters.AddWithValue("@CanPiiRedaction", perms.PiiRedaction);
                     insert.Parameters.AddWithValue("@CreatedBy", (object?)userId ?? DBNull.Value);
                     await insert.ExecuteNonQueryAsync(cancellationToken);
                 }
@@ -994,6 +1001,7 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         const string sql = """
             SELECT pol."CanView", pol."CanUpload", pol."CanDownload", pol."CanPrint", pol."CanDelete",
                    pol."CanEditMetadata", pol."CanEditDocument", pol."CanCheckOut", pol."CanCheckIn", pol."CanSendForSignature",
+                   pol."CanAllVersionDocuments", pol."CanPiiRedaction",
                    p."PrincipalType", p."PrincipalId"
             FROM repository."FolderSecurityPolicies" pol
             INNER JOIN repository."FolderSecurityPrincipals" p ON p."PolicyId" = pol."Id"
@@ -1018,8 +1026,8 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var principalType = reader.GetString(10);
-            var principalId = reader.GetGuid(11);
+            var principalType = reader.GetString(12);
+            var principalId = reader.GetGuid(13);
             if (!principals.Matches(principalType, principalId))
                 continue;
 
@@ -1033,7 +1041,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
                 reader.GetBoolean(6),
                 reader.GetBoolean(7),
                 reader.GetBoolean(8),
-                reader.GetBoolean(9));
+                reader.GetBoolean(9),
+                reader.GetBoolean(10),
+                reader.GetBoolean(11));
 
             merged = merged is null ? flags : Or(merged, flags);
         }
@@ -1066,6 +1076,8 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             RepositorySecurityPermissions.CheckOut => flags.CheckOut,
             RepositorySecurityPermissions.CheckIn => flags.CheckIn,
             RepositorySecurityPermissions.SendForSignature => flags.SendForSignature,
+            RepositorySecurityPermissions.AllVersionDocuments => flags.AllVersionDocuments,
+            RepositorySecurityPermissions.PiiRedaction => flags.PiiRedaction,
             _ => flags.View
         };
     }
@@ -1081,7 +1093,9 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             a.EditDocument || b.EditDocument,
             a.CheckOut || b.CheckOut,
             a.CheckIn || b.CheckIn,
-            a.SendForSignature || b.SendForSignature);
+            a.SendForSignature || b.SendForSignature,
+            a.AllVersionDocuments || b.AllVersionDocuments,
+            a.PiiRedaction || b.PiiRedaction);
 
     private static bool PrincipalsMatch(
         IReadOnlyList<Guid> userIds,
@@ -1372,12 +1386,18 @@ public sealed class RepositorySecurityService : IRepositorySecurityService
             "CanCheckOut" boolean NOT NULL DEFAULT false,
             "CanCheckIn" boolean NOT NULL DEFAULT false,
             "CanSendForSignature" boolean NOT NULL DEFAULT false,
+            "CanAllVersionDocuments" boolean NOT NULL DEFAULT false,
+            "CanPiiRedaction" boolean NOT NULL DEFAULT false,
             "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
             "ModifiedAtUtc" timestamptz NULL,
             "CreatedBy" uuid NULL,
             "ModifiedBy" uuid NULL,
             "IsDeleted" boolean NOT NULL DEFAULT false
         );
+        ALTER TABLE repository."FolderSecurityPolicies"
+            ADD COLUMN IF NOT EXISTS "CanAllVersionDocuments" boolean NOT NULL DEFAULT false;
+        ALTER TABLE repository."FolderSecurityPolicies"
+            ADD COLUMN IF NOT EXISTS "CanPiiRedaction" boolean NOT NULL DEFAULT false;
         CREATE INDEX IF NOT EXISTS "IX_FolderSecurityPolicies_Repo_Folder"
             ON repository."FolderSecurityPolicies" ("RepositoryId", "FolderId", "IsDeleted");
 

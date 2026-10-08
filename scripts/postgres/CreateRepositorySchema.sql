@@ -144,12 +144,16 @@ CREATE TABLE IF NOT EXISTS repository."FolderSecurityPolicies" (
     "CanCheckOut" boolean NOT NULL DEFAULT false,
     "CanCheckIn" boolean NOT NULL DEFAULT false,
     "CanSendForSignature" boolean NOT NULL DEFAULT false,
+    "CanAllVersionDocuments" boolean NOT NULL DEFAULT false,
+    "CanPiiRedaction" boolean NOT NULL DEFAULT false,
     "CreatedAtUtc" timestamptz NOT NULL DEFAULT now(),
     "ModifiedAtUtc" timestamptz NULL,
     "CreatedBy" uuid NULL,
     "ModifiedBy" uuid NULL,
     "IsDeleted" boolean NOT NULL DEFAULT false
 );
+ALTER TABLE repository."FolderSecurityPolicies" ADD COLUMN IF NOT EXISTS "CanAllVersionDocuments" boolean NOT NULL DEFAULT false;
+ALTER TABLE repository."FolderSecurityPolicies" ADD COLUMN IF NOT EXISTS "CanPiiRedaction" boolean NOT NULL DEFAULT false;
 CREATE INDEX IF NOT EXISTS "IX_FolderSecurityPolicies_Repo_Folder" ON repository."FolderSecurityPolicies" ("RepositoryId", "FolderId", "IsDeleted");
 
 CREATE TABLE IF NOT EXISTS repository."FolderSecurityPrincipals" (
