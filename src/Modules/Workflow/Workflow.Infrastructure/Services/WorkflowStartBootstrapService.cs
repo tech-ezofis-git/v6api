@@ -5,6 +5,7 @@ using Azure.Storage.Blobs;
 using Npgsql;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
 using SaaSApp.Workflow.Application.Workflows;
 using SaaSApp.Workflow.Application.Workflows.Commands.MoveToNextStep;
@@ -34,6 +35,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
     private readonly IWorkflowJsonStorageService _workflowJsonStorage;
     private readonly StagedFileEzfbBinder _stagedFileEzfbBinder;
     private readonly IConfiguration _configuration;
+    private readonly IWorkflowSecurityService _workflowSecurity;
+    private readonly IRepositorySecurityService _repositorySecurity;
     private readonly ILogger<WorkflowStartBootstrapService> _logger;
 
     public WorkflowStartBootstrapService(
@@ -47,6 +50,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         IEmailIngestService emailIngest,
         IWorkflowJsonStorageService workflowJsonStorage,
         IConfiguration configuration,
+        IWorkflowSecurityService workflowSecurity,
+        IRepositorySecurityService repositorySecurity,
         ILogger<WorkflowStartBootstrapService> logger,
         StagedFileEzfbBinder stagedFileEzfbBinder,
         IWorkflowStartAttachmentUploader? attachmentUploader = null,
@@ -62,6 +67,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         _emailIngest = emailIngest;
         _workflowJsonStorage = workflowJsonStorage;
         _configuration = configuration;
+        _workflowSecurity = workflowSecurity;
+        _repositorySecurity = repositorySecurity;
         _logger = logger;
         _stagedFileEzfbBinder = stagedFileEzfbBinder;
         _attachmentUploader = attachmentUploader;
@@ -364,6 +371,14 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             await _repository.UpdateInstanceAsync(instance, cancellationToken);
             await _unitOfWork.SaveChangesAsync(cancellationToken);
         }
+
+        await GrantAssigneeWorkflowAndFolderAsync(
+            workflow.Id,
+            instance.TenantId,
+            userId,
+            reviewSync.NextActivityUserId,
+            repositoryGuid,
+            cancellationToken);
 
         var currentTransactionId = reviewSync.NextTransactionId
             ?? reviewSync.CurrentTransactionId
@@ -1091,6 +1106,56 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             return unchecked((int)u);
 
         return 0;
+    }
+
+    /// <summary>
+    /// The verify/sign user is not on the workflow yet. Give them the workflow menu
+    /// and the folder this ticket was raised from.
+    /// </summary>
+    private async Task GrantAssigneeWorkflowAndFolderAsync(
+        Guid workflowId,
+        Guid tenantId,
+        Guid grantedByUserId,
+        Guid? assigneeUserId,
+        Guid? repositoryId,
+        CancellationToken cancellationToken)
+    {
+        if (assigneeUserId is not Guid assignee || assignee == Guid.Empty || assignee == grantedByUserId)
+            return;
+
+        await _workflowSecurity.EnsureUserWorkflowAccessAsync(
+            workflowId,
+            assignee,
+            grantedByUserId,
+            cancellationToken);
+
+        if (repositoryId is not Guid folderId || folderId == Guid.Empty)
+            return;
+
+        try
+        {
+            await _repositorySecurity.EnsureShareRecipientRepositoryAccessAsync(
+                folderId,
+                tenantId,
+                assignee,
+                canUpload: false,
+                grantedByUserId,
+                cancellationToken);
+            _logger.LogInformation(
+                "Granted workflow {WorkflowId} and folder {RepositoryId} to assignee {AssigneeUserId}.",
+                workflowId,
+                folderId,
+                assignee);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Workflow {WorkflowId} was granted to {AssigneeUserId}, but folder {RepositoryId} could not be assigned.",
+                workflowId,
+                assignee,
+                folderId);
+        }
     }
 
     /// <summary>

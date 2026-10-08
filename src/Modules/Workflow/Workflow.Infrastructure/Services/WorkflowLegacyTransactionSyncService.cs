@@ -342,6 +342,16 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                     connection, transactionTable, nextExists.Id, cancellationToken);
                 await _mailboxSync.SyncTransactionRowAsync(
                     workflowId, nextExists.Id, connection, mailboxForm, cancellationToken);
+
+                return new WorkflowLegacyTransactionSyncResult(
+                    LegacyTransactionSyncStatus.ReviewUpdated,
+                    workflowInstanceId,
+                    existingRow.Id,
+                    nextTransactionId,
+                    nextTransactionGuid,
+                    workflowCompleted,
+                    nextExists.ActivityUserId,
+                    userId);
             }
             else
             {
@@ -506,7 +516,7 @@ WHERE id = @Id
             throw new InvalidOperationException("Cannot forward: open transaction was not found or already completed.");
     }
 
-    private sealed record TransactionRow(int Id, string? Review, int ActionStatus);
+    private sealed record TransactionRow(int Id, string? Review, int ActionStatus, Guid? ActivityUserId);
 
     private static async Task<TransactionRow?> FindTransactionRowForStepAsync(
         NpgsqlConnection connection,
@@ -517,7 +527,7 @@ WHERE id = @Id
         CancellationToken cancellationToken)
     {
         var sql = $@"
-SELECT id, review, action_status
+SELECT id, review, action_status, activity_user_id
 FROM {transactionTable}
 WHERE workflow_instance_id = @WorkflowInstanceId
   AND is_deleted = false
@@ -552,7 +562,8 @@ LIMIT 1;";
         return new TransactionRow(
             reader.GetInt32(0),
             reader.IsDBNull(1) ? null : reader.GetString(1),
-            reader.GetInt32(2));
+            reader.GetInt32(2),
+            reader.IsDBNull(3) ? null : reader.GetGuid(3));
     }
 
     private static async Task UpdateReviewAsync(
