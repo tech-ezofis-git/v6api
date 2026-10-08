@@ -24,6 +24,8 @@ public static class RepositorySecurityPermissions
     public const string CheckOut = "checkOut";
     public const string CheckIn = "checkIn";
     public const string SendForSignature = "sendForSignature";
+    public const string AllVersionDocuments = "allVersionDocuments";
+    public const string PiiRedaction = "piiRedaction";
 }
 
 public sealed record RepositoryPermissionFlagsDto(
@@ -36,7 +38,9 @@ public sealed record RepositoryPermissionFlagsDto(
     bool EditDocument = false,
     bool CheckOut = false,
     bool CheckIn = false,
-    bool SendForSignature = false);
+    bool SendForSignature = false,
+    bool AllVersionDocuments = false,
+    bool PiiRedaction = false);
 
 public sealed record RepositoryFolderSecurityPolicyDto(
     IReadOnlyList<Guid> UserIds,
