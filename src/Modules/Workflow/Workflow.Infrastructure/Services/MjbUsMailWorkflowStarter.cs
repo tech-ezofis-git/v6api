@@ -117,12 +117,12 @@ public sealed class MjbUsMailWorkflowStarter : IMjbUsMailWorkflowStarter
             cancellationToken);
 
         _logger.LogInformation(
-            "MJB_US mail stored {BlobPath} and queued classification job {JobId} for instance {InstanceId}.",
+            "MJB_US file stored {BlobPath} and queued classification job {JobId} for instance {InstanceId}.",
             blobPath,
             jobId,
             started.InstanceId);
 
-        return started;
+        return started with { ApAgentJobId = jobId };
     }
 
     private static string SanitizeFileName(string? fileName)

@@ -22,6 +22,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly IApAgentPythonPipelineService _apAgentPythonPipeline;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
     private readonly IWorkflowSecurityService _security;
+    private readonly IMjbUsMailWorkflowStarter _mjbMailStarter;
     private readonly ILogger<StartWorkflowCommandHandler> _logger;
 
     public StartWorkflowCommandHandler(
@@ -37,6 +38,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         IApAgentPythonPipelineService apAgentPythonPipeline,
         IApAgentJobProgressService apAgentJobProgress,
         IWorkflowSecurityService security,
+        IMjbUsMailWorkflowStarter mjbMailStarter,
         ILogger<StartWorkflowCommandHandler> logger)
     {
         _repository = repository;
@@ -51,6 +53,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _apAgentPythonPipeline = apAgentPythonPipeline;
         _apAgentJobProgress = apAgentJobProgress;
         _security = security;
+        _mjbMailStarter = mjbMailStarter;
         _logger = logger;
     }
 
@@ -68,6 +71,23 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
 
         if (workflow.Status != WorkflowStatus.Active)
             throw new InvalidOperationException("Only active workflows can be started.");
+
+        // MJB file start (no mail): store under monitor/Ramco_mjb, open the ticket, queue classification.
+        // The mail starter calls start again without the file, so this branch does not run twice.
+        if (MjbUsAgent.IsThisWorkflow(workflow.Id, tenantId)
+            && request.Attachment is { Content.Length: > 0 } mjbFile)
+        {
+            return await _mjbMailStarter.StartAsync(
+                workflow,
+                mjbFile.Content,
+                mjbFile.FileName,
+                mjbFile.ContentType,
+                fromEmail: null,
+                subject: null,
+                receivedAtUtc: null,
+                messageId: null,
+                cancellationToken);
+        }
 
         var connectionString = _tenantContext.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");

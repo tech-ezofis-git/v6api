@@ -31,7 +31,8 @@ internal static class RepositoryCrossTenantItemReader
                 sp."Name" AS "StorageProviderName",
                 r."PiiRedactionEnabled",
                 r."PiiRedactionFieldIds",
-                r."PiiRedactionUsers"
+                r."PiiRedactionUsers",
+                r."PiiRedactionLevel"
             FROM repository."Repositories" r
             LEFT JOIN repository."StorageProviders" sp ON sp."Id" = r."StorageProviderId" AND sp."IsDeleted" = false
             WHERE r."Id" = @Id AND r."TenantId" = @TenantId;
@@ -54,6 +55,7 @@ internal static class RepositoryCrossTenantItemReader
         bool piiRedactionEnabled;
         string? piiFieldIdsJson;
         string? piiUsersJson;
+        string? piiRedactionLevel;
 
         await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
         {
@@ -74,6 +76,7 @@ internal static class RepositoryCrossTenantItemReader
             piiRedactionEnabled = !reader.IsDBNull(11) && reader.GetBoolean(11);
             piiFieldIdsJson = reader.IsDBNull(12) ? null : reader.GetString(12);
             piiUsersJson = reader.IsDBNull(13) ? null : reader.GetString(13);
+            piiRedactionLevel = reader.IsDBNull(14) ? null : reader.GetString(14);
         }
 
         var fields = await LoadFieldsAsync(connection, repositoryId, cancellationToken);
@@ -97,7 +100,8 @@ internal static class RepositoryCrossTenantItemReader
             PiiRedactionEnabled: pii.Enabled,
             PiiRedactionFieldIds: pii.FieldIds,
             PiiRedactionUserIds: pii.UserIds,
-            PiiRedactionUsers: pii.Users);
+            PiiRedactionUsers: pii.Users,
+            PiiRedactionLevel: piiRedactionLevel);
     }
 
     private static async Task<int> CountItemsAsync(

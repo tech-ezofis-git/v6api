@@ -47,6 +47,7 @@ ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "IsDefaultReposit
 ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionEnabled" boolean NOT NULL DEFAULT false;
 ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionFieldIds" text NULL;
 ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionUsers" text NULL;
+ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionLevel" varchar(32) NULL;
 
 CREATE TABLE IF NOT EXISTS repository."RepositoryFields" (
     "Id" uuid NOT NULL DEFAULT gen_random_uuid() CONSTRAINT "PK_RepositoryFields" PRIMARY KEY,

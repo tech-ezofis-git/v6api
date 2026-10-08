@@ -264,18 +264,6 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             cancellationToken,
             preferEzfb: appliedPoRowToEzfb);
 
-        // Forward to a user without workflow access: grant WorkflowUsers + WorkflowSecurity first.
-        if (IsForwardReview(request.Review)
-            && request.ActivityUserId is Guid forwardToUserId
-            && forwardToUserId != Guid.Empty)
-        {
-            await _workflowSecurity.EnsureUserWorkflowAccessAsync(
-                instance.WorkflowId,
-                forwardToUserId,
-                userId,
-                cancellationToken);
-        }
-
         var legacySync = await _legacyTransactionSync.SyncTransactionByActivityIdAsync(
             instance.WorkflowId,
             instance.Id,
@@ -289,6 +277,16 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
             mailboxForm,
             cancellationToken,
             endWorkflow: request.EndWorkflow);
+
+        // Assignee (verify/sign, approve, or Forward) must see this workflow in the menu.
+        if (legacySync.NextActivityUserId is Guid assignedUserId && assignedUserId != Guid.Empty)
+        {
+            await _workflowSecurity.EnsureUserWorkflowAccessAsync(
+                instance.WorkflowId,
+                assignedUserId,
+                userId,
+                cancellationToken);
+        }
 
         WorkflowStep? nextDefinitionStep = null;
         var workflowCompleted = legacySync.WorkflowCompleted;

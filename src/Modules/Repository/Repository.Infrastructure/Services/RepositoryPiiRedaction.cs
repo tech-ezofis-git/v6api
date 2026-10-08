@@ -18,9 +18,61 @@ internal static class RepositoryPiiRedaction
             ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionEnabled" boolean NOT NULL DEFAULT false;
             ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionFieldIds" text NULL;
             ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionUsers" text NULL;
+            ALTER TABLE repository."Repositories" ADD COLUMN IF NOT EXISTS "PiiRedactionLevel" varchar(32) NULL;
             """;
         await using var cmd = new NpgsqlCommand(sql, connection);
         await cmd.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    /// <summary>
+    /// Each token may be a field id or a field name. Names match <paramref name="fields"/> (case-insensitive).
+    /// </summary>
+    public static IReadOnlyList<Guid> ResolveFieldIds(
+        IReadOnlyList<string>? tokens,
+        IEnumerable<(Guid Id, string Name)> fields)
+    {
+        var byName = new Dictionary<string, Guid>(StringComparer.OrdinalIgnoreCase);
+        foreach (var field in fields)
+        {
+            if (field.Id == Guid.Empty || string.IsNullOrWhiteSpace(field.Name))
+                continue;
+            byName.TryAdd(field.Name.Trim(), field.Id);
+        }
+
+        var resolved = new List<Guid>();
+        var unknown = new List<string>();
+        foreach (var raw in tokens ?? Array.Empty<string>())
+        {
+            var token = raw?.Trim();
+            if (string.IsNullOrEmpty(token))
+                continue;
+
+            if (Guid.TryParse(token, out var id) && id != Guid.Empty)
+            {
+                resolved.Add(id);
+                continue;
+            }
+
+            if (byName.TryGetValue(token, out var namedId))
+                resolved.Add(namedId);
+            else
+                unknown.Add(token);
+        }
+
+        if (unknown.Count > 0)
+        {
+            throw new ArgumentException(
+                "Unknown piiRedactionFieldIds: " + string.Join(", ", unknown) + ". Use a field id or a field name from fields.");
+        }
+
+        return resolved.Distinct().ToList();
+    }
+
+    public static string? NormalizeLevel(string? level)
+    {
+        if (string.IsNullOrWhiteSpace(level))
+            return null;
+        return level.Trim();
     }
 
     public static string SerializeFieldIds(IReadOnlyList<Guid>? fieldIds)
