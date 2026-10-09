@@ -161,8 +161,8 @@ public interface IRepositorySignRequestService
     /// <summary>Send an OTP only when <paramref name="email"/> is the invited signer.</summary>
     Task RequestInviteOtpAsync(string inviteToken, string email, CancellationToken cancellationToken = default);
 
-    /// <summary>Verify the OTP and return a short-lived token for opening and signing the file.</summary>
-    Task<SignInviteOtpSessionDto> VerifyInviteOtpAsync(
+    /// <summary>Verify the OTP. Returns the tenant and signer email so the API can issue a login access token.</summary>
+    Task<ExternalInviteVerifiedDto> VerifyInviteOtpAsync(
         string inviteToken,
         string email,
         string otp,

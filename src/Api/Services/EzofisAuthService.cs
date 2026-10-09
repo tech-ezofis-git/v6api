@@ -220,6 +220,54 @@ public sealed class EzofisAuthService : IEzofisAuthService
         return await SocialLoginAsync(email.Trim(), provider, tenantId, cancellationToken);
     }
 
+    public async Task<LoginResult> CompleteShareInviteOtpAsync(
+        string shareToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(shareToken))
+            throw new ArgumentException("ShareToken is required.");
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email is required.");
+        if (string.IsNullOrWhiteSpace(otp))
+            throw new ArgumentException("OTP is required.");
+
+        var verified = await _shareService.VerifyShareOtpAsync(shareToken.Trim(), email.Trim(), otp.Trim(), cancellationToken);
+        return await IssueGuestAccessTokenAsync(verified.TenantId, verified.Email, cancellationToken);
+    }
+
+    public async Task<LoginResult> CompleteSignInviteOtpAsync(
+        string inviteToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(inviteToken))
+            throw new ArgumentException("InviteToken is required.");
+        if (string.IsNullOrWhiteSpace(email))
+            throw new ArgumentException("Email is required.");
+        if (string.IsNullOrWhiteSpace(otp))
+            throw new ArgumentException("OTP is required.");
+
+        var verified = await _signRequestService.VerifyInviteOtpAsync(inviteToken.Trim(), email.Trim(), otp.Trim(), cancellationToken);
+        return await IssueGuestAccessTokenAsync(verified.TenantId, verified.Email, cancellationToken);
+    }
+
+    private async Task<LoginSuccess> IssueGuestAccessTokenAsync(
+        Guid tenantId,
+        string email,
+        CancellationToken cancellationToken)
+    {
+        var userId = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email, cancellationToken);
+        var normalized = email.Trim().ToLowerInvariant();
+        return new LoginSuccess(
+            userId,
+            GenerateJwt(userId, normalized, email.Trim(), SaaSApp.Users.Domain.Entities.User.RoleTenantUser, tenantId),
+            "Bearer",
+            (int)AccessTokenExpiry.TotalSeconds);
+    }
+
     public async Task<LoginResult> SetSignInvitePasswordAsync(
         string inviteToken,
         string email,

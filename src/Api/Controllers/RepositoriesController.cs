@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Options;
 using SaaSApp.Api.Middleware;
+using SaaSApp.Api.Services;
 using SaaSApp.Api.Options;
 using SaaSApp.Billing.Application.Contracts;
 using SaaSApp.Billing.Application.Credits.Commands.UpdateCredit;
@@ -33,6 +34,7 @@ public sealed class RepositoriesController : ControllerBase
     private readonly IRepositoryStorageSeedService _storageSeed;
     private readonly IRepositoryItemActivityService _itemActivity;
     private readonly IRepositoryItemShareService _itemShares;
+    private readonly IEzofisAuthService _authService;
     private readonly IRepositorySecurityService _security;
     private readonly ITenantConnectionStringResolver _connectionResolver;
     private readonly ITenantConnectionProvider _connectionProvider;
@@ -52,6 +54,7 @@ public sealed class RepositoriesController : ControllerBase
         IRepositoryStorageSeedService storageSeed,
         IRepositoryItemActivityService itemActivity,
         IRepositoryItemShareService itemShares,
+        IEzofisAuthService authService,
         IRepositorySecurityService security,
         ITenantConnectionStringResolver connectionResolver,
         ITenantConnectionProvider connectionProvider,
@@ -70,6 +73,7 @@ public sealed class RepositoriesController : ControllerBase
         _storageSeed = storageSeed;
         _itemActivity = itemActivity;
         _itemShares = itemShares;
+        _authService = authService;
         _security = security;
         _connectionResolver = connectionResolver;
         _connectionProvider = connectionProvider;
@@ -857,6 +861,54 @@ public sealed class RepositoriesController : ControllerBase
     {
         var preview = await _itemShares.GetPreviewAsync(shareToken, cancellationToken);
         return preview == null ? NotFound(new { error = "Share link not found or expired." }) : Ok(preview);
+    }
+
+    /// <summary>Send an OTP only when the email is the address this share was sent to.</summary>
+    [HttpPost("/api/repositories/share/{shareToken}/otp")]
+    [AllowAnonymous]
+    public async Task<IActionResult> RequestShareOtp(
+        string shareToken,
+        [FromBody] RequestSignInviteOtpDto request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await _itemShares.RequestShareOtpAsync(shareToken, request.Email, cancellationToken);
+            return Ok(new { sent = true });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message, sent = false });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>Verify the share OTP and return a login access token for repository APIs.</summary>
+    [HttpPost("/api/repositories/share/{shareToken}/otp/verify")]
+    [AllowAnonymous]
+    [ProducesResponseType(typeof(LoginSuccess), StatusCodes.Status200OK)]
+    public async Task<IActionResult> VerifyShareOtp(
+        string shareToken,
+        [FromBody] VerifySignInviteOtpDto request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var session = await _authService.CompleteShareInviteOtpAsync(
+                shareToken, request.Email, request.Otp, cancellationToken);
+            return Ok(session);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            return Unauthorized(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
     }
 
     /// <summary>Revoke an active share (sharer only).</summary>

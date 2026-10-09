@@ -474,7 +474,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             plainText: plain);
     }
 
-    public Task<SignInviteOtpSessionDto> VerifyInviteOtpAsync(
+    public async Task<ExternalInviteVerifiedDto> VerifyInviteOtpAsync(
         string inviteToken,
         string email,
         string otp,
@@ -487,11 +487,13 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
             || !string.Equals(entry.Code, code, StringComparison.Ordinal))
             throw new UnauthorizedAccessException("The verification code is invalid or expired.");
 
+        var ctx = await ResolveInviteAsync(inviteToken, cancellationToken)
+            ?? throw new UnauthorizedAccessException("Sign invite not found or expired.");
+        if (!string.Equals(ctx.SignerEmail, normalized, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Email does not match this sign invite.");
+
         InviteOtps.TryRemove(OtpKey(inviteToken, normalized), out _);
-        var accessToken = GenerateToken();
-        var expires = DateTime.UtcNow.AddMinutes(30);
-        InviteAccess[accessToken] = new SignAccessEntry(inviteToken.Trim(), normalized, expires);
-        return Task.FromResult(new SignInviteOtpSessionDto(accessToken, normalized, expires));
+        return new ExternalInviteVerifiedDto(ctx.TenantId, normalized);
     }
 
     public string? ResolveOtpAccessEmail(string inviteToken, string? accessToken)

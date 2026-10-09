@@ -1,6 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
+using SaaSApp.Api.Services;
 using SaaSApp.MultiTenancy;
 using SaaSApp.Repository.Application.Contracts;
 
@@ -11,13 +12,16 @@ namespace SaaSApp.Api.Controllers;
 public sealed class SignRequestsController : ControllerBase
 {
     private readonly IRepositorySignRequestService _signRequests;
+    private readonly IEzofisAuthService _authService;
     private readonly ITenantProvider _tenantProvider;
 
     public SignRequestsController(
         IRepositorySignRequestService signRequests,
+        IEzofisAuthService authService,
         ITenantProvider tenantProvider)
     {
         _signRequests = signRequests;
+        _authService = authService;
         _tenantProvider = tenantProvider;
     }
 
@@ -245,10 +249,10 @@ public sealed class SignRequestsController : ControllerBase
         }
     }
 
-    /// <summary>Verify the OTP and return an access token for the document.</summary>
+    /// <summary>Verify the OTP and return a login access token for repository and sign APIs.</summary>
     [HttpPost("/api/sign-requests/invite/{inviteToken}/otp/verify")]
     [AllowAnonymous]
-    [ProducesResponseType(typeof(SignInviteOtpSessionDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(LoginSuccess), StatusCodes.Status200OK)]
     public async Task<IActionResult> VerifyOtp(
         string inviteToken,
         [FromBody] VerifySignInviteOtpDto request,
@@ -256,13 +260,17 @@ public sealed class SignRequestsController : ControllerBase
     {
         try
         {
-            var session = await _signRequests.VerifyInviteOtpAsync(
+            var session = await _authService.CompleteSignInviteOtpAsync(
                 inviteToken, request.Email, request.Otp, cancellationToken);
             return Ok(session);
         }
         catch (UnauthorizedAccessException ex)
         {
             return Unauthorized(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
         }
     }
 
