@@ -35,6 +35,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
     private readonly ITenantConnectionProvider _connectionProvider;
     private readonly IMediator _mediator;
     private readonly IApAgentJobProgressService _progress;
+    private readonly IWorkflowApAgentMoveNextService _agentValidation;
     private readonly AgentsChatOptions _agentsChat;
     private readonly ILogger<MjbUsAgentPipelineService> _logger;
 
@@ -44,6 +45,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         ITenantConnectionProvider connectionProvider,
         IMediator mediator,
         IApAgentJobProgressService progress,
+        IWorkflowApAgentMoveNextService agentValidation,
         IOptions<AgentsChatOptions> agentsChat,
         ILogger<MjbUsAgentPipelineService> logger)
     {
@@ -52,6 +54,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         _connectionProvider = connectionProvider;
         _mediator = mediator;
         _progress = progress;
+        _agentValidation = agentValidation;
         _agentsChat = agentsChat.Value;
         _logger = logger;
     }
@@ -85,6 +88,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         await ReportAsync(hangfireJobId, "PROCESSING", $"{MjbUsAgent.ClassificationLabel} started", 15, cancellationToken);
         using var classificationDoc = await PostJsonAsync(chatUrl, BuildClassificationBody(args, activityId), cancellationToken);
         var classification = Unwrap(classificationDoc.RootElement);
+        await SaveAgentJsonAsync(args, steps, activityId, classification, formId, cancellationToken);
         CopyAgentFields(classification, fields);
         var invoice = IsInvoice(classification);
         var ocrText = ReadString(classification, "ocr_text");
@@ -119,6 +123,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
             await ReportAsync(hangfireJobId, "PROCESSING", $"{MjbUsAgent.OcrLabel} started", 45, cancellationToken);
             using var ocrDoc = await PostJsonAsync(chatUrl, BuildOcrBody(args, activityId, ocrText, documentType), cancellationToken);
             ocr = Unwrap(ocrDoc.RootElement).Clone();
+            await SaveAgentJsonAsync(args, steps, activityId, ocr, formId, cancellationToken);
             CopyAgentFields(ocr, fields);
             var ocrReview = IsSucceeded(ocr, "Extraction Status") ? "SUCCEEDED" : "Failed";
             if (!string.Equals(ocrReview, "SUCCEEDED", StringComparison.OrdinalIgnoreCase))
@@ -139,6 +144,7 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
             BuildFtpBody(args, activityId, ocr, documentType, connector),
             cancellationToken);
         var ftp = Unwrap(ftpDoc.RootElement);
+        await SaveAgentJsonAsync(args, steps, activityId, ftp, formId, cancellationToken);
         CopyAgentFields(ftp, fields);
         var ftpStatus = MapFtpStatus(ReadString(ftp, "FTP status") ?? ReadString(ftp, "FTP Status"));
         MjbUsForm.Set(fields, MjbUsForm.FtpStatus, MjbUsForm.FtpStatusId, ftpStatus);
@@ -153,8 +159,9 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
     }
 
     /// <summary>
-    /// Uses the node's proceed action. An agent node stays in inbox. Workflow Success stays in completed.
-    /// The finished node is removed from sent, same as qualify and quote.
+    /// Uses the node's proceed action. The open step stays in inbox.
+    /// Each finished step stays in sent so the stage is still visible after the ticket moves on.
+    /// Workflow Success stays in completed.
     /// </summary>
     private async Task<string?> MoveByReviewAsync(
         MjbUsAgentJobArgs args,
@@ -188,8 +195,6 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         if (!moved.Success)
             throw new InvalidOperationException(moved.Message ?? "MJB_US move-next failed.");
 
-        await ClearSentAsync(args, cancellationToken);
-
         _logger.LogInformation(
             "MJB_US move-next from {FromStep} review {Review} opened {NextStep} in {Mailbox}.",
             current.Name,
@@ -205,24 +210,45 @@ public sealed class MjbUsAgentPipelineService : IMjbUsAgentPipelineService
         return MjbUsAgent.ActivityIdOf(target);
     }
 
-    private async Task ClearSentAsync(MjbUsAgentJobArgs args, CancellationToken cancellationToken)
+    /// <summary>
+    /// Stores this agent's JSON on workflow.agent_data_validation_{workflow8}.
+    /// type is the step stage (CLASSIFICATION_AGENT, OCR, FTP_AGENT) so mailbox lists can return each one.
+    /// </summary>
+    private async Task SaveAgentJsonAsync(
+        MjbUsAgentJobArgs args,
+        IReadOnlyList<WorkflowStep> steps,
+        string activityId,
+        JsonElement agent,
+        string formId,
+        CancellationToken cancellationToken)
     {
-        var connectionString = _connectionProvider.ConnectionString;
-        if (string.IsNullOrWhiteSpace(connectionString))
+        if (agent.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
             return;
 
-        var suffix = args.WorkflowId.ToString("N")[..8];
-        var sentTable = $"workflow.sent_{suffix}";
-        var compact = args.InstanceId.ToString("N");
-        await using var connection = new NpgsqlConnection(connectionString);
-        await connection.OpenAsync(cancellationToken);
-        var sql = $"""
-            DELETE FROM {sentTable}
-            WHERE REPLACE(LOWER(COALESCE(workflow_instance_id::text, '')), '-', '') = @InstanceId;
-            """;
-        await using var cmd = new NpgsqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@InstanceId", compact);
-        await cmd.ExecuteNonQueryAsync(cancellationToken);
+        var step = steps.FirstOrDefault(item => MjbUsAgent.SameActivity(item, activityId));
+        if (step == null)
+            return;
+
+        var json = agent.GetRawText();
+        if (string.IsNullOrWhiteSpace(json))
+            return;
+
+        await _agentValidation.SaveAgentValidationAsync(
+            args.WorkflowId,
+            args.InstanceId,
+            step,
+            args.UserId,
+            new MoveToNextStepApAgentPayload(
+                TransactionId: null,
+                InstanceId: args.InstanceId,
+                AiAgentResponseJson: json,
+                AiAgentHtml: null,
+                RepositoryItemId: null,
+                RepositoryId: null,
+                FormId: formId,
+                FormEntryId: null),
+            legacyTransactionId: null,
+            cancellationToken);
     }
 
     private static bool PointsAt(string? blockId, WorkflowStep target)

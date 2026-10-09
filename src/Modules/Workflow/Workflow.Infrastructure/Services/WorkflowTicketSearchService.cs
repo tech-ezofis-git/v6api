@@ -416,6 +416,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                 AgentHtml: agent.AgentHtml ?? string.Empty,
                 QualifyAgentResponse: agent.QualifyAgentResponse,
                 QuoteAgentResponse: agent.QuoteAgentResponse,
+                ClassificationAgentResponse: agent.ClassificationAgentResponse,
+                OcrAgentResponse: agent.OcrAgentResponse,
+                FtpAgentResponse: agent.FtpAgentResponse,
                 Action: 1));
         }
 
@@ -1240,7 +1243,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         string? AgentResponse,
         string? AgentHtml,
         string? QualifyAgentResponse = null,
-        string? QuoteAgentResponse = null);
+        string? QuoteAgentResponse = null,
+        string? ClassificationAgentResponse = null,
+        string? OcrAgentResponse = null,
+        string? FtpAgentResponse = null);
 
     private static TicketSearchRow ReadSearchRow(NpgsqlDataReader reader) =>
         new(
@@ -1497,6 +1503,9 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
             string? agentHtml = null;
             string? qualifyResponse = null;
             string? quoteResponse = null;
+            string? classificationResponse = null;
+            string? ocrResponse = null;
+            string? ftpResponse = null;
             var first = true;
             while (await reader.ReadAsync(cancellationToken))
             {
@@ -1509,12 +1518,17 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                     first = false;
                 }
 
-                if (qualifyResponse is null
-                    && string.Equals(type?.Trim(), "QUALIFY_AGENT", StringComparison.OrdinalIgnoreCase))
-                    qualifyResponse = reader.IsDBNull(2) ? null : reader.GetString(2);
-                if (quoteResponse is null
-                    && string.Equals(type?.Trim(), "QUOTE_AGENT", StringComparison.OrdinalIgnoreCase))
-                    quoteResponse = reader.IsDBNull(2) ? null : reader.GetString(2);
+                var response = reader.IsDBNull(2) ? null : reader.GetString(2);
+                if (qualifyResponse is null && IsAgentType(type, "QUALIFY_AGENT"))
+                    qualifyResponse = response;
+                if (quoteResponse is null && IsAgentType(type, "QUOTE_AGENT"))
+                    quoteResponse = response;
+                if (classificationResponse is null && IsAgentType(type, "CLASSIFICATION_AGENT", "CLASSIFICATION"))
+                    classificationResponse = response;
+                if (ocrResponse is null && IsAgentType(type, "OCR", "OCR_AGENT"))
+                    ocrResponse = response;
+                if (ftpResponse is null && IsAgentType(type, "FTP_AGENT", "FTP"))
+                    ftpResponse = response;
             }
 
             if (!first)
@@ -1524,7 +1538,10 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
                     agentResponse,
                     agentHtml,
                     qualifyResponse,
-                    quoteResponse);
+                    quoteResponse,
+                    classificationResponse,
+                    ocrResponse,
+                    ftpResponse);
             }
         }
         catch (PostgresException)
@@ -1532,6 +1549,15 @@ public sealed class WorkflowTicketSearchService : IWorkflowTicketSearchService
         }
 
         return new AgentValidationResult(null, null, null);
+    }
+
+    private static bool IsAgentType(string? type, params string[] names)
+    {
+        var text = type?.Trim();
+        if (string.IsNullOrEmpty(text))
+            return false;
+
+        return names.Any(name => string.Equals(text, name, StringComparison.OrdinalIgnoreCase));
     }
 
     private static string EscapeColumn(string column) => column.Replace("\"", "\"\"", StringComparison.Ordinal);

@@ -77,6 +77,15 @@ public sealed record LegacyMailboxRowDto(
     /// <summary>Latest QUOTE_AGENT row from agent_data_validation. Separate from formData.</summary>
     [property: JsonConverter(typeof(RawJsonStringConverter))]
     string? QuoteAgentResponse = null,
+    /// <summary>Latest CLASSIFICATION_AGENT row from agent_data_validation. Separate from formData.</summary>
+    [property: JsonConverter(typeof(RawJsonStringConverter))]
+    string? ClassificationAgentResponse = null,
+    /// <summary>Latest OCR row from agent_data_validation. Separate from formData.</summary>
+    [property: JsonConverter(typeof(RawJsonStringConverter))]
+    string? OcrAgentResponse = null,
+    /// <summary>Latest FTP_AGENT row from agent_data_validation. Separate from formData.</summary>
+    [property: JsonConverter(typeof(RawJsonStringConverter))]
+    string? FtpAgentResponse = null,
     /// <summary>1 = show verify/approve buttons; 0 = hide. Default 1.</summary>
     int Action = 1,
     /// <summary>Set by the activity lookup: "inbox" or "sent". Omitted on the inbox and sent lists.</summary>

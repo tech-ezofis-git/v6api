@@ -4,6 +4,7 @@ using Npgsql;
 using NpgsqlTypes;
 using SaaSApp.Repository.Application.Contracts;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
@@ -71,13 +72,14 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var transactionTableName = $"transaction_{suffix}";
         var transactionTable = $"workflow.{transactionTableName}";
         var transactionTableExists = await TableExistsAsync(connection, transactionTableName, cancellationToken);
-        var (whereSql, parameters) = BuildUserFilter(request, transactionTable, transactionTableExists);
-        var latestOnlyPerInstance = ShouldReturnLatestOnlyPerInstance(request);
+        var keepStageRows = KeepMjbStageRows(request.WorkflowId);
+        var (whereSql, parameters) = BuildUserFilter(request, transactionTable, transactionTableExists, keepStageRows);
+        var latestOnlyPerInstance = !keepStageRows && ShouldReturnLatestOnlyPerInstance(request);
 
         var agentTable = $"agent_data_validation_{suffix}";
         var agentJoin = await BuildAgentValidationApplyAsync(connection, agentTable, cancellationToken);
         var currentStageJoin = BuildCurrentStageJoin(transactionTable, transactionTableExists);
-        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance);
+        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance, keepStageRows);
 
         if (request.SkipTotal)
         {
@@ -536,8 +538,9 @@ EXISTS (
         if (!exists)
             return (0, false);
 
-        var (whereSql, parameters) = BuildUserFilter(request, kind, transactionTable, transactionTableExists);
-        var countSql = BuildCountSql(tableFull, whereSql, latestOnlyPerInstance: true);
+        var keepStageRows = KeepMjbStageRows(request.WorkflowId);
+        var (whereSql, parameters) = BuildUserFilter(request, kind, transactionTable, transactionTableExists, keepStageRows);
+        var countSql = BuildCountSql(tableFull, whereSql, latestOnlyPerInstance: !keepStageRows);
         await using var cmd = new NpgsqlCommand(countSql, connection);
         foreach (var p in parameters)
             cmd.Parameters.Add(CloneParameter(p));
@@ -550,22 +553,28 @@ EXISTS (
         LegacyMailboxInstanceCountRequest request,
         LegacyMailboxTableKind kind,
         string transactionTable,
-        bool transactionTableExists) =>
+        bool transactionTableExists,
+        bool keepStageRows = false) =>
         BuildUserFilterCore(
             request.CurrentUserId, kind, transactionTable, transactionTableExists,
-            instanceId: null, transactionId: null);
+            instanceId: null, transactionId: null, keepStageRows);
 
     private static (string WhereSql, List<NpgsqlParameter> Parameters) BuildUserFilter(
         LegacyMailboxListRequest request,
         string transactionTable,
-        bool transactionTableExists) =>
+        bool transactionTableExists,
+        bool keepStageRows = false) =>
         BuildUserFilterCore(
             request.CurrentUserId,
             request.Kind,
             transactionTable,
             transactionTableExists,
             request.InstanceId,
-            request.TransactionId);
+            request.TransactionId,
+            keepStageRows);
+
+    private static bool KeepMjbStageRows(Guid workflowId) =>
+        workflowId == MjbUsAgent.WorkflowId;
 
     private static (string WhereSql, List<NpgsqlParameter> Parameters) BuildUserFilterCore(
         Guid currentUserId,
@@ -573,7 +582,8 @@ EXISTS (
         string transactionTable,
         bool transactionTableExists,
         Guid? instanceId,
-        string? transactionId)
+        string? transactionId,
+        bool keepStageRows = false)
     {
         var userId = currentUserId.ToString("D");
         var whereParts = new List<string>();
@@ -598,7 +608,7 @@ EXISTS (
         {
             whereParts.Add(BuildMailboxUserMatchSql("m"));
             if (transactionTableExists)
-                whereParts.AddRange(BuildTransactionStateFilter(kind, transactionTable));
+                whereParts.AddRange(BuildTransactionStateFilter(kind, transactionTable, keepStageRows));
         }
 
         if (instanceId is Guid instanceGuid && instanceGuid != Guid.Empty)
@@ -727,7 +737,8 @@ NOT EXISTS (
     /// </summary>
     private static IEnumerable<string> BuildTransactionStateFilter(
         LegacyMailboxTableKind kind,
-        string transactionTable)
+        string transactionTable,
+        bool keepStageRows = false)
     {
         var instanceJoin = $"{TryCastInstanceId("m.workflow_instance_id")} = tx.workflow_instance_id";
         var participantMatch = BuildTransactionParticipantMatchSql("tx");
@@ -765,7 +776,9 @@ EXISTS (
 )
 """;
                 // Same user still has an open inbox task — show inbox only, not sent.
-                yield return BuildSentExcludeOpenInboxForCurrentUserFilter(transactionTable);
+                // MJB keeps the finished stage in sent while the next agent step is in inbox.
+                if (!keepStageRows)
+                    yield return BuildSentExcludeOpenInboxForCurrentUserFilter(transactionTable);
                 break;
             case LegacyMailboxTableKind.Completed:
                 yield return $"""
@@ -844,14 +857,21 @@ LEFT JOIN LATERAL (
         string whereSql,
         string agentJoin,
         string currentStageJoin,
-        bool latestOnlyPerInstance)
+        bool latestOnlyPerInstance,
+        bool useRowStage = false)
     {
-        // stage/stageType always reflect the ticket's current stage (not the historical mailbox row stage).
-        const string selectColumns = """
+        // Other workflows show the ticket's current stage. MJB shows the stage stored on that inbox/sent/completed row.
+        var stageTypeSql = useRowStage
+            ? "m.stage_type AS stage_type"
+            : "COALESCE(cs.current_stage_type, m.stage_type) AS stage_type";
+        var stageSql = useRowStage
+            ? "m.stage AS stage"
+            : "COALESCE(cs.current_stage_name, m.stage) AS stage";
+        var selectColumns = $"""
     m.id, m.user_id, m.group_id, m.workflow_id, m.name, m.workflow_instance_id, m.reference_number, m.created_at_utc, m.started_at_utc, m.completed_at_utc, m.context,
     m.transaction_id, m.activity_id, m.rule_id,
-    COALESCE(cs.current_stage_type, m.stage_type) AS stage_type,
-    COALESCE(cs.current_stage_name, m.stage) AS stage,
+    {stageTypeSql},
+    {stageSql},
     m.review,
     m.transaction_created_at, m.transaction_created_by, m.transaction_created_by_email,
     m.transaction_modified_at, m.transaction_modified_by,
@@ -868,6 +888,9 @@ LEFT JOIN LATERAL (
     COALESCE(av.agent_html_response, '') AS agent_html,
     av.qualify_agent_response,
     av.quote_agent_response,
+    av.classification_agent_response,
+    av.ocr_agent_response,
+    av.ftp_agent_response,
     COALESCE(m."action", 1) AS action
 """;
 
@@ -1023,7 +1046,10 @@ ORDER BY m.transaction_created_at DESC, m.id DESC;";
             AgentHtml: reader.IsDBNull(40) ? null : reader.GetString(40),
             QualifyAgentResponse: reader.FieldCount > 41 && !reader.IsDBNull(41) ? reader.GetString(41) : null,
             QuoteAgentResponse: reader.FieldCount > 42 && !reader.IsDBNull(42) ? reader.GetString(42) : null,
-            Action: reader.FieldCount > 43 && !reader.IsDBNull(43) ? reader.GetInt32(43) : 1);
+            ClassificationAgentResponse: reader.FieldCount > 43 && !reader.IsDBNull(43) ? reader.GetString(43) : null,
+            OcrAgentResponse: reader.FieldCount > 44 && !reader.IsDBNull(44) ? reader.GetString(44) : null,
+            FtpAgentResponse: reader.FieldCount > 45 && !reader.IsDBNull(45) ? reader.GetString(45) : null,
+            Action: reader.FieldCount > 46 && !reader.IsDBNull(46) ? reader.GetInt32(46) : 1);
 
     private static async Task<string> BuildAgentValidationApplyAsync(
         NpgsqlConnection connection,
@@ -1039,7 +1065,10 @@ LEFT JOIN LATERAL (
         NULL::text AS agent_response,
         NULL::text AS agent_html_response,
         NULL::text AS qualify_agent_response,
-        NULL::text AS quote_agent_response
+        NULL::text AS quote_agent_response,
+        NULL::text AS classification_agent_response,
+        NULL::text AS ocr_agent_response,
+        NULL::text AS ftp_agent_response
 ) av ON true
 """;
         }
@@ -1050,24 +1079,11 @@ LEFT JOIN LATERAL (
         a.workflow_id::text AS agent_validation_workflow_id,
         a.agent_response,
         a.agent_html_response,
-        (
-            SELECT q.agent_response
-            FROM workflow.{agentTableName} q
-            WHERE q.is_deleted = false
-              AND q.process_id = {TryCastInstanceId("m.workflow_instance_id")}
-              AND UPPER(TRIM(COALESCE(q.type, ''))) = 'QUALIFY_AGENT'
-            ORDER BY q.created_at DESC, q.id DESC
-            LIMIT 1
-        ) AS qualify_agent_response,
-        (
-            SELECT q.agent_response
-            FROM workflow.{agentTableName} q
-            WHERE q.is_deleted = false
-              AND q.process_id = {TryCastInstanceId("m.workflow_instance_id")}
-              AND UPPER(TRIM(COALESCE(q.type, ''))) = 'QUOTE_AGENT'
-            ORDER BY q.created_at DESC, q.id DESC
-            LIMIT 1
-        ) AS quote_agent_response
+        {AgentResponseByTypeSql(agentTableName, "'QUALIFY_AGENT'")} AS qualify_agent_response,
+        {AgentResponseByTypeSql(agentTableName, "'QUOTE_AGENT'")} AS quote_agent_response,
+        {AgentResponseByTypeSql(agentTableName, "'CLASSIFICATION_AGENT', 'CLASSIFICATION'")} AS classification_agent_response,
+        {AgentResponseByTypeSql(agentTableName, "'OCR', 'OCR_AGENT'")} AS ocr_agent_response,
+        {AgentResponseByTypeSql(agentTableName, "'FTP_AGENT', 'FTP'")} AS ftp_agent_response
     FROM workflow.{agentTableName} a
     WHERE a.is_deleted = false
       AND a.process_id = {TryCastInstanceId("m.workflow_instance_id")}
@@ -1075,4 +1091,16 @@ LEFT JOIN LATERAL (
     LIMIT 1
 ) av ON true";
     }
+
+    private static string AgentResponseByTypeSql(string agentTableName, string typeList) => $"""
+        (
+            SELECT q.agent_response
+            FROM workflow.{agentTableName} q
+            WHERE q.is_deleted = false
+              AND q.process_id = {TryCastInstanceId("m.workflow_instance_id")}
+              AND UPPER(TRIM(COALESCE(q.type, ''))) IN ({typeList})
+            ORDER BY q.created_at DESC, q.id DESC
+            LIMIT 1
+        )
+        """;
 }
