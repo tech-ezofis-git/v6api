@@ -71,6 +71,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             shareKind: ShareKinds.Item,
             sourceDashboardId: null,
             sourceWorkflowId: null,
+            externalOnly: true,
             cancellationToken);
 
     public async Task<CreateRepositoryItemShareResult> CreateFilterShareAsync(
@@ -107,6 +108,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             ShareKinds.Filter,
             sourceDashboardId: null,
             sourceWorkflowId: null,
+            externalOnly: true,
             cancellationToken);
     }
 
@@ -146,6 +148,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             shareKind: ShareKinds.Item,
             sourceDashboardId: null,
             sourceWorkflowId: null,
+            externalOnly: false,
             cancellationToken);
 
     public Task<CreateRepositoryItemShareResult> CreateDashboardShareAsync(
@@ -171,6 +174,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
             ShareKinds.Dashboard,
             dashboardId,
             workflowId,
+            externalOnly: true,
             cancellationToken);
 
     private async Task<CreateRepositoryItemShareResult> CreateShareInternalAsync(
@@ -188,6 +192,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         string shareKind,
         Guid? sourceDashboardId,
         Guid? sourceWorkflowId,
+        bool externalOnly,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(email) || email.IndexOf('@') < 1)
@@ -214,7 +219,11 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         Guid? guestUserId = null;
 
         if (provisionGuestUser)
-            guestUserId = await _guestProvisioning.EnsureGuestUserAsync(sourceTenantId, recipientEmail, cancellationToken);
+        {
+            var guest = await _guestProvisioning.EnsureGuestUserAsync(
+                sourceTenantId, recipientEmail, externalOnly, cancellationToken);
+            guestUserId = guest.UserId;
+        }
 
         // Existing tenant users (password/social already set) → isnew=false (skip set-password page).
         // New / incomplete guests → isnew=true.

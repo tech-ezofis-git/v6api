@@ -22,7 +22,7 @@ public static class AuthorizationPolicies
                     .RequireAuthenticatedUser()
                     .AddAuthenticationSchemes(authenticationSchemes))
             .AddPolicy(TenantUser, policy =>
-                policy.RequireRole("Admin", "TenantUser")
+                policy.RequireRole("Admin", "TenantUser", "ExternalUser")
                     .RequireAuthenticatedUser()
                     .AddAuthenticationSchemes(authenticationSchemes))
             .AddPolicy(AnyAuthenticated, policy =>
@@ -35,7 +35,7 @@ public static class AuthorizationPolicies
                 policy.RequireRole("Admin")
                     .RequireAuthenticatedUser())
             .AddPolicy(TenantUser, policy =>
-                policy.RequireRole("Admin", "TenantUser")
+                policy.RequireRole("Admin", "TenantUser", "ExternalUser")
                     .RequireAuthenticatedUser())
             .AddPolicy(AnyAuthenticated, policy =>
                 policy.RequireAuthenticatedUser());

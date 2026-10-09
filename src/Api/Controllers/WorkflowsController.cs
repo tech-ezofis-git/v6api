@@ -903,8 +903,8 @@ public sealed class WorkflowsController : ControllerBase
 
         try
         {
-            var guestUserId = await _guestProvisioning.EnsureGuestUserAsync(
-                tenantId, request.Email, cancellationToken);
+            var guestUserId = (await _guestProvisioning.EnsureGuestUserAsync(
+                tenantId, request.Email, externalOnly: false, cancellationToken)).UserId;
 
             var share = await _itemShares.CreateWorkflowInboxShareAsync(
                 tenantId,

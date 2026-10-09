@@ -23,9 +23,10 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
         _userTenantRegistry = userTenantRegistry;
     }
 
-    public async Task<Guid> EnsureGuestUserAsync(
+    public async Task<ProvisionedGuestUser> EnsureGuestUserAsync(
         Guid tenantId,
         string email,
+        bool externalOnly = false,
         CancellationToken cancellationToken = default)
     {
         var normalizedEmail = NormalizeEmail(email);
@@ -43,28 +44,120 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
                 && ResolveSocialProvider(existing) == null)
             {
                 existing.MarkConfigurationCompleted();
-                await context.SaveChangesAsync(cancellationToken);
             }
 
+            // File/sign invites must not turn a new recipient into a tenant user.
+            // Someone who already has a real account keeps that role.
+            if (externalOnly && IsAutoCreatedTenantGuest(existing))
+            {
+                existing.Update(role: User.RoleExternalUser, userType: "External");
+                await DetachTenantUserRoleAsync(context, existing.Id, cancellationToken);
+                await AttachExternalRoleAsync(context, tenantId, existing.Id, cancellationToken);
+            }
+
+            await context.SaveChangesAsync(cancellationToken);
             await _userTenantRegistry.AddOrUpdateAsync(normalizedEmail, tenantId, existing.Role, existing.Id, cancellationToken);
-            return existing.Id;
+            return new ProvisionedGuestUser(existing.Id, existing.Role);
         }
 
         var displayName = normalizedEmail.Split('@')[0];
+        var roleName = externalOnly ? User.RoleExternalUser : User.RoleTenantUser;
         var user = User.Create(
             tenantId,
             normalizedEmail,
             displayName,
-            User.RoleTenantUser,
-            authStrategy: User.AuthStrategyEzofis);
+            roleName,
+            authStrategy: User.AuthStrategyEzofis,
+            userType: externalOnly ? "External" : null);
         user.SetLoginType("EZOFIS");
         // Invite guests skip tenant onboarding wizard (Configuration=0 would send them to onboard).
         user.MarkConfigurationCompleted();
 
         context.Users.Add(user);
         await context.SaveChangesAsync(cancellationToken);
-        await _userTenantRegistry.AddOrUpdateAsync(normalizedEmail, tenantId, User.RoleTenantUser, user.Id, cancellationToken);
-        return user.Id;
+        if (externalOnly)
+            await AttachExternalRoleAsync(context, tenantId, user.Id, cancellationToken);
+        await context.SaveChangesAsync(cancellationToken);
+        await _userTenantRegistry.AddOrUpdateAsync(normalizedEmail, tenantId, roleName, user.Id, cancellationToken);
+        return new ProvisionedGuestUser(user.Id, roleName);
+    }
+
+    /// <summary>
+    /// True when this row was created by a share/sign invite and stored as TenantUser.
+    /// A password, social login, or a filled profile means they are already a real user.
+    /// </summary>
+    private static bool IsAutoCreatedTenantGuest(User user)
+    {
+        if (!string.Equals(user.Role, User.RoleTenantUser, StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrEmpty(user.PasswordHash) || ResolveSocialProvider(user) != null)
+            return false;
+        if (!string.IsNullOrWhiteSpace(user.UserType)
+            && !user.UserType.Equals("External", StringComparison.OrdinalIgnoreCase))
+            return false;
+        if (!string.IsNullOrWhiteSpace(user.EmployeeId)
+            || !string.IsNullOrWhiteSpace(user.Department)
+            || !string.IsNullOrWhiteSpace(user.JobTitle))
+            return false;
+
+        var localPart = user.Email.Split('@')[0];
+        return string.Equals(user.DisplayName?.Trim(), localPart, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static async Task DetachTenantUserRoleAsync(
+        UsersDbContext context,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var tenantRoleIds = await context.Roles
+            .Where(r => r.Name == User.RoleTenantUser)
+            .Select(r => r.Id)
+            .ToListAsync(cancellationToken);
+        if (tenantRoleIds.Count == 0)
+            return;
+
+        var links = await context.UserRoles
+            .Where(ur => ur.UserId == userId && tenantRoleIds.Contains(ur.RoleId))
+            .ToListAsync(cancellationToken);
+        if (links.Count > 0)
+            context.UserRoles.RemoveRange(links);
+    }
+
+    private static async Task AttachExternalRoleAsync(
+        UsersDbContext context,
+        Guid tenantId,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var role = await context.Roles
+            .Include(r => r.Permissions)
+            .FirstOrDefaultAsync(r => r.Name == User.RoleExternalUser, cancellationToken);
+
+        if (role == null)
+        {
+            role = Role.Create(
+                tenantId,
+                User.RoleExternalUser,
+                "External share or sign recipient. Can open the shared file and repository only.");
+            role.AssignPermissions(["folder"]);
+            context.Roles.Add(role);
+            await context.SaveChangesAsync(cancellationToken);
+        }
+        else
+        {
+            var folderOnly = role.Permissions.Count == 1
+                && role.Permissions.Any(p => p.PermissionKey.Equals("folder", StringComparison.OrdinalIgnoreCase));
+            if (!folderOnly)
+            {
+                role.ReplacePermissions(["folder"]);
+                await context.SaveChangesAsync(cancellationToken);
+            }
+        }
+
+        var linked = await context.UserRoles
+            .AnyAsync(ur => ur.UserId == userId && ur.RoleId == role.Id, cancellationToken);
+        if (!linked)
+            context.UserRoles.Add(UserRole.Create(tenantId, role.Id, userId));
     }
 
     public async Task<bool> RequiresPasswordSetupAsync(
