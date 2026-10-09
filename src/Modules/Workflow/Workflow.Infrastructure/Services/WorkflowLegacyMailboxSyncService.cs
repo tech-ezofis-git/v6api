@@ -3,6 +3,7 @@ using Npgsql;
 using NpgsqlTypes;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
+using SaaSApp.Workflow.Application.Workflows;
 
 namespace SaaSApp.Workflow.Infrastructure.Services;
 
@@ -254,18 +255,28 @@ WHERE t.id = @TransactionRowId;";
                 ? inboxTable
                 : sentTable;
 
+        // MJB keeps each finished step in sent. Other workflows still drop sent when the ticket completes
+        // and drop the actor's sent row when the same user receives the next inbox step.
+        var keepMjbStages = workflowId == MjbUsAgent.WorkflowId;
+
         // Keep mailbox aligned with workflow state: no stale inbox after approve; no inbox/sent after complete.
         if (targetTable == sentTable)
             await DeleteMailboxRowsForInstanceAsync(connection, workflowIdValue, workflowIdCompact, workflowInstanceId, workflowInstanceIdStr, inboxTable, cancellationToken);
         else if (targetTable == completedTable)
         {
             await DeleteMailboxRowsForInstanceAsync(connection, workflowIdValue, workflowIdCompact, workflowInstanceId, workflowInstanceIdStr, inboxTable, cancellationToken);
-            await DeleteMailboxRowsForInstanceAsync(connection, workflowIdValue, workflowIdCompact, workflowInstanceId, workflowInstanceIdStr, sentTable, cancellationToken);
+            if (!keepMjbStages)
+            {
+                await DeleteMailboxRowsForInstanceAsync(connection, workflowIdValue, workflowIdCompact, workflowInstanceId, workflowInstanceIdStr, sentTable, cancellationToken);
+            }
         }
         else
             await DeleteMailboxRowsForInstanceAsync(connection, workflowIdValue, workflowIdCompact, workflowInstanceId, workflowInstanceIdStr, inboxTable, cancellationToken);
 
-        if (targetTable == inboxTable && activityUserId is Guid assigneeId && assigneeId != Guid.Empty)
+        if (!keepMjbStages
+            && targetTable == inboxTable
+            && activityUserId is Guid assigneeId
+            && assigneeId != Guid.Empty)
             await DeleteSentRowsForInstanceAndUserAsync(
                 connection,
                 workflowIdValue,
