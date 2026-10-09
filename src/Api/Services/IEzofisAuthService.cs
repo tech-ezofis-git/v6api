@@ -45,6 +45,20 @@ public interface IEzofisAuthService
         string email,
         string provider,
         CancellationToken cancellationToken = default);
+
+    /// <summary>After a correct sign-invite OTP, issue the same API access token as share login.</summary>
+    Task<LoginResult> CompleteSignInviteOtpAsync(
+        string inviteToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>After a correct document-share OTP, issue the same API access token as share login.</summary>
+    Task<LoginResult> CompleteShareInviteOtpAsync(
+        string shareToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default);
 }
 
 /// <summary>Result of Ezofis login: success, 2FA required, or first-time password setup.</summary>

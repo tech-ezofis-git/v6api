@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Net;
 using System.Net.Mail;
 using System.Security.Cryptography;
@@ -17,6 +18,8 @@ namespace SaaSApp.Repository.Infrastructure.Services;
 
 public sealed class RepositoryItemShareService : IRepositoryItemShareService
 {
+    private static readonly ConcurrentDictionary<string, ShareOtpEntry> ShareOtps = new(StringComparer.OrdinalIgnoreCase);
+
     private readonly IDbContextFactory<CatalogDbContext> _catalogFactory;
     private readonly ITenantConnectionStringResolver _connectionResolver;
     private readonly IRepositoryItemQueryService _itemQuery;
@@ -649,6 +652,103 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
         }
     }
 
+    public async Task RequestShareOtpAsync(string shareToken, string email, CancellationToken cancellationToken = default)
+    {
+        var preview = await GetPreviewAsync(shareToken, cancellationToken)
+            ?? throw new InvalidOperationException("Share link not found or expired.");
+        var normalized = (email ?? "").Trim().ToLowerInvariant();
+        if (!string.Equals(preview.RecipientEmail, normalized, StringComparison.OrdinalIgnoreCase))
+            throw new ArgumentException("OTP is sent only to the email this content was shared with.");
+
+        var code = RandomNumberGenerator.GetInt32(100000, 1000000).ToString();
+        ShareOtps[ShareOtpKey(shareToken, normalized)] = new ShareOtpEntry(code, normalized, DateTime.UtcNow.AddMinutes(5));
+        var (html, plain) = EzofisOtpMail.Create(
+            normalized.Split('@')[0],
+            code,
+            "Here is your Ezofis sudo authentication code:",
+            "5 minutes");
+        await TrySendOtpEmailAsync(normalized, html, plain, cancellationToken);
+    }
+
+    public async Task<ExternalInviteVerifiedDto> VerifyShareOtpAsync(
+        string shareToken,
+        string email,
+        string otp,
+        CancellationToken cancellationToken = default)
+    {
+        var normalized = (email ?? "").Trim().ToLowerInvariant();
+        var code = (otp ?? "").Trim();
+        if (!ShareOtps.TryGetValue(ShareOtpKey(shareToken, normalized), out var entry)
+            || entry.ExpiresUtc < DateTime.UtcNow
+            || !string.Equals(entry.Code, code, StringComparison.Ordinal))
+            throw new UnauthorizedAccessException("The verification code is invalid or expired.");
+
+        var preview = await GetPreviewAsync(shareToken, cancellationToken)
+            ?? throw new UnauthorizedAccessException("Share link not found or expired.");
+        if (!string.Equals(preview.RecipientEmail, normalized, StringComparison.OrdinalIgnoreCase))
+            throw new UnauthorizedAccessException("Email does not match this share invite.");
+
+        ShareOtps.TryRemove(ShareOtpKey(shareToken, normalized), out _);
+        return new ExternalInviteVerifiedDto(preview.SourceTenantId, normalized);
+    }
+
+    private static string ShareOtpKey(string shareToken, string email) =>
+        shareToken.Trim() + "|" + email.Trim().ToLowerInvariant();
+
+    private sealed record ShareOtpEntry(string Code, string Email, DateTime ExpiresUtc);
+
+    private async Task TrySendOtpEmailAsync(
+        string recipientEmail,
+        string htmlBody,
+        string plainText,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            await using var catalog = await _catalogFactory.CreateDbContextAsync(cancellationToken);
+            var settings = await catalog.MailSettings
+                .AsNoTracking()
+                .Where(x => x.Preference == 1 && !x.Isdeleted)
+                .OrderByDescending(x => x.SettingId)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            if (settings == null
+                || string.IsNullOrWhiteSpace(settings.EmailId)
+                || string.IsNullOrWhiteSpace(settings.Password)
+                || string.IsNullOrWhiteSpace(settings.OutgoingServer)
+                || settings.OutgoingPort <= 0)
+            {
+                _logger.LogWarning("Share OTP email not sent: mailsettings not configured.");
+                return;
+            }
+
+            using var mail = new MailMessage
+            {
+                From = EzofisMailAddress.System(settings.EmailId),
+                Subject = EzofisOtpMail.Subject,
+                Body = string.Empty,
+                IsBodyHtml = false
+            };
+            mail.To.Add(recipientEmail);
+            mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(
+                plainText,
+                System.Text.Encoding.UTF8,
+                System.Net.Mime.MediaTypeNames.Text.Plain));
+            mail.AlternateViews.Add(AlternateView.CreateAlternateViewFromString(htmlBody, null, "text/html"));
+
+            using var smtp = new SmtpClient(settings.OutgoingServer, settings.OutgoingPort)
+            {
+                EnableSsl = true,
+                Credentials = new NetworkCredential(settings.EmailId, settings.Password)
+            };
+            await smtp.SendMailAsync(mail, cancellationToken);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Share OTP email failed for {Email}.", recipientEmail);
+        }
+    }
+
     private async Task<string?> GetTenantNameAsync(Guid tenantId, CancellationToken cancellationToken)
     {
         await using var catalog = await _catalogFactory.CreateDbContextAsync(cancellationToken);
@@ -671,7 +771,7 @@ public sealed class RepositoryItemShareService : IRepositoryItemShareService
 
         var emailQuery = Uri.EscapeDataString(recipientEmail);
         var isNewQuery = isNew ? "true" : "false";
-        return $"{baseUrl}{signInPath}?shareToken={Uri.EscapeDataString(shareToken)}&email={emailQuery}&isnew={isNewQuery}";
+        return $"{baseUrl}{signInPath}?shareToken={Uri.EscapeDataString(shareToken)}&email={emailQuery}&isnew={isNewQuery}&auth=otp";
     }
 
     private async Task TrySendShareEmailAsync(

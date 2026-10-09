@@ -114,6 +114,9 @@ public sealed record ShareInviteAuthInfo(
     IReadOnlyList<string> AllowedAuthMethods,
     string? LoginType);
 
+/// <summary>Invite email matched and OTP accepted. Caller issues the API access token.</summary>
+public sealed record ExternalInviteVerifiedDto(Guid TenantId, string Email);
+
 public sealed record RepositoryItemSharePreviewDto(
     string ShareToken,
     Guid SourceTenantId,
@@ -214,6 +217,16 @@ public interface IRepositoryItemShareService
 
     Task<RepositoryItemSharePreviewDto?> GetPreviewAsync(
         string shareToken,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>Send an OTP only when <paramref name="email"/> is the share recipient.</summary>
+    Task RequestShareOtpAsync(string shareToken, string email, CancellationToken cancellationToken = default);
+
+    /// <summary>Verify the share OTP. Returns the tenant and email for API token issuance.</summary>
+    Task<ExternalInviteVerifiedDto> VerifyShareOtpAsync(
+        string shareToken,
+        string email,
+        string otp,
         CancellationToken cancellationToken = default);
 
     /// <summary>Active shares for a logged-in recipient (so they can reopen without the email link).</summary>
