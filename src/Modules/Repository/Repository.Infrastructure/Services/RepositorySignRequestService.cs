@@ -122,7 +122,7 @@ public sealed class RepositorySignRequestService : IRepositorySignRequestService
                 : SignRequestSignerStatuses.Waiting;
             var token = GenerateToken();
             signerRows.Add((Guid.NewGuid(), s.Email, s.Name, s.Order, status, token));
-            await _guestProvisioning.EnsureGuestUserAsync(tenantId, s.Email, cancellationToken);
+            await _guestProvisioning.EnsureGuestUserAsync(tenantId, s.Email, externalOnly: true, cancellationToken);
         }
 
         await using (var connection = new NpgsqlConnection(RequireConnectionString()))

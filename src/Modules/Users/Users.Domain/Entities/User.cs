@@ -9,6 +9,8 @@ public sealed class User : Entity<Guid>, ITenantEntity
 {
     public const string RoleAdmin = "Admin";
     public const string RoleTenantUser = "TenantUser";
+    /// <summary>Share or sign recipient. File and repository only; not a tenant user.</summary>
+    public const string RoleExternalUser = "ExternalUser";
     public const string AuthStrategyEzofis = "Ezofis";
     public const string AuthStrategyGoogle = "Google";
     public const string AuthStrategyOffice365 = "Office365";

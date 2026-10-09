@@ -158,15 +158,15 @@ public sealed class EzofisAuthService : IEzofisAuthService
             throw new UnauthorizedAccessException("Password setup is not available for this account. Use login or social sign-in.");
         }
 
-        var userId = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
+        var guest = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), externalOnly: true, cancellationToken);
 
         var updated = await _guestProvisioning.SetFirstPasswordAsync(tenantId, email.Trim(), password, cancellationToken);
         if (!updated)
             throw new UnauthorizedAccessException("Unable to set password for this invite.");
 
         return new LoginSuccess(
-            userId,
-            GenerateJwt(userId, email.Trim().ToLowerInvariant(), email.Trim(), SaaSApp.Users.Domain.Entities.User.RoleTenantUser, tenantId),
+            guest.UserId,
+            GenerateJwt(guest.UserId, email.Trim().ToLowerInvariant(), email.Trim(), guest.Role, tenantId),
             "Bearer",
             (int)AccessTokenExpiry.TotalSeconds);
     }
@@ -214,7 +214,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
             throw new UnauthorizedAccessException("Social sign-in is not available for this share invite.");
         }
 
-        await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
+        await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), externalOnly: true, cancellationToken);
         await _guestProvisioning.ConfirmGuestSocialLoginAsync(tenantId, email.Trim(), provider, cancellationToken);
 
         return await SocialLoginAsync(email.Trim(), provider, tenantId, cancellationToken);
@@ -259,11 +259,11 @@ public sealed class EzofisAuthService : IEzofisAuthService
         string email,
         CancellationToken cancellationToken)
     {
-        var userId = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email, cancellationToken);
+        var guest = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email, externalOnly: true, cancellationToken);
         var normalized = email.Trim().ToLowerInvariant();
         return new LoginSuccess(
-            userId,
-            GenerateJwt(userId, normalized, email.Trim(), SaaSApp.Users.Domain.Entities.User.RoleTenantUser, tenantId),
+            guest.UserId,
+            GenerateJwt(guest.UserId, normalized, email.Trim(), guest.Role, tenantId),
             "Bearer",
             (int)AccessTokenExpiry.TotalSeconds);
     }
@@ -298,14 +298,14 @@ public sealed class EzofisAuthService : IEzofisAuthService
         if (!authInfo.AllowedAuthMethods.Contains("password_setup", StringComparer.OrdinalIgnoreCase))
             throw new UnauthorizedAccessException("Password setup is not available for this account. Use login or social sign-in.");
 
-        var userId = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
+        var guest = await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), externalOnly: true, cancellationToken);
         var updated = await _guestProvisioning.SetFirstPasswordAsync(tenantId, email.Trim(), password, cancellationToken);
         if (!updated)
             throw new UnauthorizedAccessException("Unable to set password for this invite.");
 
         return new LoginSuccess(
-            userId,
-            GenerateJwt(userId, email.Trim().ToLowerInvariant(), email.Trim(), SaaSApp.Users.Domain.Entities.User.RoleTenantUser, tenantId),
+            guest.UserId,
+            GenerateJwt(guest.UserId, email.Trim().ToLowerInvariant(), email.Trim(), guest.Role, tenantId),
             "Bearer",
             (int)AccessTokenExpiry.TotalSeconds);
     }
@@ -350,7 +350,7 @@ public sealed class EzofisAuthService : IEzofisAuthService
             throw new UnauthorizedAccessException("Social sign-in is not available for this sign invite.");
         }
 
-        await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), cancellationToken);
+        await _guestProvisioning.EnsureGuestUserAsync(tenantId, email.Trim(), externalOnly: true, cancellationToken);
         await _guestProvisioning.ConfirmGuestSocialLoginAsync(tenantId, email.Trim(), provider, cancellationToken);
         return await SocialLoginAsync(email.Trim(), provider, tenantId, cancellationToken);
     }

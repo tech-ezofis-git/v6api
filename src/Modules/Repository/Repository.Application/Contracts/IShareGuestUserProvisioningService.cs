@@ -1,15 +1,23 @@
 namespace SaaSApp.Repository.Application.Contracts;
 
+/// <summary>User row created or found for a share, sign, or workflow-inbox invite.</summary>
+public sealed record ProvisionedGuestUser(Guid UserId, string Role);
+
 /// <summary>
 /// Provisions invited external users into a tenant for workflow inbox file shares.
 /// Guest users are created without a password until they complete first-time setup.
 /// </summary>
 public interface IShareGuestUserProvisioningService
 {
-    /// <summary>Creates tenant user + catalog UserTenants row when missing. Idempotent.</summary>
-    Task<Guid> EnsureGuestUserAsync(
+    /// <summary>
+    /// Creates the user and catalog UserTenants row when missing. Idempotent.
+    /// <paramref name="externalOnly"/> creates a file/sign recipient with repository access only.
+    /// An email that already belongs to a real user keeps that user's role.
+    /// </summary>
+    Task<ProvisionedGuestUser> EnsureGuestUserAsync(
         Guid tenantId,
         string email,
+        bool externalOnly = false,
         CancellationToken cancellationToken = default);
 
     /// <summary>True when the user exists in the tenant but has no password hash yet (EZOFIS only).</summary>
