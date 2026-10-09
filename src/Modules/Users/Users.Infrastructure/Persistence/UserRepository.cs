@@ -1,4 +1,5 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using SaaSApp.Users.Application.Contracts;
 using SaaSApp.Users.Domain.Entities;
 
@@ -6,21 +7,28 @@ namespace SaaSApp.Users.Infrastructure.Persistence;
 
 public sealed class UserRepository : IUserRepository
 {
-    private readonly UsersDbContext _context;
+    private readonly IServiceProvider _services;
+    private UsersDbContext? _context;
 
-    public UserRepository(UsersDbContext context)
+    /// <summary>
+    /// UsersDbContext requires the request tenant connection. Share and sign OTP routes are anonymous
+    /// and only need this repository for login, so resolve the context on first use.
+    /// </summary>
+    public UserRepository(IServiceProvider services)
     {
-        _context = context;
+        _services = services;
     }
+
+    private UsersDbContext Context => _context ??= _services.GetRequiredService<UsersDbContext>();
 
     public async Task AddAsync(User user, CancellationToken cancellationToken = default)
     {
-        await _context.Users.AddAsync(user, cancellationToken);
+        await Context.Users.AddAsync(user, cancellationToken);
     }
 
     public async Task<User?> GetByIdAsync(Guid id, CancellationToken cancellationToken = default)
     {
-        return await _context.Users
+        return await Context.Users
             .AsNoTracking()
             .FirstOrDefaultAsync(u => u.Id == id, cancellationToken);
     }
@@ -30,7 +38,7 @@ public sealed class UserRepository : IUserRepository
         if (ids.Count == 0)
             return [];
 
-        return await _context.Users
+        return await Context.Users
             .AsNoTracking()
             .Where(u => ids.Contains(u.Id))
             .ToListAsync(cancellationToken);
@@ -39,7 +47,7 @@ public sealed class UserRepository : IUserRepository
     public async Task<User?> GetByEmailAsync(string email, CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(email)) return null;
-        return await _context.Users
+        return await Context.Users
             .AsNoTracking()
             .FirstOrDefaultAsync(u => u.Email == email.Trim(), cancellationToken);
     }
@@ -54,14 +62,14 @@ public sealed class UserRepository : IUserRepository
         if (byEmail != null)
             return byEmail;
 
-        return await _context.Users
+        return await Context.Users
             .AsNoTracking()
             .FirstOrDefaultAsync(u => u.DisplayName == value, cancellationToken);
     }
 
     public async Task<IReadOnlyList<User>> ListAsync(CancellationToken cancellationToken = default)
     {
-        return await _context.Users
+        return await Context.Users
             .AsNoTracking()
             .OrderBy(u => u.DisplayName)
             .ToListAsync(cancellationToken);
@@ -72,7 +80,7 @@ public sealed class UserRepository : IUserRepository
         if (ids.Count == 0)
             return 0;
 
-        return await _context.Users
+        return await Context.Users
             .AsNoTracking()
             .CountAsync(u => ids.Contains(u.Id), cancellationToken);
     }
@@ -83,7 +91,7 @@ public sealed class UserRepository : IUserRepository
         CancellationToken cancellationToken = default)
     {
         var oldNormalized = oldRoleName.Trim().ToLowerInvariant();
-        var users = await _context.Users
+        var users = await Context.Users
             .Where(u => u.Role.ToLower() == oldNormalized)
             .ToListAsync(cancellationToken);
 
@@ -102,7 +110,7 @@ public sealed class UserRepository : IUserRepository
             return [];
 
         // Broad filter; exact token match is applied in memory for comma-separated Role values.
-        var candidates = await _context.Users
+        var candidates = await Context.Users
             .Where(u => u.Role == trimmed || u.Role.Contains(trimmed))
             .ToListAsync(cancellationToken);
 
@@ -131,11 +139,11 @@ public sealed class UserRepository : IUserRepository
 
     public void Update(User user)
     {
-        _context.Users.Update(user);
+        Context.Users.Update(user);
     }
 
     public void Delete(User user)
     {
-        _context.Users.Remove(user);
+        Context.Users.Remove(user);
     }
 }
