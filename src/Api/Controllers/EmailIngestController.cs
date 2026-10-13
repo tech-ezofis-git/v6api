@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Authorization;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.AspNetCore.Mvc;
 using SaaSApp.Security;
 using SaaSApp.Workflow.Application.Connectors;
@@ -11,14 +12,20 @@ namespace SaaSApp.Api.Controllers;
 [Authorize(Policy = AuthorizationPolicies.TenantUser)]
 public sealed class EmailIngestController : ControllerBase
 {
-    private readonly IEmailIngestService _emailIngest;
+    private readonly IServiceProvider _services;
     private readonly IGmailPushService _gmailPush;
 
-    public EmailIngestController(IEmailIngestService emailIngest, IGmailPushService gmailPush)
+    public EmailIngestController(IServiceProvider services, IGmailPushService gmailPush)
     {
-        _emailIngest = emailIngest;
+        _services = services;
         _gmailPush = gmailPush;
     }
+
+    /// <summary>
+    /// Mailbox actions need the tenant database. The anonymous Gmail push does not,
+    /// so this stays lazy and is not opened while Pub/Sub calls /gmail/push.
+    /// </summary>
+    private IEmailIngestService EmailIngest => _services.GetRequiredService<IEmailIngestService>();
 
     /// <summary>Google Pub/Sub push. When mail arrives, poll the linked mailbox and start the workflow.</summary>
     [AllowAnonymous]
@@ -47,7 +54,7 @@ public sealed class EmailIngestController : ControllerBase
     [ProducesResponseType(typeof(IReadOnlyList<EmailIngestMailboxDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> List(CancellationToken cancellationToken)
     {
-        var items = await _emailIngest.ListMailboxesAsync(cancellationToken);
+        var items = await EmailIngest.ListMailboxesAsync(cancellationToken);
         return Ok(items);
     }
 
@@ -56,7 +63,7 @@ public sealed class EmailIngestController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Get(Guid id, CancellationToken cancellationToken)
     {
-        var item = await _emailIngest.GetMailboxAsync(id, cancellationToken);
+        var item = await EmailIngest.GetMailboxAsync(id, cancellationToken);
         return item == null ? NotFound() : Ok(item);
     }
 
@@ -66,7 +73,7 @@ public sealed class EmailIngestController : ControllerBase
     {
         try
         {
-            var created = await _emailIngest.CreateMailboxAsync(request, cancellationToken);
+            var created = await EmailIngest.CreateMailboxAsync(request, cancellationToken);
             return CreatedAtAction(nameof(Get), new { id = created.Id }, created);
         }
         catch (InvalidOperationException ex)
@@ -82,7 +89,7 @@ public sealed class EmailIngestController : ControllerBase
     {
         try
         {
-            var updated = await _emailIngest.UpdateMailboxAsync(id, request, cancellationToken);
+            var updated = await EmailIngest.UpdateMailboxAsync(id, request, cancellationToken);
             return updated == null ? NotFound() : Ok(updated);
         }
         catch (InvalidOperationException ex)
@@ -96,7 +103,7 @@ public sealed class EmailIngestController : ControllerBase
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> Delete(Guid id, CancellationToken cancellationToken)
     {
-        var ok = await _emailIngest.DeleteMailboxAsync(id, cancellationToken);
+        var ok = await EmailIngest.DeleteMailboxAsync(id, cancellationToken);
         return ok ? NoContent() : NotFound();
     }
 
@@ -107,7 +114,7 @@ public sealed class EmailIngestController : ControllerBase
     {
         try
         {
-            var result = await _emailIngest.PollMailboxAsync(id, cancellationToken);
+            var result = await EmailIngest.PollMailboxAsync(id, cancellationToken);
             return Ok(result);
         }
         catch (InvalidOperationException ex)
