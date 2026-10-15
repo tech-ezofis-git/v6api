@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using Npgsql;
 using NpgsqlTypes;
 using Microsoft.Extensions.Logging;
@@ -9,7 +10,7 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 
 /// <summary>
 /// Routes transaction rows to workflow.inbox_*, sent_*, or completed_*.
-/// Deduplicates by workflowId + workflowInstanceId + activityId (delete all matches, then insert one row).
+/// Deduplicates by workflowId + workflowInstanceId + activityId (delete matches, then insert one inbox row per user on the step).
 /// </summary>
 public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyncService
 {
@@ -57,6 +58,74 @@ public sealed class WorkflowLegacyMailboxSyncService : IWorkflowLegacyMailboxSyn
         await connection.OpenAsync(cancellationToken);
         await SyncTransactionRowAsync(
             workflowId, transactionRowId, connection, formOverride: null, cancellationToken, inboxAction, ownerMailboxCopy);
+    }
+
+    public async Task EnsureConfiguredAssigneesAsync(Guid workflowId, CancellationToken cancellationToken = default)
+    {
+        var connectionString = _tenantContext.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return;
+
+        var suffix = workflowId.ToString("N")[..8];
+        var transactionTable = $"workflow.transaction_{suffix}";
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        await using (var alter = new NpgsqlCommand(
+            $"ALTER TABLE {transactionTable} ADD COLUMN IF NOT EXISTS user_ids text NULL;",
+            connection))
+        {
+            try
+            {
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+            }
+            catch (PostgresException ex) when (ex.SqlState == "42P01")
+            {
+                return;
+            }
+        }
+
+        var openRows = new List<(int Id, string? ActivityId, string? UserIds)>();
+        var sql = $@"
+SELECT id, activity_id, user_ids
+FROM {transactionTable}
+WHERE is_deleted = false
+  AND action_status = 0
+  AND UPPER(TRIM(COALESCE(stage_type, ''))) <> 'END';";
+        await using (var cmd = new NpgsqlCommand(sql, connection))
+        await using (var reader = await cmd.ExecuteReaderAsync(cancellationToken))
+        {
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                openRows.Add((
+                    reader.GetInt32(0),
+                    reader.IsDBNull(1) ? null : reader.GetString(1),
+                    reader.IsDBNull(2) ? null : reader.GetString(2)));
+            }
+        }
+
+        var pending = new List<int>();
+        var usersByActivity = new Dictionary<string, IReadOnlyList<Guid>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var row in openRows)
+        {
+            var activityKey = row.ActivityId ?? string.Empty;
+            if (!usersByActivity.TryGetValue(activityKey, out var users))
+            {
+                users = await ListStepAssigneeUserIdsAsync(connection, workflowId, row.ActivityId, cancellationToken);
+                usersByActivity[activityKey] = users;
+            }
+            if (users.Count < 2)
+                continue;
+
+            var expected = string.Join(',', users.Select(id => id.ToString("D")));
+            if (string.Equals(row.UserIds, expected, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            pending.Add(row.Id);
+        }
+
+        foreach (var rowId in pending)
+            await SyncTransactionRowAsync(workflowId, rowId, cancellationToken);
     }
 
     public async Task SyncInstanceEndTransactionsAsync(
@@ -462,13 +531,21 @@ INSERT INTO {ownerTable}
             }
         }
 
+        var stepUserIds = targetTable == inboxTable
+            ? await ListStepAssigneeUserIdsAsync(connection, workflowId, activityId, cancellationToken)
+            : Array.Empty<Guid>();
+        if (stepUserIds.Count > 0)
+            await SetTransactionUserIdsAsync(connection, transactionTable, transactionRowId, stepUserIds, cancellationToken);
+
         // Submitter/initiator is not the next assignee: remove from Inbox (Forward puts them on Sent above).
+        // A user configured on the step stays on Inbox with the ticket.
         if (targetTable == inboxTable
             && createdByUserId is Guid submitterId
             && submitterId != Guid.Empty
             && activityUserId is Guid openUserId
             && openUserId != Guid.Empty
-            && submitterId != openUserId)
+            && submitterId != openUserId
+            && !stepUserIds.Contains(submitterId))
         {
             await DeleteMailboxRowsForInstanceAndUserAsync(
                 connection,
@@ -497,6 +574,44 @@ INSERT INTO {ownerTable}
                     txIdStr,
                     submitterId.ToString("D"),
                     action: 0,
+                    extras,
+                    cancellationToken);
+            }
+        }
+
+        if (targetTable == inboxTable && stepUserIds.Count > 1)
+        {
+            var primaryUserId = activityUserId ?? Guid.Empty;
+            foreach (var stepUserId in stepUserIds)
+            {
+                if (stepUserId == Guid.Empty || stepUserId == primaryUserId)
+                    continue;
+
+                if (!keepMjbStages)
+                {
+                    await DeleteSentRowsForInstanceAndUserAsync(
+                        connection,
+                        workflowIdValue,
+                        workflowIdCompact,
+                        workflowInstanceId,
+                        workflowInstanceIdStr,
+                        sentTable,
+                        stepUserId,
+                        cancellationToken);
+                }
+
+                await EnsureUserMailboxCopyAsync(
+                    connection,
+                    inboxTable,
+                    sourceSql,
+                    workflowId,
+                    workflowIdValue,
+                    workflowInstanceId,
+                    workflowInstanceIdStr,
+                    transactionRowId,
+                    txIdStr,
+                    stepUserId.ToString("D"),
+                    resolvedAction,
                     extras,
                     cancellationToken);
             }
@@ -554,6 +669,84 @@ INSERT INTO {ownerTable}
                     cancellationToken);
             }
         }
+    }
+
+    private static async Task<IReadOnlyList<Guid>> ListStepAssigneeUserIdsAsync(
+        NpgsqlConnection connection,
+        Guid workflowId,
+        string? activityId,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(activityId))
+            return Array.Empty<Guid>();
+
+        const string sql = """
+            SELECT "ApproversJson", "AssignedToUserId"
+            FROM workflow."WorkflowSteps"
+            WHERE "WorkflowId" = @WorkflowId
+              AND (
+                "ActivityId" = @ActivityId
+                OR "Id"::text = @ActivityId
+              )
+            LIMIT 1
+            """;
+
+        string? approversJson = null;
+        Guid? assignedToUserId = null;
+        await using (var cmd = new NpgsqlCommand(sql, connection))
+        {
+            cmd.Parameters.AddWithValue("@WorkflowId", workflowId);
+            cmd.Parameters.AddWithValue("@ActivityId", activityId);
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            if (!await reader.ReadAsync(cancellationToken))
+                return Array.Empty<Guid>();
+
+            approversJson = reader.IsDBNull(0) ? null : reader.GetString(0);
+            assignedToUserId = reader.IsDBNull(1) ? null : reader.GetGuid(1);
+        }
+
+        var users = new List<Guid>();
+        if (!string.IsNullOrWhiteSpace(approversJson))
+        {
+            try
+            {
+                var strings = JsonSerializer.Deserialize<string[]>(approversJson);
+                if (strings != null)
+                {
+                    foreach (var value in strings)
+                    {
+                        if (Guid.TryParse(value, out var userId) && userId != Guid.Empty && !users.Contains(userId))
+                            users.Add(userId);
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // Step JSON is not a user-id array; fall back to the single assignee.
+            }
+        }
+
+        if (users.Count == 0 && assignedToUserId is Guid single && single != Guid.Empty)
+            users.Add(single);
+
+        return users;
+    }
+
+    private static async Task SetTransactionUserIdsAsync(
+        NpgsqlConnection connection,
+        string transactionTable,
+        int transactionRowId,
+        IReadOnlyList<Guid> userIds,
+        CancellationToken cancellationToken)
+    {
+        var csv = string.Join(',', userIds.Select(id => id.ToString("D")));
+        var sql = $@"
+ALTER TABLE {transactionTable} ADD COLUMN IF NOT EXISTS user_ids text NULL;
+UPDATE {transactionTable} SET user_ids = @UserIds WHERE id = @Id;";
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@UserIds", csv);
+        cmd.Parameters.AddWithValue("@Id", transactionRowId);
+        await cmd.ExecuteNonQueryAsync(cancellationToken);
     }
 
     private static async Task EnsureUserMailboxCopyAsync(
