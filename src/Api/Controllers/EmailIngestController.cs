@@ -111,6 +111,7 @@ public sealed class EmailIngestController : ControllerBase
     /// <summary>
     /// One UI call. Open the returned <c>url</c>. After Office 365 sign-in the API creates the
     /// enquiry watch and sends the browser to <c>redirectUrl</c> with <c>connectionId</c> and <c>watchId</c>.
+    /// Branding defaults come from host WatchFox settings; optional body fields override them for this link.
     /// </summary>
     [HttpPost("watchfox/connect")]
     public async Task<IActionResult> ConnectOffice365(
@@ -119,11 +120,18 @@ public sealed class EmailIngestController : ControllerBase
     {
         try
         {
+            var branding = new WatchFoxConnectBranding(
+                request.AppName,
+                request.LogoUrl,
+                request.AccentColor,
+                request.SupportEmail,
+                request.HidePoweredBy);
             var link = await _watchFox.CreateMicrosoftConnectLinkAsync(
                 request.TenantId,
                 request.WorkflowId,
                 request.RedirectUrl,
-                cancellationToken);
+                cancellationToken,
+                branding);
             return Ok(link);
         }
         catch (InvalidOperationException ex)
@@ -244,6 +252,14 @@ public sealed class EmailIngestController : ControllerBase
     }
 }
 
-public sealed record WatchFoxConnectRequest(Guid TenantId, Guid WorkflowId, string? RedirectUrl);
+public sealed record WatchFoxConnectRequest(
+    Guid TenantId,
+    Guid WorkflowId,
+    string? RedirectUrl = null,
+    string? AppName = null,
+    string? LogoUrl = null,
+    string? AccentColor = null,
+    string? SupportEmail = null,
+    bool? HidePoweredBy = null);
 
 public sealed record WatchFoxStartWatchRequest(string ConnectionId, Guid TenantId, Guid WorkflowId);
