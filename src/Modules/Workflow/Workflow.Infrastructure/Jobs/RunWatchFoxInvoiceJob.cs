@@ -72,9 +72,9 @@ public sealed class RunWatchFoxInvoiceJob
                 if (!MjbUsAgent.IsThisWorkflow(workflow.Id, args.TenantId))
                     throw new InvalidOperationException("WatchFox invoice start is only wired for the MJB workflow.");
 
-                DateTime? received = args.ReceivedUnix is long unix and unix > 0
-                    ? DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime
-                    : null;
+                DateTime? received = null;
+                if (args.ReceivedUnix is long unix && unix > 0)
+                    received = DateTimeOffset.FromUnixTimeSeconds(unix).UtcDateTime;
 
                 var started = await services.GetRequiredService<IMjbUsMailWorkflowStarter>().StartAsync(
                     workflow,
