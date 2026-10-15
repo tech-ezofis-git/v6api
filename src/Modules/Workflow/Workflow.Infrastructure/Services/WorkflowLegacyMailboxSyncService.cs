@@ -935,14 +935,12 @@ WHERE uid IS NOT NULL AND BTRIM(uid) <> '' AND uid <> '00000000-0000-0000-0000-0
     INNER JOIN {instancesTable} wi ON wi.id = t.workflow_instance_id
     LEFT JOIN workflow.""Workflows"" w ON w.""Id"" = @WorkflowGuid AND w.""IsDeleted"" = false
     LEFT JOIN users.""Users"" cu ON cu.""Id"" = t.created_by AND cu.""IsDeleted"" = false
-    LEFT JOIN users.""Users"" au ON au.""Id"" = COALESCE(
-        CASE
-            WHEN @OverrideUserId IS NULL THEN NULL
-            WHEN btrim(@OverrideUserId) ~ '^[0-9a-fA-F]{{8}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{4}}-[0-9a-fA-F]{{12}}$'
-                THEN @OverrideUserId::uuid
-            ELSE NULL
-        END,
-        t.activity_user_id) AND au.""IsDeleted"" = false
+    LEFT JOIN users.""Users"" au ON au.""Id"" = CASE
+        WHEN NULLIF(BTRIM(COALESCE(@OverrideUserId::text, '')), '') IS NOT NULL
+             AND BTRIM(@OverrideUserId::text) ~ '{UuidGuard}'
+            THEN BTRIM(@OverrideUserId::text)::uuid
+        ELSE t.activity_user_id
+    END AND au.""IsDeleted"" = false
     WHERE t.id = @TransactionRowId AND t.is_deleted = false";
     }
 
