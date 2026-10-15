@@ -42,4 +42,17 @@ public sealed class WatchFoxOptions
     /// Removes "Powered by WatchFox". WatchFox allows this on Tracker and Alpha plans only.
     /// </summary>
     public bool HidePoweredBy { get; set; }
+
+    /// <summary>
+    /// Same Message-ID in several watched mailboxes: <c>off</c>, <c>flag</c>, or <c>skip</c> (first copy only).
+    /// </summary>
+    public string Duplicates { get; set; } = "skip";
+
+    /// <summary>
+    /// Later mail in a conversation already caught for this type: <c>off</c>, <c>flag</c>, or <c>skip</c>.
+    /// </summary>
+    public string FollowUps { get; set; } = "skip";
+
+    /// <summary>Conversation window in days for <see cref="FollowUps"/> (1–60).</summary>
+    public int FollowUpDays { get; set; } = 60;
 }
