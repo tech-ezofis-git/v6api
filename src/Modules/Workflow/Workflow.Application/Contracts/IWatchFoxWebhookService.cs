@@ -39,6 +39,7 @@ public interface IWatchFoxWebhookService
         string? status,
         string? connectionId,
         string? state,
+        string? returnUrl,
         CancellationToken cancellationToken = default);
 
     /// <summary>
