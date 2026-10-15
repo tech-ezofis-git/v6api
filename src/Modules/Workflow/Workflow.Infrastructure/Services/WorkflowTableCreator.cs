@@ -201,7 +201,9 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
         }
 
         var tableName = $"transaction_{suffix}";
-        var alterSql = $@"ALTER TABLE workflow.{tableName} ADD COLUMN IF NOT EXISTS transaction_guid uuid NULL;";
+        var alterSql = $@"
+ALTER TABLE workflow.{tableName} ADD COLUMN IF NOT EXISTS transaction_guid uuid NULL;
+ALTER TABLE workflow.{tableName} ADD COLUMN IF NOT EXISTS user_ids text NULL;";
         await using (var alterCmd = new NpgsqlCommand(alterSql, connection))
         {
             alterCmd.CommandTimeout = 120;
@@ -378,6 +380,7 @@ public sealed class WorkflowTableCreator : IWorkflowTableCreator
 DO $do$
 BEGIN
     IF EXISTS (SELECT 1 FROM information_schema.tables WHERE table_schema = 'workflow' AND table_name = '{table}') THEN
+        ALTER TABLE workflow.{table} ADD COLUMN IF NOT EXISTS user_ids text NULL;
         CREATE INDEX IF NOT EXISTS {idx}
             ON workflow.{table} (workflow_instance_id, is_deleted, action_status)
             INCLUDE (activity_user_id, created_by, stage_type, activity_group_id);

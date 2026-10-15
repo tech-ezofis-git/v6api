@@ -22,15 +22,18 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
     private readonly ITenantContext _tenantContext;
     private readonly IWorkflowEzfbFormDataLoader _formDataLoader;
     private readonly IRepositoryItemQueryService _repositoryItems;
+    private readonly IWorkflowLegacyMailboxSyncService _mailboxSync;
 
     public WorkflowLegacyMailboxQueryService(
         ITenantContext tenantContext,
         IWorkflowEzfbFormDataLoader formDataLoader,
-        IRepositoryItemQueryService repositoryItems)
+        IRepositoryItemQueryService repositoryItems,
+        IWorkflowLegacyMailboxSyncService mailboxSync)
     {
         _tenantContext = tenantContext;
         _formDataLoader = formDataLoader;
         _repositoryItems = repositoryItems;
+        _mailboxSync = mailboxSync;
     }
 
     public async Task<LegacyMailboxListResult> ListAsync(
@@ -50,6 +53,9 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
             LegacyMailboxTableKind.Completed => "completed",
             _ => throw new ArgumentOutOfRangeException(nameof(request.Kind))
         };
+        if (request.Kind == LegacyMailboxTableKind.Inbox)
+            await _mailboxSync.EnsureConfiguredAssigneesAsync(request.WorkflowId, cancellationToken);
+
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
@@ -118,6 +124,8 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
 
         var suffix = request.WorkflowId.ToString("N")[..8];
         var fullWorkflowKey = request.WorkflowId.ToString("N");
+        await _mailboxSync.EnsureConfiguredAssigneesAsync(request.WorkflowId, cancellationToken);
+
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
@@ -661,7 +669,18 @@ EXISTS (
 )
 """;
 
-    private static string BuildInboxAssigneeMatchSql(string alias) => $"""
+    private static string BuildInboxAssigneeMatchSql(string alias, bool matchConfiguredUsers = false)
+    {
+        var configuredUsers = matchConfiguredUsers
+            ? $"""
+    OR (
+        {alias}.user_ids IS NOT NULL
+        AND position(lower(@CurrentUserId) in lower({alias}.user_ids)) > 0
+    )
+"""
+            : "";
+
+        return $"""
 (
     {alias}.activity_user_id = @CurrentUserGuid
     OR (
@@ -673,9 +692,10 @@ EXISTS (
               AND gu."UserId" = @CurrentUserGuid
               AND gu."IsDeleted" = false
         )
-    )
+    ){configuredUsers}
 )
 """;
+    }
 
     private static string BuildTransactionParticipantMatchSql(string alias) => $"""
 (
@@ -699,7 +719,7 @@ EXISTS (
     private static IEnumerable<string> BuildInboxOpenTransactionFilter(string transactionTable)
     {
         var instanceJoin = $"{TryCastInstanceId("m.workflow_instance_id")} = tx.workflow_instance_id";
-        var assigneeMatch = BuildInboxAssigneeMatchSql("tx");
+        var assigneeMatch = BuildInboxAssigneeMatchSql("tx", matchConfiguredUsers: true);
         yield return $"""
 EXISTS (
     SELECT 1

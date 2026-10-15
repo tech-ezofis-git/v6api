@@ -21,6 +21,11 @@ public interface IWorkflowLegacyMailboxSyncService
         int? inboxAction = null,
         MailboxOwnerCopyKind ownerMailboxCopy = MailboxOwnerCopyKind.Inbox);
 
+    /// <summary>
+    /// Gives every user on the open step an inbox row. Safe to call before listing; skips rows already synced.
+    /// </summary>
+    Task EnsureConfiguredAssigneesAsync(Guid workflowId, CancellationToken cancellationToken = default);
+
     /// <summary>Syncs all END-stage transactions for a workflow instance (e.g. when workflow completes).</summary>
     Task SyncInstanceEndTransactionsAsync(
         Guid workflowId,
