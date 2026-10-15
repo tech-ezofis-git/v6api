@@ -294,6 +294,11 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
 
         await DeleteEnquiryWatchesAsync(connection, cancellationToken);
 
+        var options = _options.Value;
+        var duplicates = NormalizeWatchMode(options.Duplicates, "skip");
+        var followUps = NormalizeWatchMode(options.FollowUps, "skip");
+        var followUpDays = options.FollowUpDays is >= 1 and <= 60 ? options.FollowUpDays : 60;
+
         var payload = JsonSerializer.Serialize(new
         {
             connection_id = connection,
@@ -301,6 +306,12 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             include = new[] { "eml" },
             webhook_url = webhookUrl,
             webhook_secret = secret,
+            // Same email in several mailboxes: first copy only.
+            duplicates,
+            // Replies in a conversation already caught: do not send again.
+            follow_ups = followUps,
+            // Conversation window (days).
+            follow_up_days = followUpDays,
             metadata = new Dictionary<string, string>
             {
                 ["tenantId"] = tenantId.ToString("D"),
@@ -709,5 +720,11 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             return color.ToUpperInvariant();
 
         throw new InvalidOperationException("accentColor must be #RRGGBB.");
+    }
+
+    private static string NormalizeWatchMode(string? value, string fallback)
+    {
+        var mode = value?.Trim().ToLowerInvariant();
+        return mode is "off" or "flag" or "skip" ? mode : fallback;
     }
 }
