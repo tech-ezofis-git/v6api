@@ -139,9 +139,10 @@ public sealed class EmailIngestController : ControllerBase
         [FromQuery] string? status,
         [FromQuery(Name = "connection_id")] string? connectionId,
         [FromQuery] string? state,
+        [FromQuery(Name = "r")] string? returnUrl,
         CancellationToken cancellationToken)
     {
-        var back = await _watchFox.CompleteMicrosoftConnectAsync(status, connectionId, state, cancellationToken);
+        var back = await _watchFox.CompleteMicrosoftConnectAsync(status, connectionId, state, returnUrl, cancellationToken);
         return Redirect(back);
     }
 

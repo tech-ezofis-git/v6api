@@ -179,8 +179,8 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
         var payload = JsonSerializer.Serialize(new
         {
             provider = "m365",
-            redirect_url = ConnectCallbackUrl(),
-            state = EncodeConnectState(tenantId, workflowId, redirect),
+            redirect_url = ConnectCallbackUrl(redirect),
+            state = EncodeConnectState(tenantId, workflowId),
             metadata = new Dictionary<string, string>
             {
                 ["tenantId"] = tenantId.ToString("D"),
@@ -204,14 +204,17 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
         string? status,
         string? connectionId,
         string? state,
+        string? returnUrl,
         CancellationToken cancellationToken = default)
     {
-        if (!TryDecodeConnectState(state, out var tenantId, out var workflowId, out var redirect))
-            return AppendQuery("https://cloud.ezofis.com", new Dictionary<string, string?>
+        if (!TryDecodeConnectState(state, out var tenantId, out var workflowId))
+            return AppendQuery(NormalizeReturnUrl(returnUrl), new Dictionary<string, string?>
             {
                 ["status"] = "error",
                 ["error"] = "Office 365 connect state was missing."
             });
+
+        var redirect = NormalizeReturnUrl(returnUrl);
 
         if (!string.Equals(status, "connected", StringComparison.OrdinalIgnoreCase)
             || string.IsNullOrWhiteSpace(connectionId))
@@ -594,60 +597,42 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
         return from.Trim();
     }
 
-    private string ConnectCallbackUrl()
+    private string ConnectCallbackUrl(string returnUrl)
     {
         var webhook = _options.Value.WebhookUrl?.Trim();
         if (string.IsNullOrWhiteSpace(webhook))
             webhook = "https://cloud.ezofis.com/api/email-ingest/watchfox";
-        return webhook.TrimEnd('/') + "/connected";
+        var callback = webhook.TrimEnd('/') + "/connected";
+        return AppendQuery(callback, new Dictionary<string, string?> { ["r"] = returnUrl });
     }
 
-    private static string EncodeConnectState(Guid tenantId, Guid workflowId, string redirectUrl)
-    {
-        var json = JsonSerializer.Serialize(new ConnectState(tenantId, workflowId, redirectUrl));
-        return Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
-            .TrimEnd('=')
-            .Replace('+', '-')
-            .Replace('/', '_');
-    }
+    /// <summary>64 hex characters. WatchFox allows at most 200 characters of state.</summary>
+    private static string EncodeConnectState(Guid tenantId, Guid workflowId) =>
+        tenantId.ToString("N") + workflowId.ToString("N");
 
-    private static bool TryDecodeConnectState(
-        string? state,
-        out Guid tenantId,
-        out Guid workflowId,
-        out string redirectUrl)
+    private static bool TryDecodeConnectState(string? state, out Guid tenantId, out Guid workflowId)
     {
         tenantId = Guid.Empty;
         workflowId = Guid.Empty;
-        redirectUrl = "https://cloud.ezofis.com";
         if (string.IsNullOrWhiteSpace(state))
             return false;
 
-        try
-        {
-            var padded = state.Trim().Replace('-', '+').Replace('_', '/');
-            padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
-            var json = Encoding.UTF8.GetString(Convert.FromBase64String(padded));
-            var parsed = JsonSerializer.Deserialize<ConnectState>(json);
-            if (parsed == null || parsed.TenantId == Guid.Empty || parsed.WorkflowId == Guid.Empty)
-                return false;
-            if (!Uri.TryCreate(parsed.RedirectUrl, UriKind.Absolute, out var redirect)
-                || redirect.Scheme != Uri.UriSchemeHttps)
-                return false;
+        var compact = state.Trim();
+        if (compact.Length != 64)
+            return false;
 
-            tenantId = parsed.TenantId;
-            workflowId = parsed.WorkflowId;
-            redirectUrl = parsed.RedirectUrl;
-            return true;
-        }
-        catch (FormatException)
-        {
-            return false;
-        }
-        catch (JsonException)
-        {
-            return false;
-        }
+        return Guid.TryParseExact(compact[..32], "N", out tenantId)
+            && tenantId != Guid.Empty
+            && Guid.TryParseExact(compact[32..], "N", out workflowId)
+            && workflowId != Guid.Empty;
+    }
+
+    private static string NormalizeReturnUrl(string? returnUrl)
+    {
+        if (Uri.TryCreate(returnUrl, UriKind.Absolute, out var redirect)
+            && redirect.Scheme == Uri.UriSchemeHttps)
+            return returnUrl!.Trim();
+        return "https://cloud.ezofis.com";
     }
 
     private static string AppendQuery(string redirect, IReadOnlyDictionary<string, string?> query)
@@ -666,8 +651,6 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
         var separator = redirect.Contains('?', StringComparison.Ordinal) ? "&" : "?";
         return redirect + separator + string.Join("&", parts);
     }
-
-    private sealed record ConnectState(Guid TenantId, Guid WorkflowId, string RedirectUrl);
 
     private static string Truncate(string value, int max) =>
         value.Length <= max ? value : value[..max];
