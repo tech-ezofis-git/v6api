@@ -294,6 +294,10 @@ public sealed class WorkflowSecurityService : IWorkflowSecurityService
         Guid userId,
         CancellationToken cancellationToken = default)
     {
+        // WatchFox and email ingest start tickets as this user. It is not a mailbox login.
+        if (userId == EmailIngestActorResolver.SystemUserId)
+            return true;
+
         if (await IsUnrestrictedUserAsync(userId, cancellationToken))
             return true;
 
