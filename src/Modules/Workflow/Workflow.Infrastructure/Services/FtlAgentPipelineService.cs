@@ -98,7 +98,14 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         };
 
         var storedJson = PreferLongestQuoteLineItems(StripPdf(responseJson));
-        EnsureAgentOutput(args.Mode, storedJson);
+        var synthesizedQualifier = false;
+        storedJson = NormalizeAgentOutput(args.Mode, storedJson, ref synthesizedQualifier);
+        if (synthesizedQualifier)
+        {
+            _logger.LogWarning(
+                "FTL qualifier response for instance {InstanceId} did not include qualifier_result. The ticket will still move.",
+                args.InstanceId);
+        }
         if (string.Equals(args.Mode, FtlAgentStepDetector.Quote, StringComparison.OrdinalIgnoreCase))
         {
             _logger.LogInformation(
@@ -193,7 +200,9 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 args.InstanceId,
                 args.ActivityId,
                 Review: review,
-                Comments: $"FTL {args.Mode}",
+                Comments: synthesizedQualifier
+                    ? "Qualifier agent did not return a result."
+                    : $"FTL {args.Mode}",
                 ActivityUserId: args.UserId,
                 FormId: formId,
                 FormEntryId: formEntryId,
@@ -798,18 +807,145 @@ LIMIT 1;
     private static Guid? ParseGuid(string? value) =>
         Guid.TryParse(value, out var id) && id != Guid.Empty ? id : null;
 
-    private static void EnsureAgentOutput(string mode, string json)
+    /// <summary>
+    /// Keeps a real qualifier_result or quote_result. A qualifier reply with no result object
+    /// still moves: the human qualify step receives a short placeholder instead of a failed job.
+    /// </summary>
+    private static string NormalizeAgentOutput(string mode, string json, ref bool synthesized)
     {
-        using var doc = JsonDocument.Parse(json);
-        var resultName = string.Equals(mode, FtlAgentStepDetector.Qualifier, StringComparison.OrdinalIgnoreCase)
-            ? "qualifier_result"
-            : "quote_result";
-        var result = FindRootOrNestedObject(doc.RootElement, resultName);
-        if (result.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        var root = JsonNode.Parse(json) as JsonObject
+            ?? throw new InvalidOperationException($"FTL {mode} response was not a JSON object. The ticket was not moved.");
+
+        var isQualifier = string.Equals(mode, FtlAgentStepDetector.Qualifier, StringComparison.OrdinalIgnoreCase);
+        var resultName = isQualifier ? "qualifier_result" : "quote_result";
+        if (TryCloneResultObject(root, resultName, out var result))
+        {
+            root[resultName] = result;
+            return root.ToJsonString();
+        }
+
+        if (isQualifier && TryCloneQualifyObject(root, out var recovered))
+        {
+            root[resultName] = recovered;
+            return root.ToJsonString();
+        }
+
+        if (!isQualifier)
         {
             throw new InvalidOperationException(
                 $"FTL {mode} response did not include {resultName}. The ticket was not moved.");
         }
+
+        synthesized = true;
+        var reply = root["reply"] is JsonValue replyValue && replyValue.TryGetValue<string>(out var replyText)
+            ? replyText?.Trim()
+            : null;
+        root[resultName] = new JsonObject
+        {
+            ["Qualify"] = "Qualify",
+            ["Reasoning"] = string.IsNullOrWhiteSpace(reply)
+                ? "Qualifier agent did not return qualifier_result."
+                : Truncate(reply, 500)
+        };
+        return root.ToJsonString();
+    }
+
+    private static bool TryCloneResultObject(JsonNode? node, string name, out JsonObject result)
+    {
+        result = null!;
+        if (!TryFindNamed(node, name, out var found))
+            return false;
+
+        if (found is JsonValue value && value.TryGetValue<string>(out var text) && !string.IsNullOrWhiteSpace(text))
+        {
+            if (JsonNode.Parse(text) is JsonObject parsed)
+            {
+                result = parsed;
+                return true;
+            }
+
+            return false;
+        }
+
+        if (found is JsonObject obj)
+        {
+            result = (JsonObject)JsonNode.Parse(obj.ToJsonString())!;
+            return true;
+        }
+
+        return false;
+    }
+
+    private static bool TryFindNamed(JsonNode? node, string name, out JsonNode found)
+    {
+        found = null!;
+        if (node is JsonObject obj)
+        {
+            foreach (var prop in obj)
+            {
+                if (!prop.Key.Equals(name, StringComparison.OrdinalIgnoreCase) || prop.Value is null)
+                    continue;
+                found = prop.Value;
+                return true;
+            }
+
+            foreach (var prop in obj)
+            {
+                if (TryFindNamed(prop.Value, name, out found))
+                    return true;
+            }
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (var item in array)
+            {
+                if (TryFindNamed(item, name, out found))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool TryCloneQualifyObject(JsonNode? node, out JsonObject found)
+    {
+        found = null!;
+        if (node is JsonObject obj)
+        {
+            var hasQualify = false;
+            var isEnvelope = false;
+            foreach (var prop in obj)
+            {
+                if (prop.Key.Equals("Qualify", StringComparison.OrdinalIgnoreCase) && prop.Value is not null)
+                    hasQualify = true;
+                if (prop.Key.Equals("session_id", StringComparison.OrdinalIgnoreCase)
+                    || prop.Key.Equals("qualifier_result", StringComparison.OrdinalIgnoreCase)
+                    || prop.Key.Equals("quote_result", StringComparison.OrdinalIgnoreCase))
+                    isEnvelope = true;
+            }
+
+            if (hasQualify && !isEnvelope)
+            {
+                found = (JsonObject)JsonNode.Parse(obj.ToJsonString())!;
+                return true;
+            }
+
+            foreach (var prop in obj)
+            {
+                if (TryCloneQualifyObject(prop.Value, out found))
+                    return true;
+            }
+        }
+        else if (node is JsonArray array)
+        {
+            foreach (var item in array)
+            {
+                if (TryCloneQualifyObject(item, out found))
+                    return true;
+            }
+        }
+
+        return false;
     }
 
     private static string ResolveQualifyReview(string json, WorkflowStep step)
