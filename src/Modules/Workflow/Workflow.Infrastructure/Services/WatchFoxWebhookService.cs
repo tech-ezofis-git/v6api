@@ -1,3 +1,4 @@
+using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
@@ -12,14 +13,19 @@ namespace SaaSApp.Workflow.Infrastructure.Services;
 
 public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
 {
+    private const string WatchFoxBaseUrl = "https://watchfox.run";
+
     private readonly IOptions<WatchFoxOptions> _options;
+    private readonly IHttpClientFactory _http;
     private readonly ILogger<WatchFoxWebhookService> _logger;
 
     public WatchFoxWebhookService(
         IOptions<WatchFoxOptions> options,
+        IHttpClientFactory http,
         ILogger<WatchFoxWebhookService> logger)
     {
         _options = options;
+        _http = http;
         _logger = logger;
     }
 
@@ -152,6 +158,201 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
 
         _logger.LogInformation("WatchFox enquiry file {FileName} queued for workflow {WorkflowId}.", safeName, workflowId);
         return Task.CompletedTask;
+    }
+
+    public async Task<WatchFoxConnectLinkResult> CreateMicrosoftConnectLinkAsync(
+        Guid tenantId,
+        Guid workflowId,
+        string? redirectUrl,
+        CancellationToken cancellationToken = default)
+    {
+        if (tenantId == Guid.Empty || workflowId == Guid.Empty)
+            throw new InvalidOperationException("tenantId and workflowId are required.");
+
+        var redirect = string.IsNullOrWhiteSpace(redirectUrl)
+            ? "https://cloud.ezofis.com"
+            : redirectUrl.Trim();
+        if (!Uri.TryCreate(redirect, UriKind.Absolute, out var redirectUri)
+            || redirectUri.Scheme != Uri.UriSchemeHttps)
+            throw new InvalidOperationException("redirectUrl must be an https address.");
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            provider = "m365",
+            redirect_url = ConnectCallbackUrl(),
+            state = EncodeConnectState(tenantId, workflowId, redirect),
+            metadata = new Dictionary<string, string>
+            {
+                ["tenantId"] = tenantId.ToString("D"),
+                ["enquiryWorkflowId"] = workflowId.ToString("D")
+            }
+        });
+
+        using var doc = await SendWatchFoxAsync(HttpMethod.Post, "/v1/connect-links", payload, cancellationToken);
+        var url = ReadString(doc.RootElement, "url");
+        if (string.IsNullOrWhiteSpace(url))
+            throw new InvalidOperationException("WatchFox did not return a Microsoft connect URL.");
+
+        var expiresIn = 3600;
+        if (doc.RootElement.TryGetProperty("expires_in", out var expires) && expires.TryGetInt32(out var seconds))
+            expiresIn = seconds;
+
+        return new WatchFoxConnectLinkResult(url, expiresIn);
+    }
+
+    public async Task<string> CompleteMicrosoftConnectAsync(
+        string? status,
+        string? connectionId,
+        string? state,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TryDecodeConnectState(state, out var tenantId, out var workflowId, out var redirect))
+            return AppendQuery("https://cloud.ezofis.com", new Dictionary<string, string?>
+            {
+                ["status"] = "error",
+                ["error"] = "Office 365 connect state was missing."
+            });
+
+        if (!string.Equals(status, "connected", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(connectionId))
+        {
+            return AppendQuery(redirect, new Dictionary<string, string?>
+            {
+                ["status"] = status ?? "error",
+                ["error"] = "Office 365 mailbox was not connected."
+            });
+        }
+
+        try
+        {
+            var watch = await CreateEnquiryWatchAsync(connectionId, tenantId, workflowId, cancellationToken);
+            return AppendQuery(redirect, new Dictionary<string, string?>
+            {
+                ["status"] = "connected",
+                ["connectionId"] = watch.ConnectionId,
+                ["watchId"] = watch.WatchId,
+                ["tenantId"] = watch.TenantId.ToString("D"),
+                ["workflowId"] = watch.WorkflowId.ToString("D")
+            });
+        }
+        catch (InvalidOperationException ex)
+        {
+            _logger.LogWarning(ex, "WatchFox enquiry watch was not created after Office 365 connect.");
+            return AppendQuery(redirect, new Dictionary<string, string?>
+            {
+                ["status"] = "error",
+                ["connectionId"] = connectionId,
+                ["error"] = ex.Message
+            });
+        }
+    }
+
+    public async Task<WatchFoxEnquiryWatchResult> CreateEnquiryWatchAsync(
+        string connectionId,
+        Guid tenantId,
+        Guid workflowId,
+        CancellationToken cancellationToken = default)
+    {
+        var connection = connectionId?.Trim() ?? string.Empty;
+        if (!connection.StartsWith("cn_", StringComparison.Ordinal) || tenantId == Guid.Empty || workflowId == Guid.Empty)
+            throw new InvalidOperationException("connectionId, tenantId, and workflowId are required.");
+
+        var secret = _options.Value.WebhookSecret?.Trim();
+        if (string.IsNullOrWhiteSpace(secret))
+            throw new InvalidOperationException("WatchFox:WebhookSecret is not configured.");
+
+        var webhookUrl = _options.Value.WebhookUrl?.Trim();
+        if (string.IsNullOrWhiteSpace(webhookUrl))
+            webhookUrl = "https://cloud.ezofis.com/api/email-ingest/watchfox";
+
+        await DeleteEnquiryWatchesAsync(connection, cancellationToken);
+
+        var payload = JsonSerializer.Serialize(new
+        {
+            connection_id = connection,
+            what = new[] { "enquiry" },
+            include = new[] { "eml" },
+            webhook_url = webhookUrl,
+            webhook_secret = secret,
+            metadata = new Dictionary<string, string>
+            {
+                ["tenantId"] = tenantId.ToString("D"),
+                ["enquiryWorkflowId"] = workflowId.ToString("D")
+            }
+        });
+
+        using var doc = await SendWatchFoxAsync(HttpMethod.Post, "/v1/watches", payload, cancellationToken);
+        var watchId = ReadString(doc.RootElement, "id");
+        if (string.IsNullOrWhiteSpace(watchId))
+            throw new InvalidOperationException("WatchFox did not return a watch id.");
+
+        _logger.LogInformation(
+            "WatchFox enquiry watch {WatchId} started for connection {ConnectionId} workflow {WorkflowId}.",
+            watchId,
+            connection,
+            workflowId);
+
+        return new WatchFoxEnquiryWatchResult(watchId, connection, tenantId, workflowId);
+    }
+
+    private async Task DeleteEnquiryWatchesAsync(string connectionId, CancellationToken cancellationToken)
+    {
+        using var doc = await SendWatchFoxAsync(HttpMethod.Get, "/v1/watches", null, cancellationToken);
+        if (doc.RootElement.ValueKind != JsonValueKind.Array)
+            return;
+
+        foreach (var watch in doc.RootElement.EnumerateArray())
+        {
+            var existingConnection = ReadString(watch, "connection_id");
+            if (!string.Equals(existingConnection, connectionId, StringComparison.Ordinal))
+                continue;
+
+            var isEnquiry = false;
+            if (watch.TryGetProperty("what", out var what) && what.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in what.EnumerateArray())
+                {
+                    var name = item.ValueKind == JsonValueKind.String ? item.GetString() : item.ToString();
+                    if (!string.IsNullOrWhiteSpace(name)
+                        && name.Contains("enquir", StringComparison.OrdinalIgnoreCase))
+                    {
+                        isEnquiry = true;
+                        break;
+                    }
+                }
+            }
+
+            var watchId = ReadString(watch, "id");
+            if (!isEnquiry || string.IsNullOrWhiteSpace(watchId))
+                continue;
+
+            using var deleted = await SendWatchFoxAsync(HttpMethod.Delete, $"/v1/watches/{watchId}", null, cancellationToken);
+            _logger.LogInformation("Removed previous WatchFox enquiry watch {WatchId}.", watchId);
+        }
+    }
+
+    private async Task<JsonDocument> SendWatchFoxAsync(
+        HttpMethod method,
+        string path,
+        string? json,
+        CancellationToken cancellationToken)
+    {
+        var apiKey = _options.Value.ApiKey?.Trim();
+        if (string.IsNullOrWhiteSpace(apiKey))
+            throw new InvalidOperationException("WatchFox:ApiKey is not configured.");
+
+        var client = _http.CreateClient(nameof(WatchFoxWebhookService));
+        using var request = new HttpRequestMessage(method, WatchFoxBaseUrl + path);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", apiKey);
+        if (json != null)
+            request.Content = new StringContent(json, Encoding.UTF8, "application/json");
+
+        using var response = await client.SendAsync(request, cancellationToken);
+        var body = await response.Content.ReadAsStringAsync(cancellationToken);
+        if (!response.IsSuccessStatusCode)
+            throw new InvalidOperationException($"WatchFox returned {(int)response.StatusCode}: {Truncate(body, 300)}");
+
+        return JsonDocument.Parse(string.IsNullOrWhiteSpace(body) ? "{}" : body);
     }
 
     private void QueueEnquiry(
@@ -392,6 +593,81 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             return from[(start + 1)..end].Trim();
         return from.Trim();
     }
+
+    private string ConnectCallbackUrl()
+    {
+        var webhook = _options.Value.WebhookUrl?.Trim();
+        if (string.IsNullOrWhiteSpace(webhook))
+            webhook = "https://cloud.ezofis.com/api/email-ingest/watchfox";
+        return webhook.TrimEnd('/') + "/connected";
+    }
+
+    private static string EncodeConnectState(Guid tenantId, Guid workflowId, string redirectUrl)
+    {
+        var json = JsonSerializer.Serialize(new ConnectState(tenantId, workflowId, redirectUrl));
+        return Convert.ToBase64String(Encoding.UTF8.GetBytes(json))
+            .TrimEnd('=')
+            .Replace('+', '-')
+            .Replace('/', '_');
+    }
+
+    private static bool TryDecodeConnectState(
+        string? state,
+        out Guid tenantId,
+        out Guid workflowId,
+        out string redirectUrl)
+    {
+        tenantId = Guid.Empty;
+        workflowId = Guid.Empty;
+        redirectUrl = "https://cloud.ezofis.com";
+        if (string.IsNullOrWhiteSpace(state))
+            return false;
+
+        try
+        {
+            var padded = state.Trim().Replace('-', '+').Replace('_', '/');
+            padded = padded.PadRight(padded.Length + (4 - padded.Length % 4) % 4, '=');
+            var json = Encoding.UTF8.GetString(Convert.FromBase64String(padded));
+            var parsed = JsonSerializer.Deserialize<ConnectState>(json);
+            if (parsed == null || parsed.TenantId == Guid.Empty || parsed.WorkflowId == Guid.Empty)
+                return false;
+            if (!Uri.TryCreate(parsed.RedirectUrl, UriKind.Absolute, out var redirect)
+                || redirect.Scheme != Uri.UriSchemeHttps)
+                return false;
+
+            tenantId = parsed.TenantId;
+            workflowId = parsed.WorkflowId;
+            redirectUrl = parsed.RedirectUrl;
+            return true;
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static string AppendQuery(string redirect, IReadOnlyDictionary<string, string?> query)
+    {
+        var parts = new List<string>();
+        foreach (var pair in query)
+        {
+            if (string.IsNullOrWhiteSpace(pair.Value))
+                continue;
+            parts.Add($"{Uri.EscapeDataString(pair.Key)}={Uri.EscapeDataString(pair.Value)}");
+        }
+
+        if (parts.Count == 0)
+            return redirect;
+
+        var separator = redirect.Contains('?', StringComparison.Ordinal) ? "&" : "?";
+        return redirect + separator + string.Join("&", parts);
+    }
+
+    private sealed record ConnectState(Guid TenantId, Guid WorkflowId, string RedirectUrl);
 
     private static string Truncate(string value, int max) =>
         value.Length <= max ? value : value[..max];

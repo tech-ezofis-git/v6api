@@ -108,6 +108,67 @@ public sealed class EmailIngestController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// One UI call. Open the returned <c>url</c>. After Office 365 sign-in the API creates the
+    /// enquiry watch and sends the browser to <c>redirectUrl</c> with <c>connectionId</c> and <c>watchId</c>.
+    /// </summary>
+    [HttpPost("watchfox/connect")]
+    public async Task<IActionResult> ConnectOffice365(
+        [FromBody] WatchFoxConnectRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var link = await _watchFox.CreateMicrosoftConnectLinkAsync(
+                request.TenantId,
+                request.WorkflowId,
+                request.RedirectUrl,
+                cancellationToken);
+            return Ok(link);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>WatchFox browser return. Creates the enquiry watch, then opens the UI page.</summary>
+    [AllowAnonymous]
+    [HttpGet("watchfox/connected")]
+    public async Task<IActionResult> Office365Connected(
+        [FromQuery] string? status,
+        [FromQuery(Name = "connection_id")] string? connectionId,
+        [FromQuery] string? state,
+        CancellationToken cancellationToken)
+    {
+        var back = await _watchFox.CompleteMicrosoftConnectAsync(status, connectionId, state, cancellationToken);
+        return Redirect(back);
+    }
+
+    /// <summary>
+    /// After Office 365 sign-in, start the Enquiries watch for <c>connectionId</c> (<c>cn_...</c>).
+    /// The connect button does this itself. This remains for a direct call.
+    /// </summary>
+    [HttpPost("watchfox/watches")]
+    public async Task<IActionResult> StartEnquiryWatch(
+        [FromBody] WatchFoxStartWatchRequest request,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var watch = await _watchFox.CreateEnquiryWatchAsync(
+                request.ConnectionId,
+                request.TenantId,
+                request.WorkflowId,
+                cancellationToken);
+            return Ok(watch);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     [HttpGet("mailboxes")]
     [ProducesResponseType(typeof(IReadOnlyList<EmailIngestMailboxDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> List(CancellationToken cancellationToken)
@@ -181,3 +242,7 @@ public sealed class EmailIngestController : ControllerBase
         }
     }
 }
+
+public sealed record WatchFoxConnectRequest(Guid TenantId, Guid WorkflowId, string? RedirectUrl);
+
+public sealed record WatchFoxStartWatchRequest(string ConnectionId, Guid TenantId, Guid WorkflowId);

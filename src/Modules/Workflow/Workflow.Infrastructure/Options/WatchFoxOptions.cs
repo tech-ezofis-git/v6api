@@ -22,4 +22,7 @@ public sealed class WatchFoxOptions
     /// FTL Enquiries watch. A new enquiry email starts this workflow with the .eml attached.
     /// </summary>
     public string EnquiryWorkflowId { get; set; } = "1325cf43-3902-426d-800f-ffde5bbfe0da";
+
+    /// <summary>Where WatchFox posts enquiry and invoice matches.</summary>
+    public string WebhookUrl { get; set; } = "https://cloud.ezofis.com/api/email-ingest/watchfox";
 }
