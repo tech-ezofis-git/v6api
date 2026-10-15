@@ -85,7 +85,14 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var agentTable = $"agent_data_validation_{suffix}";
         var agentJoin = await BuildAgentValidationApplyAsync(connection, agentTable, cancellationToken);
         var currentStageJoin = BuildCurrentStageJoin(transactionTable, transactionTableExists);
-        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance, keepStageRows);
+        var dataSql = BuildListSql(
+            tableFull,
+            whereSql,
+            agentJoin,
+            currentStageJoin,
+            latestOnlyPerInstance,
+            keepStageRows,
+            showViewerActions: request.Kind == LegacyMailboxTableKind.Inbox);
 
         if (request.SkipTotal)
         {
@@ -273,7 +280,13 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
         var agentTable = $"agent_data_validation_{suffix}";
         var agentJoin = await BuildAgentValidationApplyAsync(connection, agentTable, cancellationToken);
         var currentStageJoin = BuildCurrentStageJoin(transactionTable, transactionTableExists);
-        var dataSql = BuildListSql(tableFull, whereSql, agentJoin, currentStageJoin, latestOnlyPerInstance: true);
+        var dataSql = BuildListSql(
+            tableFull,
+            whereSql,
+            agentJoin,
+            currentStageJoin,
+            latestOnlyPerInstance: true,
+            showViewerActions: kind == LegacyMailboxTableKind.Inbox);
         var mailbox = kind switch
         {
             LegacyMailboxTableKind.Inbox => "inbox",
@@ -878,7 +891,8 @@ LEFT JOIN LATERAL (
         string agentJoin,
         string currentStageJoin,
         bool latestOnlyPerInstance,
-        bool useRowStage = false)
+        bool useRowStage = false,
+        bool showViewerActions = false)
     {
         // Other workflows show the ticket's current stage. MJB shows the stage stored on that inbox/sent/completed row.
         var stageTypeSql = useRowStage
@@ -887,6 +901,22 @@ LEFT JOIN LATERAL (
         var stageSql = useRowStage
             ? "m.stage AS stage"
             : "COALESCE(cs.current_stage_name, m.stage) AS stage";
+        // Inbox rows for every user on the step must look like that user's own task,
+        // otherwise the client hides approve/verify because activityUserEmail is the first user only.
+        var activityUserEmailSql = showViewerActions
+            ? """
+    CASE
+        WHEN m.user_id = @CurrentUserId AND COALESCE(m."action", 1) = 1
+            THEN COALESCE(viewer."Email", cs.current_activity_user_email, m.activity_user_email)
+        ELSE COALESCE(cs.current_activity_user_email, m.activity_user_email)
+    END AS activity_user_email
+"""
+            : "    COALESCE(cs.current_activity_user_email, m.activity_user_email) AS activity_user_email";
+        var viewerJoin = showViewerActions
+            ? """
+LEFT JOIN users."Users" viewer ON viewer."Id" = @CurrentUserGuid AND viewer."IsDeleted" = false
+"""
+            : "";
         var selectColumns = $"""
     m.id, m.user_id, m.group_id, m.workflow_id, m.name, m.workflow_instance_id, m.reference_number, m.created_at_utc, m.started_at_utc, m.completed_at_utc, m.context,
     m.transaction_id, m.activity_id, m.rule_id,
@@ -901,7 +931,7 @@ LEFT JOIN LATERAL (
     COALESCE(m.last_action_stage_name, m.stage) AS last_action_stage_name,
     m.last_action,
     m.comments_count, m.attachment_count,
-    COALESCE(cs.current_activity_user_email, m.activity_user_email) AS activity_user_email,
+    {activityUserEmailSql},
     m.activity_group_name,
     av.agent_validation_workflow_id,
     COALESCE(av.agent_response, '') AS agent_response,
@@ -921,6 +951,7 @@ SELECT
 {selectColumns}
 FROM {tableFull} m
 {currentStageJoin}
+{viewerJoin}
 {agentJoin}
 WHERE {whereSql}
 ORDER BY m.transaction_created_at DESC, m.id DESC
@@ -948,6 +979,7 @@ SELECT
 {selectColumns}
 FROM page_rows m
 {currentStageJoin}
+{viewerJoin}
 {agentJoin}
 ORDER BY m.transaction_created_at DESC, m.id DESC;";
     }
