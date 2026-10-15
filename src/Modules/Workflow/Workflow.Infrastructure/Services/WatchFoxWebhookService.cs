@@ -39,15 +39,17 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             return Task.CompletedTask;
         }
 
-        if (!IsInvoice(root))
+        var isInvoice = IsInvoice(root);
+        var isEnquiry = IsEnquiry(root);
+        if (!isInvoice && !isEnquiry)
         {
-            _logger.LogInformation("WatchFox event {EventId} is not an invoice. No ticket started.", ReadString(root, "id"));
+            _logger.LogInformation("WatchFox event {EventId} is not an invoice or enquiry. No ticket started.", ReadString(root, "id"));
             return Task.CompletedTask;
         }
 
         var tenantId = ReadMetaGuid(root, "tenantId", "tenant_id") ?? ParseGuid(options.TenantId);
         var workflowId = ReadMetaGuid(root, "workflowId", "workflow_id") ?? ParseGuid(options.WorkflowId);
-        if (tenantId == null || workflowId == null)
+        if (isInvoice && (tenantId == null || workflowId == null))
             throw new InvalidOperationException("WatchFox tenantId and workflowId are not configured.");
 
         if (!root.TryGetProperty("email", out var email) || email.ValueKind != JsonValueKind.Object)
@@ -65,7 +67,9 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             : null;
 
         var queued = 0;
-        if (email.TryGetProperty("attachments", out var attachments) && attachments.ValueKind == JsonValueKind.Array)
+        if (isInvoice
+            && email.TryGetProperty("attachments", out var attachments)
+            && attachments.ValueKind == JsonValueKind.Array)
         {
             foreach (var attachment in attachments.EnumerateArray())
             {
@@ -83,8 +87,8 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
                 var attachmentId = ReadString(attachment, "id") ?? queued.ToString();
                 var args = new WatchFoxInvoiceJobArgs(
                     EventKey: Truncate($"{eventId}:{attachmentId}", 160),
-                    TenantId: tenantId.Value,
-                    WorkflowId: workflowId.Value,
+                    TenantId: tenantId!.Value,
+                    WorkflowId: workflowId!.Value,
                     FileName: fileName,
                     ContentType: ReadString(attachment, "content_type"),
                     DownloadUrl: url,
@@ -98,12 +102,98 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             }
         }
 
-        if (queued == 0)
+        if (isInvoice && queued == 0)
             _logger.LogInformation("WatchFox invoice event {EventId} has no document attachment. No ticket started.", eventId);
-        else
+        else if (isInvoice)
             _logger.LogInformation("WatchFox invoice event {EventId} queued {Count} ticket start(s).", eventId, queued);
 
+        if (isEnquiry)
+            QueueEnquiry(options, root, email, eventId, tenantId, from, subject, messageId);
+
         return Task.CompletedTask;
+    }
+
+    public Task AcceptEnquiryFileAsync(
+        byte[] eml,
+        string fileName,
+        string? contentType,
+        string? signatureHeader,
+        string? signedPayload,
+        CancellationToken cancellationToken = default)
+    {
+        _ = cancellationToken;
+        if (eml == null || eml.Length == 0)
+            throw new InvalidOperationException("WatchFox enquiry .eml is empty.");
+
+        var options = _options.Value;
+        var secret = options.WebhookSecret?.Trim();
+        var signed = string.IsNullOrWhiteSpace(signedPayload) ? Convert.ToBase64String(eml) : signedPayload;
+        if (string.IsNullOrWhiteSpace(secret) || !SignatureMatches(secret, signed, signatureHeader))
+            throw new UnauthorizedAccessException("WatchFox signature is invalid.");
+
+        var tenantId = ParseGuid(options.TenantId);
+        var workflowId = ParseGuid(options.EnquiryWorkflowId);
+        if (tenantId == null || workflowId == null)
+            throw new InvalidOperationException("WatchFox tenantId and EnquiryWorkflowId are not configured.");
+
+        var safeName = string.IsNullOrWhiteSpace(fileName) ? "message.eml" : fileName.Trim();
+        var args = new WatchFoxEnquiryJobArgs(
+            EventKey: Truncate($"enquiry-file:{Guid.NewGuid():N}", 160),
+            TenantId: tenantId.Value,
+            WorkflowId: workflowId.Value,
+            FileName: safeName,
+            ContentType: string.IsNullOrWhiteSpace(contentType) ? "message/rfc822" : contentType,
+            DownloadUrl: null,
+            Content: eml,
+            FromEmail: null,
+            Subject: null,
+            MessageId: null);
+        BackgroundJob.Enqueue<RunWatchFoxEnquiryJob>(job => job.Execute(args, null));
+
+        _logger.LogInformation("WatchFox enquiry file {FileName} queued for workflow {WorkflowId}.", safeName, workflowId);
+        return Task.CompletedTask;
+    }
+
+    private void QueueEnquiry(
+        WatchFoxOptions options,
+        JsonElement root,
+        JsonElement email,
+        string eventId,
+        Guid? tenantId,
+        string? from,
+        string? subject,
+        string? messageId)
+    {
+        var workflowId = ReadMetaGuid(root, "enquiryWorkflowId", "enquiry_workflow_id")
+            ?? ParseGuid(options.EnquiryWorkflowId);
+        if (tenantId == null || workflowId == null)
+            throw new InvalidOperationException("WatchFox tenantId and EnquiryWorkflowId are not configured.");
+
+        var eml = FindEml(email);
+        if (eml == null)
+        {
+            _logger.LogInformation("WatchFox enquiry event {EventId} has no .eml. No ticket started.", eventId);
+            return;
+        }
+
+        var args = new WatchFoxEnquiryJobArgs(
+            EventKey: Truncate($"enquiry:{eventId}", 160),
+            TenantId: tenantId.Value,
+            WorkflowId: workflowId.Value,
+            FileName: eml.Value.FileName,
+            ContentType: eml.Value.ContentType,
+            DownloadUrl: eml.Value.Url,
+            Content: eml.Value.Content,
+            FromEmail: from,
+            Subject: subject,
+            MessageId: messageId);
+        BackgroundJob.Enqueue<RunWatchFoxEnquiryJob>(job => job.Execute(args, null));
+
+        _logger.LogInformation(
+            "WatchFox enquiry event {EventId} queued workflow {WorkflowId} start with {FileName}.",
+            eventId,
+            workflowId,
+            eml.Value.FileName);
     }
 
     private static bool SignatureMatches(string secret, string rawBody, string? header)
@@ -168,6 +258,89 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             && results.TryGetProperty("invoice", out var invoice)
             && invoice.TryGetProperty("matched", out var matched)
             && matched.ValueKind == JsonValueKind.True;
+    }
+
+    private static bool IsEnquiry(JsonElement root)
+    {
+        if (root.TryGetProperty("matches", out var matches) && matches.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var match in matches.EnumerateArray())
+            {
+                var what = ReadString(match, "what");
+                if (!string.IsNullOrWhiteSpace(what)
+                    && what.Contains("enquir", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+
+        return root.TryGetProperty("results", out var results)
+            && results.ValueKind == JsonValueKind.Object
+            && results.TryGetProperty("enquiries", out var enquiries)
+            && enquiries.TryGetProperty("matched", out var matched)
+            && matched.ValueKind == JsonValueKind.True;
+    }
+
+    private static (string? Url, byte[]? Content, string FileName, string ContentType)? FindEml(JsonElement email)
+    {
+        foreach (var name in new[] { "eml_url", "emlUrl", "raw_url", "rawUrl", "source_url", "sourceUrl" })
+        {
+            var url = ReadString(email, name);
+            if (!string.IsNullOrWhiteSpace(url))
+                return (url, null, "message.eml", "message/rfc822");
+        }
+
+        var inline = DecodeEml(ReadString(email, "eml_base64") ?? ReadString(email, "eml"));
+        if (inline is { Length: > 0 })
+            return (null, inline, "message.eml", "message/rfc822");
+
+        if (email.TryGetProperty("links", out var links) && links.ValueKind == JsonValueKind.Object)
+        {
+            var raw = ReadString(links, "raw");
+            if (!string.IsNullOrWhiteSpace(raw))
+                return (raw, null, "message.eml", "message/rfc822");
+        }
+
+        if (!email.TryGetProperty("attachments", out var attachments) || attachments.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (var attachment in attachments.EnumerateArray())
+        {
+            var name = ReadString(attachment, "filename") ?? string.Empty;
+            var type = ReadString(attachment, "content_type") ?? string.Empty;
+            var isEml = name.EndsWith(".eml", StringComparison.OrdinalIgnoreCase)
+                || type.Contains("rfc822", StringComparison.OrdinalIgnoreCase)
+                || type.Contains("message/rfc822", StringComparison.OrdinalIgnoreCase);
+            if (!isEml)
+                continue;
+
+            var url = ReadString(attachment, "url");
+            var content = DecodeEml(ReadString(attachment, "content") ?? ReadString(attachment, "data"));
+            if (string.IsNullOrWhiteSpace(url) && content is not { Length: > 0 })
+                continue;
+
+            if (string.IsNullOrWhiteSpace(name))
+                name = "message.eml";
+            return (string.IsNullOrWhiteSpace(url) ? null : url, content, name, string.IsNullOrWhiteSpace(type) ? "message/rfc822" : type);
+        }
+
+        return null;
+    }
+
+    private static byte[]? DecodeEml(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        var trimmed = value.Trim();
+        if (trimmed.StartsWith("From ", StringComparison.Ordinal) || trimmed.Contains("\nMIME-Version", StringComparison.OrdinalIgnoreCase))
+            return Encoding.UTF8.GetBytes(trimmed);
+        try
+        {
+            return Convert.FromBase64String(trimmed);
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 
     private static bool IsDocument(JsonElement attachment)

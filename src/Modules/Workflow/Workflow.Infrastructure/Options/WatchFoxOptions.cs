@@ -15,6 +15,11 @@ public sealed class WatchFoxOptions
     /// <summary>Used when the watch event metadata does not include tenantId.</summary>
     public string TenantId { get; set; } = string.Empty;
 
-    /// <summary>Used when the watch event metadata does not include workflowId.</summary>
+    /// <summary>Used when the watch event metadata does not include workflowId. Invoice watches use this.</summary>
     public string WorkflowId { get; set; } = string.Empty;
+
+    /// <summary>
+    /// FTL Enquiries watch. A new enquiry email starts this workflow with the .eml attached.
+    /// </summary>
+    public string EnquiryWorkflowId { get; set; } = "1325cf43-3902-426d-800f-ffde5bbfe0da";
 }
