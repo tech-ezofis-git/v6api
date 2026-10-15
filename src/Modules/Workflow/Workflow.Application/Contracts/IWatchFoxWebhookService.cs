@@ -30,7 +30,8 @@ public interface IWatchFoxWebhookService
         Guid tenantId,
         Guid workflowId,
         string? redirectUrl,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        WatchFoxConnectBranding? branding = null);
 
     /// <summary>
     /// Browser return from WatchFox. Creates the enquiry watch, then returns the UI address to open.
@@ -54,6 +55,14 @@ public interface IWatchFoxWebhookService
 }
 
 public sealed record WatchFoxConnectLinkResult(string Url, int ExpiresIn);
+
+/// <summary>Optional overrides for the WatchFox hosted connect page. Null fields keep the host WatchFox settings.</summary>
+public sealed record WatchFoxConnectBranding(
+    string? AppName = null,
+    string? LogoUrl = null,
+    string? AccentColor = null,
+    string? SupportEmail = null,
+    bool? HidePoweredBy = null);
 
 public sealed record WatchFoxEnquiryWatchResult(
     string WatchId,

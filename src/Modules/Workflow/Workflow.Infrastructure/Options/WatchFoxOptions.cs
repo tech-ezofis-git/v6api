@@ -25,4 +25,21 @@ public sealed class WatchFoxOptions
 
     /// <summary>Where WatchFox posts enquiry and invoice matches.</summary>
     public string WebhookUrl { get; set; } = "https://cloud.ezofis.com/api/email-ingest/watchfox";
+
+    /// <summary>Product name on the Office 365 connect page (max 60 chars).</summary>
+    public string AppName { get; set; } = "ezofis";
+
+    /// <summary>HTTPS logo URL on the connect page (max 400 chars). Replaces the WatchFox logo.</summary>
+    public string LogoUrl { get; set; } = string.Empty;
+
+    /// <summary>Button/link colour as #RRGGBB.</summary>
+    public string AccentColor { get; set; } = string.Empty;
+
+    /// <summary>Shown as "Need help?" on the connect page.</summary>
+    public string SupportEmail { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Removes "Powered by WatchFox". WatchFox allows this on Tracker and Alpha plans only.
+    /// </summary>
+    public bool HidePoweredBy { get; set; }
 }

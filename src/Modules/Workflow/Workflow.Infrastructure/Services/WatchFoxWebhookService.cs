@@ -164,7 +164,8 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
         Guid tenantId,
         Guid workflowId,
         string? redirectUrl,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        WatchFoxConnectBranding? branding = null)
     {
         if (tenantId == Guid.Empty || workflowId == Guid.Empty)
             throw new InvalidOperationException("tenantId and workflowId are required.");
@@ -176,17 +177,40 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
             || redirectUri.Scheme != Uri.UriSchemeHttps)
             throw new InvalidOperationException("redirectUrl must be an https address.");
 
-        var payload = JsonSerializer.Serialize(new
+        var options = _options.Value;
+        var appName = Truncate(FirstNonEmpty(branding?.AppName, options.AppName), 60);
+        var logoUrl = Truncate(FirstNonEmpty(branding?.LogoUrl, options.LogoUrl), 400);
+        var accentColor = NormalizeAccentColor(FirstNonEmpty(branding?.AccentColor, options.AccentColor));
+        var supportEmail = FirstNonEmpty(branding?.SupportEmail, options.SupportEmail);
+        var hidePoweredBy = branding?.HidePoweredBy ?? options.HidePoweredBy;
+
+        if (!string.IsNullOrWhiteSpace(logoUrl)
+            && (!Uri.TryCreate(logoUrl, UriKind.Absolute, out var logoUri) || logoUri.Scheme != Uri.UriSchemeHttps))
+            throw new InvalidOperationException("logoUrl must be an https address.");
+
+        var body = new Dictionary<string, object?>
         {
-            provider = "m365",
-            redirect_url = ConnectCallbackUrl(redirect),
-            state = EncodeConnectState(tenantId, workflowId),
-            metadata = new Dictionary<string, string>
+            ["provider"] = "m365",
+            ["redirect_url"] = ConnectCallbackUrl(redirect),
+            ["state"] = EncodeConnectState(tenantId, workflowId),
+            ["metadata"] = new Dictionary<string, string>
             {
                 ["tenantId"] = tenantId.ToString("D"),
                 ["enquiryWorkflowId"] = workflowId.ToString("D")
             }
-        });
+        };
+        if (!string.IsNullOrWhiteSpace(appName))
+            body["app_name"] = appName;
+        if (!string.IsNullOrWhiteSpace(logoUrl))
+            body["logo_url"] = logoUrl;
+        if (!string.IsNullOrWhiteSpace(accentColor))
+            body["accent_color"] = accentColor;
+        if (!string.IsNullOrWhiteSpace(supportEmail))
+            body["support_email"] = supportEmail;
+        if (hidePoweredBy)
+            body["hide_powered_by"] = true;
+
+        var payload = JsonSerializer.Serialize(body);
 
         using var doc = await SendWatchFoxAsync(HttpMethod.Post, "/v1/connect-links", payload, cancellationToken);
         var url = ReadString(doc.RootElement, "url");
@@ -652,6 +676,38 @@ public sealed class WatchFoxWebhookService : IWatchFoxWebhookService
         return redirect + separator + string.Join("&", parts);
     }
 
-    private static string Truncate(string value, int max) =>
-        value.Length <= max ? value : value[..max];
+    private static string Truncate(string? value, int max)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return string.Empty;
+        var trimmed = value.Trim();
+        return trimmed.Length <= max ? trimmed : trimmed[..max];
+    }
+
+    private static string? FirstNonEmpty(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return null;
+    }
+
+    private static string? NormalizeAccentColor(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+
+        var color = value.Trim();
+        if (color.Length == 6 && color.All(Uri.IsHexDigit))
+            color = "#" + color;
+        if (color.Length == 7
+            && color[0] == '#'
+            && color[1..].All(Uri.IsHexDigit))
+            return color.ToUpperInvariant();
+
+        throw new InvalidOperationException("accentColor must be #RRGGBB.");
+    }
 }
