@@ -149,6 +149,13 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.Configure<EmailIngestOptions>(configuration.GetSection(EmailIngestOptions.SectionName));
         services.Configure<GmailPushOptions>(configuration.GetSection(GmailPushOptions.SectionName));
         services.AddScoped<IGmailPushService, GmailPushService>();
+        services.Configure<WatchFoxOptions>(configuration.GetSection(WatchFoxOptions.SectionName));
+        services.AddHttpClient(nameof(WatchFoxWebhookService), client =>
+        {
+            client.Timeout = TimeSpan.FromMinutes(2);
+        });
+        services.AddScoped<IWatchFoxWebhookService, WatchFoxWebhookService>();
+        services.AddScoped<RunWatchFoxInvoiceJob>();
         services.AddHttpClient(nameof(ApAgentPythonPipelineService), client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;

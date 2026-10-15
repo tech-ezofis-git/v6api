@@ -14,11 +14,16 @@ public sealed class EmailIngestController : ControllerBase
 {
     private readonly IServiceProvider _services;
     private readonly IGmailPushService _gmailPush;
+    private readonly IWatchFoxWebhookService _watchFox;
 
-    public EmailIngestController(IServiceProvider services, IGmailPushService gmailPush)
+    public EmailIngestController(
+        IServiceProvider services,
+        IGmailPushService gmailPush,
+        IWatchFoxWebhookService watchFox)
     {
         _services = services;
         _gmailPush = gmailPush;
+        _watchFox = watchFox;
     }
 
     /// <summary>
@@ -47,6 +52,31 @@ public sealed class EmailIngestController : ControllerBase
         catch (InvalidOperationException ex)
         {
             return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// WatchFox invoice webhook. A match queues an MJB ticket. Other mail is ignored.
+    /// </summary>
+    [AllowAnonymous]
+    [HttpPost("watchfox")]
+    public async Task<IActionResult> WatchFox(CancellationToken cancellationToken)
+    {
+        using var reader = new StreamReader(Request.Body);
+        var body = await reader.ReadToEndAsync(cancellationToken);
+        var signature = Request.Headers["X-WatchFox-Signature"].FirstOrDefault();
+        try
+        {
+            await _watchFox.AcceptAsync(body, signature, cancellationToken);
+            return Ok(new { accepted = true });
+        }
+        catch (UnauthorizedAccessException)
+        {
+            return Unauthorized();
+        }
+        catch (InvalidOperationException ex)
+        {
+            return StatusCode(StatusCodes.Status500InternalServerError, new { error = ex.Message });
         }
     }
 
