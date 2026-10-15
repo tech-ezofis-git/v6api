@@ -56,18 +56,46 @@ public sealed class EmailIngestController : ControllerBase
     }
 
     /// <summary>
-    /// WatchFox invoice webhook. A match queues an MJB ticket. Other mail is ignored.
+    /// WatchFox webhook. Invoice matches queue an MJB ticket.
+    /// Enquiries matches, or a multipart <c>.eml</c> file, start workflow
+    /// <c>1325cf43-3902-426d-800f-ffde5bbfe0da</c> with that file on
+    /// <c>POST /api/workflows/{{id}}/start</c>.
     /// </summary>
     [AllowAnonymous]
     [HttpPost("watchfox")]
+    [DisableRequestSizeLimit]
+    [RequestFormLimits(MultipartBodyLengthLimit = 104_857_600)]
     public async Task<IActionResult> WatchFox(CancellationToken cancellationToken)
     {
-        using var reader = new StreamReader(Request.Body);
-        var body = await reader.ReadToEndAsync(cancellationToken);
         var signature = Request.Headers["X-WatchFox-Signature"].FirstOrDefault();
         try
         {
-            await _watchFox.AcceptAsync(body, signature, cancellationToken);
+            if (Request.HasFormContentType)
+            {
+                var file = Request.Form.Files.GetFile("file")
+                    ?? Request.Form.Files.GetFile("eml")
+                    ?? Request.Form.Files.FirstOrDefault();
+                if (file == null || file.Length == 0)
+                    return BadRequest(new { error = "Enquiry webhook requires the .eml form file." });
+
+                await using var ms = new MemoryStream();
+                await file.CopyToAsync(ms, cancellationToken);
+                var payload = Request.Form["payload"].FirstOrDefault();
+                await _watchFox.AcceptEnquiryFileAsync(
+                    ms.ToArray(),
+                    file.FileName,
+                    file.ContentType,
+                    signature,
+                    payload,
+                    cancellationToken);
+            }
+            else
+            {
+                using var reader = new StreamReader(Request.Body);
+                var body = await reader.ReadToEndAsync(cancellationToken);
+                await _watchFox.AcceptAsync(body, signature, cancellationToken);
+            }
+
             return Ok(new { accepted = true });
         }
         catch (UnauthorizedAccessException)

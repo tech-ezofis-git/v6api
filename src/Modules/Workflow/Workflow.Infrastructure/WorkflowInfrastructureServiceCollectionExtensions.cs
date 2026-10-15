@@ -156,6 +156,7 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         });
         services.AddScoped<IWatchFoxWebhookService, WatchFoxWebhookService>();
         services.AddScoped<RunWatchFoxInvoiceJob>();
+        services.AddScoped<RunWatchFoxEnquiryJob>();
         services.AddHttpClient(nameof(ApAgentPythonPipelineService), client =>
         {
             client.Timeout = Timeout.InfiniteTimeSpan;
