@@ -204,6 +204,9 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                     NextCreatedByUserId: userId);
             }
 
+            var actedByUserId = targetStep.GetApproverIds().Any(id => id == userId)
+                ? userId
+                : resolvedActivityUserId;
             await UpdateReviewAsync(
                 connection,
                 transactionTable,
@@ -211,7 +214,7 @@ public sealed class WorkflowLegacyTransactionSyncService : IWorkflowLegacyTransa
                 targetStep,
                 txActivityId,
                 review!.Trim(),
-                resolvedActivityUserId,
+                actedByUserId,
                 userId,
                 WorkflowStepActionsHelper.FindMatchingAction(targetStep, review)?.Id,
                 cancellationToken);
