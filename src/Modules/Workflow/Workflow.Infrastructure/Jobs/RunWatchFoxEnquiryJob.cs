@@ -66,8 +66,9 @@ public sealed class RunWatchFoxEnquiryJob
             using var scope = _scopes.CreateScope();
             var services = scope.ServiceProvider;
             services.GetRequiredService<ITenantConnectionProvider>().SetConnectionString(connectionString);
+            var actorUserId = await ResolveActorUserIdAsync(connectionString, args.TenantId);
             var jobContext = services.GetRequiredService<JobExecutionContext>();
-            jobContext.Set(args.TenantId, EmailIngestActorResolver.SystemUserId);
+            jobContext.Set(args.TenantId, actorUserId);
             try
             {
                 var fileName = string.IsNullOrWhiteSpace(args.FileName) ? "message.eml" : args.FileName;
@@ -112,6 +113,33 @@ public sealed class RunWatchFoxEnquiryJob
             await ReleaseClaimAsync(args.EventKey);
             throw;
         }
+    }
+
+    private async Task<Guid> ResolveActorUserIdAsync(string connectionString, Guid tenantId)
+    {
+        var email = _configuration["TenantPilotUser:Email"]?.Trim();
+        if (string.IsNullOrWhiteSpace(email))
+            email = "pilot@ezofis.com";
+
+        const string sql = """
+            SELECT "Id"
+            FROM users."Users"
+            WHERE "TenantId" = @TenantId
+              AND lower(btrim("Email")) = lower(btrim(@Email))
+              AND "IsDeleted" = false
+            LIMIT 1
+            """;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@TenantId", tenantId);
+        cmd.Parameters.AddWithValue("@Email", email);
+        var id = await cmd.ExecuteScalarAsync();
+        if (id is not Guid userId || userId == Guid.Empty)
+            throw new InvalidOperationException($"WatchFox enquiry user {email} was not found in tenant {tenantId:D}.");
+
+        return userId;
     }
 
     private async Task<byte[]> DownloadAsync(string? url)
