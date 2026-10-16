@@ -108,10 +108,10 @@ public sealed partial class FormService : IFormService
                 return new FormCreateResult(FormCreateStatus.NotFound, formId, "Formfields not found");
 
             var fieldCols = BuildFieldColumnsFromLabels(fields);
+            await EnsureFormEntryTableAsync(connection, formId, fields, fieldCols, cancellationToken);
             var existingEzfbColumns = await TryLoadEzfbColumnsAsync(connection, formId, cancellationToken);
             await SyncFormControlsAsync(
                 connection, formId, panels, secondaryPanels, fields, fieldCols, existingEzfbColumns, createdBy, now, cancellationToken);
-            await EnsureFormEntryTableAsync(connection, formId, fields, fieldCols, cancellationToken);
         }
 
         _logger.LogInformation("Created form {FormId} ({Name}), published={Published}", formId, name, isPublished);
@@ -526,15 +526,18 @@ public sealed partial class FormService : IFormService
         var tableSuffix = FormIdNaming.GetEzfbTableSuffix(formId);
         var tableName = $"ezfb_{tableSuffix}_items";
         var historyTable = $"ezfb_{tableSuffix}_history";
+        var columns = fieldCols.Count > 0 ? fieldCols : BuildFieldColumnsFromLabels(fields);
+
         if (await TableExistsAsync(connection, tableName, cancellationToken))
         {
             var droppedEmptyLegacy = await EzfbEntryIdMigrationService.UpgradeLegacyIntegerTableAsync(
                 connection, tableName, cancellationToken);
             if (!droppedEmptyLegacy)
+            {
+                await EnsureMissingColumnsAsync(connection, formId, tableName, historyTable, columns, cancellationToken);
                 return;
+            }
         }
-
-        var columns = fieldCols.Count > 0 ? fieldCols : BuildFieldColumnsFromLabels(fields);
 
         // Fixed/system columns are snake_case unquoted (system-controlled, matching the
         // dynamic-DDL convention used everywhere else in this migration -- WorkflowTableCreator.cs,
@@ -659,11 +662,50 @@ public sealed partial class FormService : IFormService
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) > 0;
     }
 
+    private static string EscapeColumn(string column) => column.Replace("\"", "\"\"");
+
+    private static async Task EnsureMissingColumnsAsync(
+        NpgsqlConnection connection,
+        string formId,
+        string tableName,
+        string historyTable,
+        IReadOnlyList<string> columns,
+        CancellationToken cancellationToken)
+    {
+        var existing = await TryLoadEzfbColumnsAsync(connection, formId, cancellationToken);
+        if (existing == null)
+            return;
+
+        foreach (var col in columns)
+        {
+            if (string.IsNullOrWhiteSpace(col) || existing.Contains(col))
+                continue;
+
+            var escaped = EscapeColumn(col);
+            await using (var cmd = new NpgsqlCommand(
+                $"ALTER TABLE dbo.\"{tableName}\" ADD COLUMN IF NOT EXISTS \"{escaped}\" text NULL;",
+                connection))
+            {
+                await cmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (await TableExistsAsync(connection, historyTable, cancellationToken))
+            {
+                await using var histCmd = new NpgsqlCommand(
+                    $"ALTER TABLE dbo.\"{historyTable}\" ADD COLUMN IF NOT EXISTS \"{escaped}\" text NULL;",
+                    connection);
+                await histCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            existing.Add(col);
+        }
+    }
+
     /// <summary>
     /// Returns existing ezfb_*_items column names when the table already exists; otherwise null
     /// (caller treats null as "new table — store all computed columnNames").
     /// </summary>
-    private static async Task<IReadOnlySet<string>?> TryLoadEzfbColumnsAsync(
+    private static async Task<HashSet<string>?> TryLoadEzfbColumnsAsync(
         NpgsqlConnection connection,
         string formId,
         CancellationToken cancellationToken)

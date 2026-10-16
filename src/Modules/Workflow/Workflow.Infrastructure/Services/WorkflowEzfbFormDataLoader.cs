@@ -147,7 +147,9 @@ WHERE item_id = @ItemId AND (is_deleted = false OR is_deleted IS NULL);";
                 string? aliasKey = null;
                 if (columnMeta.TryGetValue(physicalColumn, out var meta))
                 {
-                    if (meta.Kind is EzfbColumnNaming.EzfbColumnMatchKind.ExactName or EzfbColumnNaming.EzfbColumnMatchKind.SanitizedName)
+                    if (meta.Kind is EzfbColumnNaming.EzfbColumnMatchKind.ExactName
+                        or EzfbColumnNaming.EzfbColumnMatchKind.SanitizedName
+                        or EzfbColumnNaming.EzfbColumnMatchKind.StoredColumnName)
                     {
                         // New-form column: emit the human Label as the key, jsonId as a cheap alias.
                         outputKey = !string.IsNullOrWhiteSpace(meta.Name) ? meta.Name!.Trim() : physicalColumn;
