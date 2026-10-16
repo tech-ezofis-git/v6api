@@ -145,12 +145,17 @@ public sealed class WorkflowLegacyMailboxQueryService : IWorkflowLegacyMailboxQu
 
         var items = KeepCurrentStageRows(inboxRows, sentRows, completedRows);
 
-        var order = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-        for (var i = 0; i < activityIds.Length; i++)
-            order[activityIds[i]] = i;
+        // Newest tickets first (same rule as inbox/sent list SQL).
         items.Sort((a, b) =>
-            order.GetValueOrDefault(a.ActivityId ?? string.Empty, int.MaxValue)
-                .CompareTo(order.GetValueOrDefault(b.ActivityId ?? string.Empty, int.MaxValue)));
+        {
+            var byCreated = Nullable.Compare(b.TransactionCreatedAt, a.TransactionCreatedAt);
+            if (byCreated != 0)
+                return byCreated;
+            var byInstanceCreated = Nullable.Compare(b.CreatedAtUtc, a.CreatedAtUtc);
+            if (byInstanceCreated != 0)
+                return byInstanceCreated;
+            return b.Id.CompareTo(a.Id);
+        });
 
         await EnrichFormDataAsync(connection, items, cancellationToken);
         await EnrichRepositoryItemAsync(items, cancellationToken);

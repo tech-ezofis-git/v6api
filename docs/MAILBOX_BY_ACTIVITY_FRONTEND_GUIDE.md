@@ -100,7 +100,7 @@ Visibility is the same as the inbox and sent lists: the signed-in user must be t
 | `pageSize` | How many distinct ids were requested. |
 | `tableExists` | `false` when this workflow has no inbox table and no sent table. `items` is then empty. |
 
-Rows are returned in the same order as `activityIds`. An id that was not found is skipped, so `items.length` can be smaller than `activityIds.length`.
+Rows are ordered newest first (`transactionCreatedAt` descending). An id that was not found is skipped, so `items.length` can be smaller than `activityIds.length`.
 
 ---
 
