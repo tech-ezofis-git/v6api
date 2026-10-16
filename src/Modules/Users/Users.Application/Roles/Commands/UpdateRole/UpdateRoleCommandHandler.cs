@@ -87,7 +87,27 @@ public sealed class UpdateRoleCommandHandler : IRequestHandler<UpdateRoleCommand
                     return Fail("One or more users were not found in this tenant.", 404);
             }
 
+            var previousUserIds = role.UserRoles.Select(ur => ur.UserId).ToHashSet();
             role.ReplaceUsers(userIds);
+
+            var tenantId = _tenantContext.TenantId
+                ?? throw new InvalidOperationException("TenantId is required to sync role membership.");
+
+            var removedIds = previousUserIds.Where(id => !userIds.Contains(id)).ToList();
+            if (removedIds.Count > 0 && !isBuiltin)
+            {
+                var removed = await _userRepository.RemoveRoleNameFromUserIdsAsync(
+                    removedIds, role.Name, cancellationToken);
+                foreach (var (email, newRole) in removed)
+                    await _userTenantRoleSync.SyncRoleForUserAsync(email, tenantId, newRole, cancellationToken);
+            }
+
+            if (userIds.Count > 0 && !isBuiltin)
+            {
+                var emails = await _userRepository.SetRoleNameForUsersAsync(userIds, role.Name, cancellationToken);
+                foreach (var email in emails)
+                    await _userTenantRoleSync.SyncRoleForUserAsync(email, tenantId, role.Name, cancellationToken);
+            }
         }
 
         if (hasPermissions)

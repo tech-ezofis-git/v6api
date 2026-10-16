@@ -4,7 +4,7 @@ using Microsoft.Extensions.DependencyInjection;
 namespace SaaSApp.Security;
 
 /// <summary>
-/// Policy-based authorization: Admin, TenantUser roles.
+/// Policy-based authorization: Admin vs any signed-in tenant member.
 /// </summary>
 public static class AuthorizationPolicies
 {
@@ -21,9 +21,9 @@ public static class AuthorizationPolicies
                 policy.RequireRole("Admin")
                     .RequireAuthenticatedUser()
                     .AddAuthenticationSchemes(authenticationSchemes))
+            // Any authenticated tenant JWT (builtin Admin/TenantUser/ExternalUser or a custom role like "FTL User").
             .AddPolicy(TenantUser, policy =>
-                policy.RequireRole("Admin", "TenantUser", "ExternalUser")
-                    .RequireAuthenticatedUser()
+                policy.RequireAuthenticatedUser()
                     .AddAuthenticationSchemes(authenticationSchemes))
             .AddPolicy(AnyAuthenticated, policy =>
                 policy.RequireAuthenticatedUser()
@@ -35,8 +35,7 @@ public static class AuthorizationPolicies
                 policy.RequireRole("Admin")
                     .RequireAuthenticatedUser())
             .AddPolicy(TenantUser, policy =>
-                policy.RequireRole("Admin", "TenantUser", "ExternalUser")
-                    .RequireAuthenticatedUser())
+                policy.RequireAuthenticatedUser())
             .AddPolicy(AnyAuthenticated, policy =>
                 policy.RequireAuthenticatedUser());
         }

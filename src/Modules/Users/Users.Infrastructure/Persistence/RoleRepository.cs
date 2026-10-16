@@ -84,13 +84,20 @@ public sealed class RoleRepository : IRoleRepository
 
         if (!string.IsNullOrWhiteSpace(userRoleName))
         {
-            var roleName = userRoleName.Trim();
-            var keysFromRoleName = _context.Roles
-                .AsNoTracking()
-                .Where(r => r.Name.Trim() == roleName)
-                .SelectMany(r => r.Permissions.Select(p => p.PermissionKey));
+            // Users.Role may be a single custom name ("FTL User") or comma-separated names.
+            var roleNames = userRoleName
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            if (roleNames.Length > 0)
+            {
+                var keysFromRoleName = _context.Roles
+                    .AsNoTracking()
+                    .Where(r => roleNames.Contains(r.Name))
+                    .SelectMany(r => r.Permissions.Select(p => p.PermissionKey));
 
-            query = keysFromAssignments.Union(keysFromRoleName);
+                query = keysFromAssignments.Union(keysFromRoleName);
+            }
         }
 
         return await query.Distinct().OrderBy(k => k).ToListAsync(cancellationToken);
