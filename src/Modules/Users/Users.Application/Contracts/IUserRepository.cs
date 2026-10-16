@@ -41,6 +41,24 @@ public interface IUserRepository
         string roleName,
         CancellationToken cancellationToken = default);
 
+    /// <summary>
+    /// Sets <c>Users.Role</c> to <paramref name="roleName"/> for the given users (JWT / usersession role claim).
+    /// Returns email for each updated user.
+    /// </summary>
+    Task<IReadOnlyList<string>> SetRoleNameForUsersAsync(
+        IReadOnlyList<Guid> userIds,
+        string roleName,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Removes <paramref name="roleName"/> from <c>Users.Role</c> for the given user ids only.
+    /// Returns email + resulting Role for each updated user.
+    /// </summary>
+    Task<IReadOnlyList<(string Email, string Role)>> RemoveRoleNameFromUserIdsAsync(
+        IReadOnlyList<Guid> userIds,
+        string roleName,
+        CancellationToken cancellationToken = default);
+
     /// <summary>Mark user as modified for persistence.</summary>
     void Update(User user);
 
