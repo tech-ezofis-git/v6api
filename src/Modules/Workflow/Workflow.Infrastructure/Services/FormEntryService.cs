@@ -74,6 +74,15 @@ public sealed class FormEntryService : IFormEntryService
 
         var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
         var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+        await EnsureMissingControlColumnsAsync(
+            connection,
+            tableName,
+            tableSuffix,
+            wFormIdValue,
+            controls,
+            ezfbColumns,
+            cancellationToken);
+
         var resolvedFields = ResolveFieldColumns(fieldMap, controls, ezfbColumns);
         if (resolvedFields.Count == 0)
             return Failed("no matching ezfb columns for submitted fields");
@@ -476,7 +485,21 @@ public sealed class FormEntryService : IFormEntryService
 
     private sealed record FormMetadata(string? UniqueColumns);
 
-    private sealed record FormControlRow(string JsonId, string? Name, string? Type, string? ColumnName = null);
+    private sealed class FormControlRow
+    {
+        public string JsonId { get; }
+        public string? Name { get; }
+        public string? Type { get; }
+        public string? ColumnName { get; set; }
+
+        public FormControlRow(string jsonId, string? name, string? type, string? columnName = null)
+        {
+            JsonId = jsonId;
+            Name = name;
+            Type = type;
+            ColumnName = columnName;
+        }
+    }
 
     private static List<KeyValuePair<string, string>> ResolveFieldColumns(
         IReadOnlyDictionary<string, string> fields,
@@ -817,6 +840,106 @@ public sealed class FormEntryService : IFormEntryService
         }
 
         return rows;
+    }
+
+    private static async Task EnsureMissingControlColumnsAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        string tableSuffix,
+        string wFormIdValue,
+        List<FormControlRow> controls,
+        HashSet<string> ezfbColumns,
+        CancellationToken cancellationToken)
+    {
+        var historyTable = $"ezfb_{tableSuffix}_history";
+        var hasHistoryTable = await EzfbTableExistsAsync(connection, historyTable, cancellationToken);
+
+        foreach (var control in controls)
+        {
+            if (EzfbColumnNaming.TryResolveEzfbColumn(
+                    control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var existingCol))
+            {
+                if (string.IsNullOrWhiteSpace(control.ColumnName) && !string.IsNullOrWhiteSpace(existingCol))
+                {
+                    control.ColumnName = existingCol;
+                    await using var updateCmd = new NpgsqlCommand(
+                        """
+                        UPDATE dbo."wFormControl"
+                        SET "columnName" = @ColumnName
+                        WHERE "wFormId" = @FormId
+                          AND "jsonId" = @JsonId
+                          AND ("columnName" IS NULL OR "columnName" = '');
+                        """,
+                        connection);
+                    updateCmd.Parameters.AddWithValue("@ColumnName", existingCol);
+                    updateCmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+                    updateCmd.Parameters.AddWithValue("@JsonId", control.JsonId);
+                    await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+                }
+                continue;
+            }
+
+            string candidateCol;
+            if (!string.IsNullOrWhiteSpace(control.ColumnName))
+            {
+                candidateCol = control.ColumnName.Trim();
+            }
+            else if (!string.IsNullOrWhiteSpace(control.Name)
+                     && EzfbColumnNaming.TryToColumnNameFromLabel(control.Name, out var colFromLabel))
+            {
+                candidateCol = colFromLabel;
+            }
+            else if (EzfbColumnNaming.TryToColumnName(control.JsonId, out var colFromJson))
+            {
+                candidateCol = colFromJson;
+            }
+            else
+            {
+                continue;
+            }
+
+            var finalCol = candidateCol;
+            var suffix = 2;
+            while (ezfbColumns.Contains(finalCol))
+            {
+                finalCol = $"{candidateCol}_{suffix++}";
+            }
+
+            var escapedCol = EscapeColumn(finalCol);
+            await using (var alterCmd = new NpgsqlCommand(
+                $"ALTER TABLE dbo.\"{tableName}\" ADD COLUMN IF NOT EXISTS \"{escapedCol}\" text NULL;",
+                connection))
+            {
+                await alterCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            if (hasHistoryTable)
+            {
+                await using var alterHistCmd = new NpgsqlCommand(
+                    $"ALTER TABLE dbo.\"{historyTable}\" ADD COLUMN IF NOT EXISTS \"{escapedCol}\" text NULL;",
+                    connection);
+                await alterHistCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            await using (var updateCmd = new NpgsqlCommand(
+                """
+                UPDATE dbo."wFormControl"
+                SET "columnName" = @ColumnName
+                WHERE "wFormId" = @FormId
+                  AND "jsonId" = @JsonId
+                  AND ("columnName" IS NULL OR "columnName" = '');
+                """,
+                connection))
+            {
+                updateCmd.Parameters.AddWithValue("@ColumnName", finalCol);
+                updateCmd.Parameters.AddWithValue("@FormId", wFormIdValue);
+                updateCmd.Parameters.AddWithValue("@JsonId", control.JsonId);
+                await updateCmd.ExecuteNonQueryAsync(cancellationToken);
+            }
+
+            control.ColumnName = finalCol;
+            ezfbColumns.Add(finalCol);
+        }
     }
 
     /// <summary>
