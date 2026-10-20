@@ -10,17 +10,20 @@ public sealed class CreateRoleCommandHandler : IRequestHandler<CreateRoleCommand
     private readonly IRoleRepository _roleRepository;
     private readonly IUserRepository _userRepository;
     private readonly IPermissionCategoryRepository _categoryRepository;
+    private readonly IUserTenantRoleSync _userTenantRoleSync;
     private readonly ITenantContext _tenantContext;
 
     public CreateRoleCommandHandler(
         IRoleRepository roleRepository,
         IUserRepository userRepository,
         IPermissionCategoryRepository categoryRepository,
+        IUserTenantRoleSync userTenantRoleSync,
         ITenantContext tenantContext)
     {
         _roleRepository = roleRepository;
         _userRepository = userRepository;
         _categoryRepository = categoryRepository;
+        _userTenantRoleSync = userTenantRoleSync;
         _tenantContext = tenantContext;
     }
 
@@ -63,6 +66,11 @@ public sealed class CreateRoleCommandHandler : IRequestHandler<CreateRoleCommand
         role.AssignUsers(userIds);
         role.AssignPermissions(categoryKeys);
         await _roleRepository.AddAsync(role, cancellationToken);
+
+        // Keep Users.Role + catalog in sync so login JWT / usersession accept the custom role.
+        var emails = await _userRepository.SetRoleNameForUsersAsync(userIds, roleName, cancellationToken);
+        foreach (var email in emails)
+            await _userTenantRoleSync.SyncRoleForUserAsync(email, tenantId, roleName, cancellationToken);
 
         return new CreateRoleCommandResult(
             Success: true,

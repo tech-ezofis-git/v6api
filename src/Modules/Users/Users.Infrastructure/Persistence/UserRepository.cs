@@ -137,6 +137,70 @@ public sealed class UserRepository : IUserRepository
         return updated;
     }
 
+    public async Task<IReadOnlyList<string>> SetRoleNameForUsersAsync(
+        IReadOnlyList<Guid> userIds,
+        string roleName,
+        CancellationToken cancellationToken = default)
+    {
+        var trimmed = roleName?.Trim() ?? string.Empty;
+        if (trimmed.Length == 0 || userIds.Count == 0)
+            return [];
+
+        var ids = userIds.Distinct().ToList();
+        var users = await Context.Users
+            .Where(u => ids.Contains(u.Id))
+            .ToListAsync(cancellationToken);
+
+        var updated = new List<string>();
+        foreach (var user in users)
+        {
+            if (string.Equals(user.Role, trimmed, StringComparison.OrdinalIgnoreCase))
+                continue;
+
+            user.Update(role: trimmed);
+            updated.Add(user.Email);
+        }
+
+        return updated;
+    }
+
+    public async Task<IReadOnlyList<(string Email, string Role)>> RemoveRoleNameFromUserIdsAsync(
+        IReadOnlyList<Guid> userIds,
+        string roleName,
+        CancellationToken cancellationToken = default)
+    {
+        var trimmed = roleName?.Trim() ?? string.Empty;
+        if (trimmed.Length == 0 || userIds.Count == 0)
+            return [];
+
+        var ids = userIds.Distinct().ToList();
+        var users = await Context.Users
+            .Where(u => ids.Contains(u.Id))
+            .ToListAsync(cancellationToken);
+
+        var updated = new List<(string Email, string Role)>();
+        foreach (var user in users)
+        {
+            var remaining = user.Role
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .Where(part => !string.Equals(part, trimmed, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var originalParts = user.Role
+                .Split(',', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries)
+                .ToList();
+
+            if (remaining.Count == originalParts.Count)
+                continue;
+
+            var newRole = remaining.Count == 0 ? User.RoleTenantUser : string.Join(",", remaining);
+            user.Update(role: newRole);
+            updated.Add((user.Email, newRole));
+        }
+
+        return updated;
+    }
+
     public void Update(User user)
     {
         Context.Users.Update(user);
