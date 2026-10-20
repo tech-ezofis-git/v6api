@@ -2271,17 +2271,20 @@ LIMIT 1;
     {
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var doc = JsonDocument.Parse(json);
-        // Quote 1: quote_result (Line Item / Subtotal / Hst / Total...). Its
-        // ALT/OPT sub-sections (older payload shape) also arrive through this copy.
-        CopyFlat(FindRootOrNestedObject(doc.RootElement, "quote_result"), fields, skipMatchedItems: true);
-        // New payload shape: quote_2 is the second quote, quote_3 the third.
-        // The RFQ form has no Quote-2/Quote-3 controls, so they land on the
-        // ALT (quote_2) and OPT (quote_3) sections the form already has.
-        CopyQuoteSectionAsAltOpt(FindRootOrNestedObject(doc.RootElement, "quote_2"), "quote_2", "ALT", fields);
-        CopyQuoteSectionAsAltOpt(FindRootOrNestedObject(doc.RootElement, "quote_3"), "quote_3", "OPT", fields);
-        // Root "compare" (quote_1 vs quote_2 / quote_3 diff) has no nested control
+        // Python nests everything inside quote_result:
+        // { quote_result: { ...quote 1..., "quote_2": {...}, "quote_3": {...}, "compare": {...} } }
+        // quote_2 / quote_3 / compare are looked up INSIDE quote_result first;
+        // root-level siblings are accepted as a fallback.
+        var quote = FindRootOrNestedObject(doc.RootElement, "quote_result");
+        CopyFlat(quote, fields, skipMatchedItems: true);
+        fields.Remove("quote_2");
+        fields.Remove("quote_3");
+        fields.Remove("compare");
+        CopyQuoteSectionAsAltOpt(FindQuoteMember(quote, doc.RootElement, "quote_2"), "quote_2", "ALT", fields);
+        CopyQuoteSectionAsAltOpt(FindQuoteMember(quote, doc.RootElement, "quote_3"), "quote_3", "OPT", fields);
+        // "compare" (quote_1 vs quote_2 / quote_3 diff) has no nested control
         // structure; save it into the form's Compare dynamic table as readable rows.
-        var compareRows = BuildCompareRows(FindRootOrNestedObject(doc.RootElement, "compare"));
+        var compareRows = BuildCompareRows(FindQuoteMember(quote, doc.RootElement, "compare"));
         if (compareRows.Count > 0)
             fields["Compare"] = JsonSerializer.Serialize(compareRows);
         // Agent sends "Freight Estimate" when no "Freight" key is present.
@@ -2297,6 +2300,22 @@ LIMIT 1;
             && !string.IsNullOrWhiteSpace(orderNumber))
             fields["estimate_number"] = orderNumber;
         return fields;
+    }
+
+    /// <summary>Member of quote_result first (Python nests quote_2/quote_3/compare there), root as fallback.</summary>
+    private static JsonElement FindQuoteMember(JsonElement quote, JsonElement root, string name)
+    {
+        if (quote.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in quote.EnumerateObject())
+            {
+                if (prop.Name.Equals(name, StringComparison.OrdinalIgnoreCase)
+                    && prop.Value.ValueKind == JsonValueKind.Object)
+                    return prop.Value;
+            }
+        }
+
+        return FindRootOrNestedObject(root, name);
     }
 
     /// <summary>
