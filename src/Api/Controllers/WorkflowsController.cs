@@ -118,7 +118,9 @@ public sealed class WorkflowsController : ControllerBase
 
     /// <summary>
     /// Preview a document PDF. formData may be keyed by jsonId; keys are converted to field names
-    /// before the Python chat call. Returns the PDF and the named formData. Does not archive or move a ticket.
+    /// before the Python chat call. Optional quoteType (quote_1 / quote_2 / quote_3, default quote_1)
+    /// selects which quote Python renders. Returns the PDF and the named formData.
+    /// Does not archive or move a ticket.
     /// </summary>
     [HttpPost("document/preview")]
     [Consumes("application/json")]
@@ -148,9 +150,10 @@ public sealed class WorkflowsController : ControllerBase
         }
 
         var formId = ReadJsonBodyProperty(body, "formId");
+        var quoteType = ReadJsonBodyProperty(body, "quoteType") ?? ReadJsonBodyProperty(body, "quote_type");
         try
         {
-            var result = await _ftlAgentPipeline.PreviewDocumentAsync(formId, formDataJson, template, cancellationToken);
+            var result = await _ftlAgentPipeline.PreviewDocumentAsync(formId, formDataJson, template, cancellationToken, quoteType);
             JsonElement namedFormData;
             using (var namedDoc = JsonDocument.Parse(result.FormDataJson))
                 namedFormData = namedDoc.RootElement.Clone();
@@ -159,6 +162,7 @@ public sealed class WorkflowsController : ControllerBase
             {
                 fileName = result.FileName,
                 pdfBase64 = result.PdfBase64,
+                quoteType = result.QuoteType,
                 formData = namedFormData
             });
         }

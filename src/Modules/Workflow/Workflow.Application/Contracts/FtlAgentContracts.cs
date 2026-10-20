@@ -24,33 +24,47 @@ public interface IFtlAgentPipelineService
     Task ExecuteAsync(FtlAgentJobArgs args, string hangfireJobId, CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Sends the current form data and the document-node template to Python, archives the PDF.
-    /// Does not move the workflow.
+    /// Sends the current form data and the document-node template to Python three times
+    /// (quoteType quote_1, quote_2, quote_3), archives all three PDFs. Does not move the workflow.
     /// </summary>
     Task<FtlDocumentGenerateResult> GenerateDocumentAsync(
         FtlAgentJobArgs args,
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Preview only: remap jsonId formData to field names, call Python chat, return the PDF.
+    /// Preview only: remap jsonId formData to field names, call Python chat once for the
+    /// selected quoteType (quote_1 when omitted), return the PDF.
     /// Does not archive or move the workflow.
     /// </summary>
     Task<FtlDocumentPreviewResult> PreviewDocumentAsync(
         string? formId,
         string formDataJson,
         System.Text.Json.JsonElement templateJson,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? quoteType = null);
 }
 
-/// <summary>PDF archived from the document-generate Python call, plus the exact request sent.</summary>
+/// <summary>
+/// One generated quote PDF. AttachmentId/ItemId/FileName on
+/// <see cref="FtlDocumentGenerateResult"/> mirror the quote_1 document for compatibility.
+/// </summary>
+public sealed record FtlGeneratedDocument(
+    string QuoteType,
+    Guid AttachmentId,
+    Guid ItemId,
+    string FileName);
+
+/// <summary>PDFs archived from the document-generate Python calls, plus the quote_1 request sent.</summary>
 public sealed record FtlDocumentGenerateResult(
     Guid AttachmentId,
     Guid ItemId,
     string FileName,
-    WorkflowPdfPythonRequestDto PythonRequest);
+    WorkflowPdfPythonRequestDto PythonRequest,
+    IReadOnlyList<FtlGeneratedDocument> Documents);
 
 /// <summary>Python PDF preview. FormDataJson uses field names, not jsonIds.</summary>
 public sealed record FtlDocumentPreviewResult(
     string FileName,
     string PdfBase64,
-    string FormDataJson);
+    string FormDataJson,
+    string QuoteType = "quote_1");
