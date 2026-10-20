@@ -132,8 +132,11 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         {
             var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
             var protectedIds = NonEmptyFormKeys(existingFormData);
+            // All quote tables (main, quote_2, quote_3, legacy ALT/OPT, Compare)
+            // are refreshed by a fresh quote, not just the main "Line Item" table.
             var lineItemIds = mapped.TableColumns
-                .Where(column => NormalizeFieldKey(column.Label) is "lineitem" or "lineitems")
+                .Where(column => IsQuoteLineItemTable(column.Label)
+                    || NormalizeFieldKey(column.Label) == "compare")
                 .Select(column => column.JsonId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var id in lineItemIds)
@@ -146,6 +149,11 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 TableColumns = mapped.TableColumns.Where(column => !protectedIds.Contains(column.JsonId)).ToList()
             };
         }
+
+        // ALT/OPT fields added to an existing form often have no ezfb column and a
+        // NULL wFormControl.columnName (form save only provisions on publish).
+        // Create the physical columns + backfill columnName before move-next writes.
+        await EnsureEzfbColumnsForMappedFieldsAsync(formId, mapped, cancellationToken);
 
         if (!string.IsNullOrWhiteSpace(formId)
             && formEntryId is { } entryId && entryId != Guid.Empty
@@ -229,7 +237,12 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
 
     private async Task ExecuteDocumentAsync(FtlAgentJobArgs args, string jobId, CancellationToken cancellationToken)
     {
-        await GenerateDocumentAsync(args, cancellationToken);
+        var generated = await GenerateDocumentAsync(args, cancellationToken);
+        _logger.LogInformation(
+            "FTL document generated {Count} PDFs ({Files}) for instance {InstanceId}; moving once.",
+            generated.Documents.Count,
+            string.Join(", ", generated.Documents.Select(d => $"{d.QuoteType}:{d.FileName}")),
+            args.InstanceId);
 
         var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
         var formData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
@@ -282,61 +295,106 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
 
         var pythonFormData = await RemapFormDataKeysToColumnNamesAsync(formId, formData, cancellationToken);
         var template = await LoadPdfTemplateAsync(args.WorkflowId, args.ActivityId, cancellationToken);
-        var (responseJson, pythonRequest) = await PostDocumentAsync(jobId, chatUrl, pythonFormData, template, cancellationToken);
-        var (pdfBytes, fileName) = ReadGeneratedPdf(responseJson);
         var repositoryId = ParseGuid(args.RepositoryId) ?? ParseGuid(workflow.RepositoryId)
             ?? throw new InvalidOperationException("Workflow repositoryId is not configured for the document PDF.");
 
-        await using var pdfStream = new MemoryStream(pdfBytes);
-        var archived = await _attachmentArchive.UploadAsync(
-            args.TenantId,
-            args.WorkflowId,
-            args.InstanceId,
-            repositoryId,
-            pdfStream,
-            fileName,
-            "application/pdf",
-            pdfBytes.Length,
-            metadataJson: null,
-            transactionId: null,
-            args.UserId,
-            cancellationToken,
-            allowIncompleteFolderMetadata: true);
+        // One Python call per quote: quoteType tells Python which section's
+        // line items / totals to render (quote_1 = "Line Item", quote_2 = "quote_2 Line Item",
+        // quote_3 = "quote_3 Line Item" + matching totals).
+        // All three PDFs are archived before ExecuteDocumentAsync moves the ticket once.
+        var documents = new List<FtlGeneratedDocument>();
+        WorkflowPdfPythonRequestDto? mainRequest = null;
+        foreach (var quoteType in new[] { "quote_1", "quote_2", "quote_3" })
+        {
+            var (responseJson, pythonRequest) = await PostDocumentAsync(
+                $"{jobId}-{quoteType}", chatUrl, pythonFormData, template, quoteType, cancellationToken);
+            if (quoteType == "quote_1")
+                mainRequest = pythonRequest;
 
-        await _moveNextSupport.SaveAgentValidationAsync(
-            args.WorkflowId,
-            args.InstanceId,
-            step,
-            args.UserId,
-            new MoveToNextStepApAgentPayload(
-                TransactionId: null,
-                InstanceId: args.InstanceId,
-                AiAgentResponseJson: StripPdf(responseJson),
-                AiAgentHtml: null,
-                RepositoryItemId: archived.ItemId,
-                RepositoryId: repositoryId,
-                FormId: formId,
-                FormEntryId: identity?.FormEntryId),
-            legacyTransactionId: null,
-            cancellationToken);
+            var (pdfBytes, rawFileName) = ReadGeneratedPdf(responseJson);
+            var fileName = QuoteSectionFileName(rawFileName, quoteType);
 
-        _logger.LogInformation(
-            "FTL document archived {FileName} for instance {InstanceId}.",
-            fileName,
-            args.InstanceId);
+            await using var pdfStream = new MemoryStream(pdfBytes);
+            var archived = await _attachmentArchive.UploadAsync(
+                args.TenantId,
+                args.WorkflowId,
+                args.InstanceId,
+                repositoryId,
+                pdfStream,
+                fileName,
+                "application/pdf",
+                pdfBytes.Length,
+                metadataJson: null,
+                transactionId: null,
+                args.UserId,
+                cancellationToken,
+                allowIncompleteFolderMetadata: true);
 
+            await _moveNextSupport.SaveAgentValidationAsync(
+                args.WorkflowId,
+                args.InstanceId,
+                step,
+                args.UserId,
+                new MoveToNextStepApAgentPayload(
+                    TransactionId: null,
+                    InstanceId: args.InstanceId,
+                    AiAgentResponseJson: StripPdf(responseJson),
+                    AiAgentHtml: null,
+                    RepositoryItemId: archived.ItemId,
+                    RepositoryId: repositoryId,
+                    FormId: formId,
+                    FormEntryId: identity?.FormEntryId),
+                legacyTransactionId: null,
+                cancellationToken);
+
+            documents.Add(new FtlGeneratedDocument(quoteType, archived.AttachmentId, archived.ItemId, fileName));
+            _logger.LogInformation(
+                "FTL document ({QuoteType}) archived {FileName} for instance {InstanceId}.",
+                quoteType,
+                fileName,
+                args.InstanceId);
+        }
+
+        var main = documents[0];
         return new FtlDocumentGenerateResult(
-            archived.AttachmentId,
-            archived.ItemId,
-            fileName,
-            pythonRequest);
+            main.AttachmentId,
+            main.ItemId,
+            main.FileName,
+            mainRequest!,
+            documents);
+    }
+
+    /// <summary>Python may return the same name for all three sections; keep them distinct.</summary>
+    private static string QuoteSectionFileName(string fileName, string quoteType)
+    {
+        var stem = Path.GetFileNameWithoutExtension(fileName);
+        return stem.EndsWith($"_{quoteType}", StringComparison.OrdinalIgnoreCase)
+            ? fileName
+            : $"{stem}_{quoteType}.pdf";
+    }
+
+    /// <summary>
+    /// quoteType sent to Python: quote_1 / quote_2 / quote_3. Older spellings are
+    /// accepted as aliases (MAIN -&gt; quote_1, ALT -&gt; quote_2, OPT -&gt; quote_3).
+    /// </summary>
+    private static string NormalizeQuoteType(string? quoteType)
+    {
+        var key = NormalizeFieldKey(quoteType ?? string.Empty);
+        return key switch
+        {
+            "" or "quote1" or "1" or "main" or "mainquote" => "quote_1",
+            "quote2" or "2" or "alt" or "alternate" or "alternative" => "quote_2",
+            "quote3" or "3" or "opt" or "option" or "optional" => "quote_3",
+            _ => throw new InvalidOperationException($"quoteType must be quote_1, quote_2, or quote_3. Got '{quoteType}'.")
+        };
     }
 
     public async Task<FtlDocumentPreviewResult> PreviewDocumentAsync(
         string? formId,
         string formDataJson,
         JsonElement templateJson,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? quoteType = null)
     {
         if (string.IsNullOrWhiteSpace(formDataJson))
             throw new InvalidOperationException("formData is required.");
@@ -350,12 +408,13 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         if (string.IsNullOrWhiteSpace(formId))
             formId = await ResolveFormIdFromFormDataAsync(formDataJson, cancellationToken);
 
+        var normalizedQuoteType = NormalizeQuoteType(quoteType);
         var namedFormData = await RemapFormDataKeysToColumnNamesAsync(formId, formDataJson, cancellationToken);
         var template = CloneTemplate(templateJson);
         var sessionId = Guid.NewGuid().ToString("N");
-        var (responseJson, _) = await PostDocumentAsync(sessionId, chatUrl, namedFormData, template, cancellationToken);
+        var (responseJson, _) = await PostDocumentAsync(sessionId, chatUrl, namedFormData, template, normalizedQuoteType, cancellationToken);
         var (pdfBytes, fileName) = ReadGeneratedPdf(responseJson);
-        return new FtlDocumentPreviewResult(fileName, Convert.ToBase64String(pdfBytes), namedFormData);
+        return new FtlDocumentPreviewResult(fileName, Convert.ToBase64String(pdfBytes), namedFormData, normalizedQuoteType);
     }
 
     private async Task<string?> ResolveFormIdFromFormDataAsync(string formDataJson, CancellationToken cancellationToken)
@@ -473,6 +532,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         string chatUrl,
         string formDataJson,
         JsonElement template,
+        string quoteType,
         CancellationToken cancellationToken)
     {
         object? formData = formDataJson;
@@ -486,10 +546,13 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         }
 
         var templateNode = JsonSerializer.Deserialize<object>(template.GetRawText());
+        // Extra key for Python: which quote to render
+        // (quote_1 -> "Line Item", quote_2 -> "quote_2 Line Item", quote_3 -> "quote_3 Line Item").
         var payload = new Dictionary<string, object?>
         {
             ["formData"] = formData,
-            ["templateJson"] = templateNode
+            ["templateJson"] = templateNode,
+            ["quoteType"] = quoteType
         };
 
         var body = JsonSerializer.Serialize(new
@@ -515,7 +578,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             new Dictionary<string, string>
             {
                 ["session_id"] = jobId,
-                ["intent"] = "ftl_quote_estimator"
+                ["intent"] = "ftl_quote_estimator",
+                ["quoteType"] = quoteType
             },
             templateDoc.RootElement.Clone());
         return (responseJson, request);
@@ -1074,7 +1138,7 @@ LIMIT 1;
         var isTable = control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase);
         if (isTable)
         {
-            var lineItemTable = NormalizeFieldKey(control.Label) is "lineitem" or "lineitems";
+            var lineItemTable = IsQuoteLineItemTable(control.Label);
             var tableJson = FormatQualifierTable(raw, control, controls, lineItemTable, useJsonId: true);
             if (string.IsNullOrWhiteSpace(tableJson))
                 return;
@@ -1099,6 +1163,83 @@ LIMIT 1;
 
         tableFields[control.Label] = text;
         formDataFields[control.JsonId] = text;
+    }
+
+    /// <summary>
+    /// Quote fields added to an existing published form (ALT/OPT Line Item, ALT Subtotal,
+    /// ALT HST, OPT Total, ...) may exist in wFormControl with columnName NULL and no
+    /// physical ezfb column, so move-next silently skips them. Create the column from the
+    /// control label (ALT Line Item -&gt; ALT_Line_Item) and backfill wFormControl.columnName.
+    /// Existing physical columns (e.g. legacy "lineitem") are kept, never renamed.
+    /// </summary>
+    private async Task EnsureEzfbColumnsForMappedFieldsAsync(
+        string? formId,
+        FtlMappedForm mapped,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(formId) || mapped.FormDataFields.Count == 0)
+            return;
+
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return;
+
+        var controls = await LoadFtlFormControlsAsync(formId, tenantCs, cancellationToken);
+        var roots = controls.Where(c => c.ParentId == 0).ToList();
+        if (roots.Count == 0)
+            return;
+
+        var suffix = FormIdNaming.GetEzfbTableSuffix(formId);
+        var tableName = $"ezfb_{suffix}_items";
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+        var existing = await LoadEzfbColumnsAsync(connection, tableName, cancellationToken);
+        if (existing.Count == 0)
+            return;
+
+        foreach (var root in roots)
+        {
+            if (!mapped.FormDataFields.ContainsKey(root.JsonId))
+                continue;
+
+            string physical;
+            if (EzfbColumnNaming.TryResolveEzfbColumn(root.ColumnName, root.Label, root.JsonId, existing, out var resolved, out _))
+            {
+                physical = resolved;
+            }
+            else if (!string.IsNullOrWhiteSpace(root.ColumnName))
+            {
+                physical = root.ColumnName.Trim();
+            }
+            else if (!EzfbColumnNaming.TryToColumnNameFromLabel(root.Label, out physical)
+                     && !EzfbColumnNaming.TryToColumnName(root.JsonId, out physical))
+            {
+                continue;
+            }
+
+            var escaped = physical.Replace("\"", "\"\"", StringComparison.Ordinal);
+            await using (var alter = new NpgsqlCommand(
+                $"ALTER TABLE dbo.\"{tableName}\" ADD COLUMN IF NOT EXISTS \"{escaped}\" text NULL;",
+                connection))
+                await alter.ExecuteNonQueryAsync(cancellationToken);
+            existing.Add(physical);
+
+            if (string.IsNullOrWhiteSpace(root.ColumnName))
+            {
+                await using var backfill = new NpgsqlCommand(
+                    """
+                    UPDATE dbo."wFormControl"
+                    SET "columnName" = @Physical
+                    WHERE "wFormId" = @FormId AND "jsonId" = @JsonId
+                      AND ("columnName" IS NULL OR BTRIM("columnName") = '')
+                    """,
+                    connection);
+                backfill.Parameters.AddWithValue("@Physical", physical);
+                backfill.Parameters.AddWithValue("@FormId", formId);
+                backfill.Parameters.AddWithValue("@JsonId", root.JsonId);
+                await backfill.ExecuteNonQueryAsync(cancellationToken);
+            }
+        }
     }
 
     private async Task WriteFormTableColumnsAsync(
@@ -1164,7 +1305,8 @@ LIMIT 1;
         CancellationToken cancellationToken)
     {
         var lineItems = columns
-            .Where(column => NormalizeFieldKey(column.Label) is "lineitem" or "lineitems")
+            .Where(column => IsQuoteLineItemTable(column.Label)
+                || NormalizeFieldKey(column.Label) == "compare")
             .Where(column => !string.IsNullOrWhiteSpace(column.JsonId) && !string.IsNullOrWhiteSpace(column.Json))
             .ToList();
         if (lineItems.Count == 0)
@@ -1422,7 +1564,36 @@ LIMIT 1;
                 && NormalizeFieldKey(c.Label) is "lineitem" or "lineitems");
         }
 
+        // Quote ALT/OPT sections must land on their own tables, never the main one.
+        if (norm is "altlineitem" or "altlineitems" or "alternativelineitem" or "alternativelineitems")
+        {
+            return roots.FirstOrDefault(c =>
+                c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
+                && NormalizeFieldKey(c.Label) is "altlineitem" or "altlineitems" or "alternativelineitem" or "alternativelineitems");
+        }
+
+        if (norm is "optlineitem" or "optlineitems" or "optionallineitem" or "optionallineitems")
+        {
+            return roots.FirstOrDefault(c =>
+                c.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase)
+                && NormalizeFieldKey(c.Label) is "optlineitem" or "optlineitems" or "optionallineitem" or "optionallineitems");
+        }
+
         return null;
+    }
+
+    /// <summary>All quote tables (main, quote_2, quote_3, legacy ALT/OPT) share the same row shape.</summary>
+    private static bool IsQuoteLineItemTable(string? label)
+    {
+        var key = NormalizeFieldKey(label ?? string.Empty);
+        return key is "lineitem" or "lineitems"
+            or "quote1lineitem" or "quote1lineitems"
+            or "quote2lineitem" or "quote2lineitems"
+            or "quote3lineitem" or "quote3lineitems"
+            or "altlineitem" or "altlineitems"
+            or "optlineitem" or "optlineitems"
+            or "alternativelineitem" or "alternativelineitems"
+            or "optionallineitem" or "optionallineitems";
     }
 
     private static string? FormatQualifierValue(
@@ -1432,7 +1603,7 @@ LIMIT 1;
     {
         if (control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase))
         {
-            var lineItemTable = NormalizeFieldKey(control.Label) is "lineitem" or "lineitems";
+            var lineItemTable = IsQuoteLineItemTable(control.Label);
             return FormatQualifierTable(raw, control, controls, lineItemTable, useJsonId: false);
         }
 
@@ -1453,6 +1624,11 @@ LIMIT 1;
                 return null;
 
             var children = controls.Where(c => c.ParentId == table.Id).OrderBy(c => c.Id).ToList();
+            // A newly added ALT/OPT table may have no child column controls yet.
+            // Keep the agent rows as-is instead of dropping the whole section.
+            if (children.Count == 0)
+                return raw;
+
             var roles = RolesForTable(table);
             using var stream = new MemoryStream();
             using (var writer = new Utf8JsonWriter(stream))
@@ -1462,6 +1638,20 @@ LIMIT 1;
                 var rowNumber = 0;
                 foreach (var row in doc.RootElement.EnumerateArray())
                 {
+                    // Plain text rows (e.g. Compare) go into the table's first column.
+                    if (row.ValueKind == JsonValueKind.String)
+                    {
+                        var text = row.GetString();
+                        if (string.IsNullOrWhiteSpace(text))
+                            continue;
+                        writer.WriteStartObject();
+                        writer.WritePropertyName(useJsonId ? children[0].JsonId : children[0].Label);
+                        writer.WriteStringValue(text);
+                        writer.WriteEndObject();
+                        wroteRow = true;
+                        continue;
+                    }
+
                     if (row.ValueKind != JsonValueKind.Object)
                         continue;
 
@@ -1575,7 +1765,7 @@ LIMIT 1;
             return ["Item", "Category", "Match", "Catalog Ref", "Note"];
         if (key is "excludeditems" or "excludeditem")
             return ["Item", "Reason"];
-        if (key is "lineitem" or "lineitems")
+        if (IsQuoteLineItemTable(table.Label))
             return ["#", "Product", "Qty", "Price", "Subtotal"];
         return [];
     }
@@ -2081,7 +2271,27 @@ LIMIT 1;
     {
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         using var doc = JsonDocument.Parse(json);
-        CopyFlat(FindRootOrNestedObject(doc.RootElement, "quote_result"), fields, skipMatchedItems: true);
+        // Python nests everything inside quote_result:
+        // { quote_result: { ...quote 1..., "quote_2": {...}, "quote_3": {...}, "compare": {...} } }
+        // quote_2 / quote_3 / compare are looked up INSIDE quote_result first;
+        // root-level siblings are accepted as a fallback.
+        var quote = FindRootOrNestedObject(doc.RootElement, "quote_result");
+        CopyFlat(quote, fields, skipMatchedItems: true);
+        fields.Remove("quote_2");
+        fields.Remove("quote_3");
+        fields.Remove("compare");
+        CopyQuoteSectionAsAltOpt(FindQuoteMember(quote, doc.RootElement, "quote_2"), "quote_2", "ALT", fields);
+        CopyQuoteSectionAsAltOpt(FindQuoteMember(quote, doc.RootElement, "quote_3"), "quote_3", "OPT", fields);
+        // "compare" (quote_1 vs quote_2 / quote_3 diff) has no nested control
+        // structure; save it into the form's Compare dynamic table as readable rows.
+        var compareRows = BuildCompareRows(FindQuoteMember(quote, doc.RootElement, "compare"));
+        if (compareRows.Count > 0)
+            fields["Compare"] = JsonSerializer.Serialize(compareRows);
+        // Agent sends "Freight Estimate" when no "Freight" key is present.
+        if (!fields.ContainsKey("Freight")
+            && fields.TryGetValue("Freight Estimate", out var freightEstimate)
+            && !string.IsNullOrWhiteSpace(freightEstimate))
+            fields["Freight"] = freightEstimate;
         if (doc.RootElement.TryGetProperty("estimate_number", out var estimate)
             && estimate.ValueKind == JsonValueKind.String)
             fields["estimate_number"] = estimate.GetString() ?? string.Empty;
@@ -2090,6 +2300,150 @@ LIMIT 1;
             && !string.IsNullOrWhiteSpace(orderNumber))
             fields["estimate_number"] = orderNumber;
         return fields;
+    }
+
+    /// <summary>Member of quote_result first (Python nests quote_2/quote_3/compare there), root as fallback.</summary>
+    private static JsonElement FindQuoteMember(JsonElement quote, JsonElement root, string name)
+    {
+        if (quote.ValueKind == JsonValueKind.Object)
+        {
+            foreach (var prop in quote.EnumerateObject())
+            {
+                if (prop.Name.Equals(name, StringComparison.OrdinalIgnoreCase)
+                    && prop.Value.ValueKind == JsonValueKind.Object)
+                    return prop.Value;
+            }
+        }
+
+        return FindRootOrNestedObject(root, name);
+    }
+
+    /// <summary>
+    /// Maps a quote_2 / quote_3 object onto the ALT / OPT form section:
+    /// "quote_2 Line Item" -&gt; "ALT Line Item", "quote_2 Subtotal" -&gt; "ALT Subtotal",
+    /// "quote_2 Hst" -&gt; "ALT HST", "quote_3 Total" -&gt; "OPT Total", etc. A section with
+    /// no Line Item (e.g. quote_3 "NO VALID THIRD OPTION") maps nothing.
+    /// Original prefixed keys are kept too, in case Quote 2/3 controls are added later.
+    /// </summary>
+    private static void CopyQuoteSectionAsAltOpt(
+        JsonElement section,
+        string sourcePrefix,
+        string targetPrefix,
+        Dictionary<string, string> fields)
+    {
+        if (section.ValueKind != JsonValueKind.Object)
+            return;
+
+        foreach (var prop in section.EnumerateObject())
+        {
+            if (prop.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+                continue;
+
+            var value = prop.Value.ValueKind == JsonValueKind.String
+                ? prop.Value.GetString() ?? string.Empty
+                : prop.Value.GetRawText();
+            fields[prop.Name] = value;
+
+            var stripped = prop.Name.StartsWith(sourcePrefix, StringComparison.OrdinalIgnoreCase)
+                ? prop.Name[sourcePrefix.Length..].Trim()
+                : prop.Name;
+            var target = NormalizeFieldKey(stripped) switch
+            {
+                "lineitem" or "lineitems" => $"{targetPrefix} Line Item",
+                "subtotal" => $"{targetPrefix} Subtotal",
+                "discount" => $"{targetPrefix} Discount",
+                "freight" or "freightestimate" => $"{targetPrefix} Freight",
+                "hst" => $"{targetPrefix} HST",
+                "total" => $"{targetPrefix} Total",
+                "remarks" => $"{targetPrefix} Remarks",
+                _ => null
+            };
+            if (target is not null && !string.IsNullOrWhiteSpace(value))
+                fields[target] = value;
+        }
+    }
+
+    /// <summary>
+    /// Flattens root "compare" into one text row per change, for the form's
+    /// single-column Compare dynamic table (child "Column 1"):
+    /// "quote_2 Line Item Added: PRODUCT (Qty 2 x 1635 = 3270)",
+    /// "quote_2 Subtotal: 13158.5 -&gt; 17889.36", "quote_3: No comparison".
+    /// </summary>
+    private static List<string> BuildCompareRows(JsonElement compare)
+    {
+        var rows = new List<string>();
+        if (compare.ValueKind != JsonValueKind.Object)
+            return rows;
+
+        foreach (var section in compare.EnumerateObject())
+        {
+            if (section.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            {
+                rows.Add($"{section.Name}: No comparison");
+                continue;
+            }
+
+            if (section.Value.ValueKind != JsonValueKind.Object)
+            {
+                rows.Add($"{section.Name}: {CompareCellText(section.Value)}");
+                continue;
+            }
+
+            foreach (var change in section.Value.EnumerateObject())
+            {
+                if (NormalizeFieldKey(change.Name) is "lineitem" or "lineitems"
+                    && change.Value.ValueKind == JsonValueKind.Object)
+                {
+                    foreach (var kind in change.Value.EnumerateObject())
+                    {
+                        if (kind.Value.ValueKind != JsonValueKind.Array)
+                            continue;
+                        foreach (var item in kind.Value.EnumerateArray())
+                        {
+                            rows.Add(item.ValueKind == JsonValueKind.Object
+                                ? $"{section.Name} Line Item {kind.Name}: {CompareProductText(item)}"
+                                : $"{section.Name} Line Item {kind.Name}: {CompareCellText(item)}");
+                        }
+                    }
+                    continue;
+                }
+
+                if (change.Value.ValueKind == JsonValueKind.Object
+                    && TryGetPropertyIgnoreCase(change.Value, "From", out var from)
+                    && TryGetPropertyIgnoreCase(change.Value, "To", out var to))
+                {
+                    rows.Add($"{section.Name} {change.Name}: {CompareCellText(from)} -> {CompareCellText(to)}");
+                    continue;
+                }
+
+                rows.Add($"{section.Name} {change.Name}: {CompareCellText(change.Value)}");
+            }
+        }
+
+        return rows;
+    }
+
+    private static string CompareProductText(JsonElement item)
+    {
+        var product = TryGetPropertyIgnoreCase(item, "Product", out var p) ? CompareCellText(p) : "?";
+        var qty = TryGetPropertyIgnoreCase(item, "Qty", out var q) ? CompareCellText(q) : "?";
+        var price = TryGetPropertyIgnoreCase(item, "Price", out var pr) ? CompareCellText(pr) : "?";
+        var subtotal = TryGetPropertyIgnoreCase(item, "Subtotal", out var s) ? CompareCellText(s) : "?";
+        return $"{product} (Qty {qty} x {price} = {subtotal})";
+    }
+
+    private static string CompareCellText(JsonElement value)
+    {
+        var text = value.ValueKind switch
+        {
+            JsonValueKind.String => value.GetString() ?? string.Empty,
+            JsonValueKind.Array => string.Join("; ", value.EnumerateArray().Select(CompareCellText)),
+            JsonValueKind.Object => value.GetRawText(),
+            JsonValueKind.Null or JsonValueKind.Undefined => string.Empty,
+            _ => value.GetRawText()
+        };
+        text = text.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
+        return text.Length > 500 ? text[..500] : text;
     }
 
     private static bool IsMatchedItemsField(string name)

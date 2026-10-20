@@ -29,12 +29,14 @@ POST /api/workflows/document/preview
 | `formData` | Yes | Current form values keyed by **jsonId**. Tables are arrays; each cell is also keyed by the column jsonId. |
 | `templateJson` | Yes | The document node `templateJson` (or `pdfTemplate`) from the workflow designer. Send the object as-is. |
 | `formId` | No | Form id. Send it when you have it. If omitted, the API looks up the form from the first jsonId in `formData`. |
+| `quoteType` | No | Which quote to render: `quote_1` (default), `quote_2`, or `quote_3`. Python uses it to pick the section: `quote_1` → `Line Item` + `Subtotal`/`Freight`/`HST`/`Total`, `quote_2` → `quote_2 Line Item` + `quote_2 *`, `quote_3` → `quote_3 Line Item` + `quote_3 *`. Legacy values `MAIN`/`ALT`/`OPT` are accepted as aliases for `quote_1`/`quote_2`/`quote_3`. |
 
 `formData` and `templateJson` may be JSON objects. A JSON string is also accepted.
 
 ```json
 {
   "formId": "787372d8-d66a-47f6-ba3f-36cb6dffb360",
+  "quoteType": "quote_2",
   "formData": {
     "a1b2c3d4-order-number": "EST-900001",
     "b2c3d4e5-billing-address": "123 King St",
@@ -53,13 +55,15 @@ POST /api/workflows/document/preview
 }
 ```
 
+Call the endpoint **once per quote** you want to preview — e.g. three preview buttons (Quote 1 / Quote 2 / Quote 3) each sending `quoteType: "quote_1"`, `"quote_2"`, `"quote_3"` respectively. Each call returns that one quote's PDF only; nothing is attached and the ticket does not move.
+
 Use the real jsonIds from the form and the real template from the document node. The ids above are only to show the shape.
 
 ---
 
 ## 3. What the API does before Python
 
-The API converts jsonId keys to form field names, then posts that named `formData` plus `templateJson` to the Python chat function (`intent` `ftl_quote_estimator`).
+The API converts jsonId keys to form field names, then posts that named `formData` plus `templateJson` and `quoteType` to the Python chat function (`intent` `ftl_quote_estimator`, `POST /chat`).
 
 | You send | Python receives |
 |----------|-----------------|
@@ -78,6 +82,7 @@ Table column titles come from the form field name. The template `dataKey` values
 {
   "fileName": "quote.pdf",
   "pdfBase64": "JVBERi0xLjQK...",
+  "quoteType": "quote_2",
   "formData": {
     "Order Number": "EST-900001",
     "Billing Address": "123 King St",
@@ -96,7 +101,10 @@ Table column titles come from the form field name. The template `dataKey` values
 |-------|-----|
 | `pdfBase64` | Decode and show the PDF. |
 | `fileName` | Download name. |
+| `quoteType` | The normalized quote that was rendered (`quote_1` / `quote_2` / `quote_3`). |
 | `formData` | The named payload that was sent to Python. Use it to confirm the keys match the template. |
+
+> **Document Generate node (no frontend call):** When the workflow reaches the Document Generate step, the API automatically calls Python **3 times** — `quoteType` `quote_1`, `quote_2`, `quote_3` — attaches all 3 PDFs (e.g. `EST-900001_quote_1.pdf`, `EST-900001_quote_2.pdf`, `EST-900001_quote_3.pdf`), and moves the ticket once. The frontend does nothing here.
 
 Show the PDF in the browser:
 
@@ -124,5 +132,6 @@ const url = URL.createObjectURL(blob);
 | `Agents:ChatUrl is not configured.` | API chat URL is not set. |
 | `FTL document response did not include pdf_base64.` | Python did not return a PDF. |
 | `FTL document pdf_base64 is not valid base64.` | Python PDF payload could not be decoded. |
+| `quoteType must be quote_1, quote_2, or quote_3. Got '...'.` | `quoteType` is not one of the accepted values (or alias). |
 
 A missing field name in the PDF means that value was empty in `formData`, or the template `dataKey` does not match the field name in the response `formData`.
