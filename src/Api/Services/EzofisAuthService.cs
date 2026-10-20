@@ -494,6 +494,8 @@ public sealed class EzofisAuthService : IEzofisAuthService
         {
             return loginType.Equals("GOOGLE", StringComparison.OrdinalIgnoreCase) ||
                    loginType.Equals("Google", StringComparison.OrdinalIgnoreCase) ||
+                   // Canonical LoginType stored by CreateUser/UpdateUser validation.
+                   loginType.Equals("GoogleSSO", StringComparison.OrdinalIgnoreCase) ||
                    authStrategy.Equals(SaaSApp.Users.Domain.Entities.User.AuthStrategyGoogle, StringComparison.OrdinalIgnoreCase);
         }
 
@@ -501,6 +503,11 @@ public sealed class EzofisAuthService : IEzofisAuthService
                loginType.Equals("Microsoft", StringComparison.OrdinalIgnoreCase) ||
                loginType.Equals("OFFICE365", StringComparison.OrdinalIgnoreCase) ||
                loginType.Equals("Office365", StringComparison.OrdinalIgnoreCase) ||
+               // Canonical LoginType stored by CreateUser/UpdateUser validation
+               // ("MS Entra ID" in UserCreateValidation). Without this, every
+               // Entra user was rejected with "You should login with MS Entra ID."
+               loginType.Equals("MS Entra ID", StringComparison.OrdinalIgnoreCase) ||
+               loginType.Equals("Microsoft Entra ID", StringComparison.OrdinalIgnoreCase) ||
                authStrategy.Equals(SaaSApp.Users.Domain.Entities.User.AuthStrategyOffice365, StringComparison.OrdinalIgnoreCase);
     }
 
