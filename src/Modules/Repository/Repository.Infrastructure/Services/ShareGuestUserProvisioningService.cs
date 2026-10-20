@@ -324,6 +324,7 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
 
         if (loginType.Equals("GOOGLE", StringComparison.OrdinalIgnoreCase)
             || loginType.Equals("Google", StringComparison.OrdinalIgnoreCase)
+            || loginType.Equals("GoogleSSO", StringComparison.OrdinalIgnoreCase)
             || authStrategy.Equals(User.AuthStrategyGoogle, StringComparison.OrdinalIgnoreCase))
         {
             return "google";
@@ -333,6 +334,9 @@ public sealed class ShareGuestUserProvisioningService : IShareGuestUserProvision
             || loginType.Equals("Microsoft", StringComparison.OrdinalIgnoreCase)
             || loginType.Equals("OFFICE365", StringComparison.OrdinalIgnoreCase)
             || loginType.Equals("Office365", StringComparison.OrdinalIgnoreCase)
+            // Canonical LoginType from CreateUser/UpdateUser validation.
+            || loginType.Equals("MS Entra ID", StringComparison.OrdinalIgnoreCase)
+            || loginType.Equals("Microsoft Entra ID", StringComparison.OrdinalIgnoreCase)
             || authStrategy.Equals(User.AuthStrategyOffice365, StringComparison.OrdinalIgnoreCase))
         {
             return "microsoft";
