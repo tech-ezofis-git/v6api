@@ -180,6 +180,13 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<IMjbUsAgentPipelineService, MjbUsAgentPipelineService>();
         services.AddScoped<IMjbUsAgentJobClient, MjbUsAgentJobClient>();
         services.AddScoped<RunMjbUsAgentJob>();
+        services.AddHttpClient(nameof(QuanticsFormSyncService), client =>
+        {
+            client.Timeout = Timeout.InfiniteTimeSpan;
+        });
+        services.AddScoped<IQuanticsFormSyncService, QuanticsFormSyncService>();
+        services.AddScoped<IQuanticsFormSyncJobClient, QuanticsFormSyncJobClient>();
+        services.AddScoped<RunQuanticsFormSyncJob>();
 
         services.AddHttpClient(nameof(FieldMappingService), client =>
         {
