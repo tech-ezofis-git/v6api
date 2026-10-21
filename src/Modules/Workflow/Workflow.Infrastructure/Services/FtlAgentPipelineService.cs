@@ -139,9 +139,14 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             var protectedIds = NonEmptyFormKeys(existingFormData);
             // All quote tables (main, quote_2, quote_3, legacy ALT/OPT, Compare)
             // are refreshed by a fresh quote, not just the main "Line Item" table.
+            // Object-shaped dynamic tables (Internal Notes, Compare, ...) are
+            // agent-owned too: a rerun must replace the previous value instead
+            // of keeping it as a protected pre-existing field.
             var lineItemIds = mapped.TableColumns
                 .Where(column => IsQuoteLineItemTable(column.Label)
-                    || NormalizeFieldKey(column.Label) == "compare")
+                    || NormalizeFieldKey(column.Label) == "compare"
+                    || (!string.IsNullOrWhiteSpace(column.Json)
+                        && column.Json.TrimStart().StartsWith('{')))
                 .Select(column => column.JsonId)
                 .ToHashSet(StringComparer.OrdinalIgnoreCase);
             foreach (var id in lineItemIds)
@@ -1338,10 +1343,13 @@ LIMIT 1;
         var isTable = control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase);
         if (isTable)
         {
-            // Compare: store the coming compare JSON fully, exactly as received.
-            // Do NOT convert it into table rows, even though the control is a TABLE.
-            if (NormalizeFieldKey(control.Label) == "compare"
-                && !string.IsNullOrWhiteSpace(raw)
+            // Object-shaped table values (Compare, Internal Notes
+            // {Confirmed, Unknown, Technical Review, ...}, and any other
+            // DYNAMIC_TABLE/TABLE field whose quote key returns a JSON object):
+            // store the coming JSON fully, exactly as received. Do NOT convert
+            // it into table rows or drop it — row conversion needs an array,
+            // so object values were silently lost before this.
+            if (!string.IsNullOrWhiteSpace(raw)
                 && raw.TrimStart().StartsWith('{'))
             {
                 tableColumns.RemoveAll(column =>
@@ -1519,7 +1527,8 @@ LIMIT 1;
     {
         var lineItems = columns
             .Where(column => IsQuoteLineItemTable(column.Label)
-                || NormalizeFieldKey(column.Label) == "compare")
+                || NormalizeFieldKey(column.Label) == "compare"
+                || column.Json.TrimStart().StartsWith('{'))
             .Where(column => !string.IsNullOrWhiteSpace(column.JsonId) && !string.IsNullOrWhiteSpace(column.Json))
             .ToList();
         if (lineItems.Count == 0)
