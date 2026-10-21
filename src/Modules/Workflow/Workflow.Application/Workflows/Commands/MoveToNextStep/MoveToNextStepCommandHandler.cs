@@ -24,6 +24,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly ICurrentUserProvider _currentUserProvider;
     private readonly IFtlAgentJobClient _ftlAgentJobClient;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
+    private readonly IQuanticsFormSyncJobClient _quanticsFormSync;
     private readonly ILogger<MoveToNextStepCommandHandler> _logger;
 
     public MoveToNextStepCommandHandler(
@@ -42,6 +43,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         ICurrentUserProvider currentUserProvider,
         IFtlAgentJobClient ftlAgentJobClient,
         IApAgentJobProgressService apAgentJobProgress,
+        IQuanticsFormSyncJobClient quanticsFormSync,
         ILogger<MoveToNextStepCommandHandler> logger)
     {
         _repository = repository;
@@ -59,6 +61,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _currentUserProvider = currentUserProvider;
         _ftlAgentJobClient = ftlAgentJobClient;
         _apAgentJobProgress = apAgentJobProgress;
+        _quanticsFormSync = quanticsFormSync;
         _logger = logger;
     }
 
@@ -487,6 +490,32 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         string? ftlJobId = null;
         if (!isCompleted && nextDefinitionStep != null)
             ftlJobId = await TryEnqueueFtlAgentAsync(instance, workflow, nextDefinitionStep, userId, formId, cancellationToken);
+
+        // Quantics packaging: on completion, sync the ticket form to the master form
+        // via the Python form_sync chat intent (background job; never fails the move).
+        if (isCompleted && QuanticsPackaging.IsThisWorkflow(instance.WorkflowId, instance.TenantId))
+        {
+            try
+            {
+                var syncJobId = await _quanticsFormSync.EnqueueAsync(
+                    new QuanticsFormSyncJobArgs(
+                        instance.TenantId,
+                        userId,
+                        instance.WorkflowId,
+                        instance.Id,
+                        formId,
+                        formEntryId),
+                    cancellationToken);
+                _logger.LogInformation(
+                    "Enqueued Quantics form sync job {JobId} for completed instance {InstanceId}.",
+                    syncJobId,
+                    instance.Id);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogError(ex, "Quantics form sync enqueue failed for instance {InstanceId}.", instance.Id);
+            }
+        }
 
         return new MoveToNextStepCommandResult(
             true,
