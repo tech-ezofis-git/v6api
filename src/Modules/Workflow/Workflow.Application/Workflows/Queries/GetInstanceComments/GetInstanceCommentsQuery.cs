@@ -24,5 +24,9 @@ public record CommentItem(
     string? EmbedJson,
     bool EmbedStatus,
     DateTime CreatedAtUtc,
-    Guid CreatedBy
+    Guid CreatedBy,
+    /// <summary>Display author for the UI. Agent comments use "AI Agent"; do not resolve CreatedBy to a person for those.</summary>
+    string? AuthorName = null,
+    string AuthorType = "USER",
+    bool IsAgent = false
 );

@@ -16,7 +16,11 @@ public record MoveToNextStepCommand(
     IReadOnlyDictionary<string, string>? FormDataFields = null,
     string? FormLineItemsJson = null,
     string? SubmittedFormDataJson = null,
-    bool EndWorkflow = false
+    bool EndWorkflow = false,
+    /// <summary>Optional author for the move comment only (e.g. the Pilot/agent user).
+    /// Step transition still uses <see cref="ActivityUserId"/>.</summary>
+    Guid? CommentCreatedBy = null,
+    string? CommentAuthorName = null
 ) : IRequest<MoveToNextStepCommandResult>;
 
 public record MoveToNextStepCommandResult(

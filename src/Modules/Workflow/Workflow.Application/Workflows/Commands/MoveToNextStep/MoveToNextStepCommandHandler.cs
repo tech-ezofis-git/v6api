@@ -422,8 +422,9 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
                 instance.WorkflowId,
                 instance.Id,
                 request.Comments.Trim(),
-                userId,
+                request.CommentCreatedBy ?? userId,
                 stepInstanceId,
+                request.CommentAuthorName,
                 cancellationToken: cancellationToken);
         }
 
