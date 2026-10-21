@@ -1138,6 +1138,19 @@ LIMIT 1;
         var isTable = control.Type.Contains("TABLE", StringComparison.OrdinalIgnoreCase);
         if (isTable)
         {
+            // Compare: store the coming compare JSON fully, exactly as received.
+            // Do NOT convert it into table rows, even though the control is a TABLE.
+            if (NormalizeFieldKey(control.Label) == "compare"
+                && !string.IsNullOrWhiteSpace(raw)
+                && raw.TrimStart().StartsWith('{'))
+            {
+                tableColumns.RemoveAll(column =>
+                    string.Equals(column.JsonId, control.JsonId, StringComparison.OrdinalIgnoreCase));
+                tableColumns.Add(new FtlTableColumn(control.ColumnName, control.Label, control.JsonId, raw, raw));
+                formDataFields[control.JsonId] = raw;
+                return;
+            }
+
             var lineItemTable = IsQuoteLineItemTable(control.Label);
             var tableJson = FormatQualifierTable(raw, control, controls, lineItemTable, useJsonId: true);
             if (string.IsNullOrWhiteSpace(tableJson))
@@ -2282,11 +2295,12 @@ LIMIT 1;
         fields.Remove("compare");
         CopyQuoteSectionAsAltOpt(FindQuoteMember(quote, doc.RootElement, "quote_2"), "quote_2", "ALT", fields);
         CopyQuoteSectionAsAltOpt(FindQuoteMember(quote, doc.RootElement, "quote_3"), "quote_3", "OPT", fields);
-        // "compare" (quote_1 vs quote_2 / quote_3 diff) has no nested control
-        // structure; save it into the form's Compare dynamic table as readable rows.
-        var compareRows = BuildCompareRows(FindQuoteMember(quote, doc.RootElement, "compare"));
-        if (compareRows.Count > 0)
-            fields["Compare"] = JsonSerializer.Serialize(compareRows);
+        // "compare" (quote_1 vs quote_2 / quote_3 diff): save the coming JSON
+        // fully, exactly as received, into the form's Compare column.
+        // It is NOT converted into table rows.
+        var compare = FindQuoteMember(quote, doc.RootElement, "compare");
+        if (compare.ValueKind == JsonValueKind.Object)
+            fields["Compare"] = compare.GetRawText();
         // Agent sends "Freight Estimate" when no "Freight" key is present.
         if (!fields.ContainsKey("Freight")
             && fields.TryGetValue("Freight Estimate", out var freightEstimate)
@@ -2361,89 +2375,6 @@ LIMIT 1;
             if (target is not null && !string.IsNullOrWhiteSpace(value))
                 fields[target] = value;
         }
-    }
-
-    /// <summary>
-    /// Flattens root "compare" into one text row per change, for the form's
-    /// single-column Compare dynamic table (child "Column 1"):
-    /// "quote_2 Line Item Added: PRODUCT (Qty 2 x 1635 = 3270)",
-    /// "quote_2 Subtotal: 13158.5 -&gt; 17889.36", "quote_3: No comparison".
-    /// </summary>
-    private static List<string> BuildCompareRows(JsonElement compare)
-    {
-        var rows = new List<string>();
-        if (compare.ValueKind != JsonValueKind.Object)
-            return rows;
-
-        foreach (var section in compare.EnumerateObject())
-        {
-            if (section.Value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
-            {
-                rows.Add($"{section.Name}: No comparison");
-                continue;
-            }
-
-            if (section.Value.ValueKind != JsonValueKind.Object)
-            {
-                rows.Add($"{section.Name}: {CompareCellText(section.Value)}");
-                continue;
-            }
-
-            foreach (var change in section.Value.EnumerateObject())
-            {
-                if (NormalizeFieldKey(change.Name) is "lineitem" or "lineitems"
-                    && change.Value.ValueKind == JsonValueKind.Object)
-                {
-                    foreach (var kind in change.Value.EnumerateObject())
-                    {
-                        if (kind.Value.ValueKind != JsonValueKind.Array)
-                            continue;
-                        foreach (var item in kind.Value.EnumerateArray())
-                        {
-                            rows.Add(item.ValueKind == JsonValueKind.Object
-                                ? $"{section.Name} Line Item {kind.Name}: {CompareProductText(item)}"
-                                : $"{section.Name} Line Item {kind.Name}: {CompareCellText(item)}");
-                        }
-                    }
-                    continue;
-                }
-
-                if (change.Value.ValueKind == JsonValueKind.Object
-                    && TryGetPropertyIgnoreCase(change.Value, "From", out var from)
-                    && TryGetPropertyIgnoreCase(change.Value, "To", out var to))
-                {
-                    rows.Add($"{section.Name} {change.Name}: {CompareCellText(from)} -> {CompareCellText(to)}");
-                    continue;
-                }
-
-                rows.Add($"{section.Name} {change.Name}: {CompareCellText(change.Value)}");
-            }
-        }
-
-        return rows;
-    }
-
-    private static string CompareProductText(JsonElement item)
-    {
-        var product = TryGetPropertyIgnoreCase(item, "Product", out var p) ? CompareCellText(p) : "?";
-        var qty = TryGetPropertyIgnoreCase(item, "Qty", out var q) ? CompareCellText(q) : "?";
-        var price = TryGetPropertyIgnoreCase(item, "Price", out var pr) ? CompareCellText(pr) : "?";
-        var subtotal = TryGetPropertyIgnoreCase(item, "Subtotal", out var s) ? CompareCellText(s) : "?";
-        return $"{product} (Qty {qty} x {price} = {subtotal})";
-    }
-
-    private static string CompareCellText(JsonElement value)
-    {
-        var text = value.ValueKind switch
-        {
-            JsonValueKind.String => value.GetString() ?? string.Empty,
-            JsonValueKind.Array => string.Join("; ", value.EnumerateArray().Select(CompareCellText)),
-            JsonValueKind.Object => value.GetRawText(),
-            JsonValueKind.Null or JsonValueKind.Undefined => string.Empty,
-            _ => value.GetRawText()
-        };
-        text = text.Replace("\r", " ", StringComparison.Ordinal).Replace("\n", " ", StringComparison.Ordinal).Trim();
-        return text.Length > 500 ? text[..500] : text;
     }
 
     private static bool IsMatchedItemsField(string name)
