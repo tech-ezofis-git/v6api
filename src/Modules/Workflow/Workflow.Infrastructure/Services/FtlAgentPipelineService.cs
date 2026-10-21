@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -38,6 +39,10 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     private readonly IOptions<ApAgentOptions> _apAgentOptions;
     private readonly AgentsChatOptions _agentsChat;
     private readonly ILogger<FtlAgentPipelineService> _logger;
+
+    /// <summary>Display author for agent-generated move comments (backed by the Pilot service user).</summary>
+    private const string AgentCommentAuthorName = "AI Agent";
+    private const string DefaultPilotEmail = "pilot@ezofis.com";
 
     public FtlAgentPipelineService(
         IHttpClientFactory httpClientFactory,
@@ -201,6 +206,11 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             ? ResolveQualifyReview(storedJson, step)
             : "Submit";
 
+        // Agent moves are commented as AI Agent (backed by the Pilot service user), not as the human
+        // who started the job. The step transition itself still uses args.UserId.
+        var pilotUserId = await ResolvePilotUserIdAsync(args.TenantId, cancellationToken);
+        var agentComment = BuildAgentComment(args.Mode, storedJson, fields, lineItemsJson, synthesizedQualifier);
+
         // Move-next ApplyFormDataToEzfb writes FormDataFields by jsonId, and FormLineItemsJson
         // from quote_result["Line Item"] onto ezfb_*_items.lineitem.
         var moved = await _mediator.Send(
@@ -208,10 +218,10 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 args.InstanceId,
                 args.ActivityId,
                 Review: review,
-                Comments: synthesizedQualifier
-                    ? "Qualifier agent did not return a result."
-                    : $"FTL {args.Mode}",
+                Comments: agentComment,
                 ActivityUserId: args.UserId,
+                CommentCreatedBy: pilotUserId,
+                CommentAuthorName: AgentCommentAuthorName,
                 FormId: formId,
                 FormEntryId: formEntryId,
                 FormDataFields: mapped.FormDataFields,
@@ -246,13 +256,19 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
 
         var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
         var formData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var pilotUserId = await ResolvePilotUserIdAsync(args.TenantId, cancellationToken);
+        var documentComment = generated.Documents.Count == 1
+            ? $"Document agent completed. I generated {generated.Documents[0].FileName}."
+            : $"Document agent completed. I generated {generated.Documents.Count} PDFs: {string.Join(", ", generated.Documents.Select(d => d.FileName))}.";
         var moved = await _mediator.Send(
             new MoveToNextStepCommand(
                 args.InstanceId,
                 args.ActivityId,
                 Review: "Generated",
-                Comments: "FTL document",
+                Comments: documentComment,
                 ActivityUserId: args.UserId,
+                CommentCreatedBy: pilotUserId,
+                CommentAuthorName: AgentCommentAuthorName,
                 FormId: args.FormId,
                 FormEntryId: identity?.FormEntryId,
                 SubmittedFormDataJson: formData),
@@ -417,6 +433,44 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         return new FtlDocumentPreviewResult(fileName, Convert.ToBase64String(pdfBytes), namedFormData, normalizedQuoteType);
     }
 
+    /// <summary>
+    /// Pilot service user (TenantPilotUser:Email, default pilot@ezofis.com) in the tenant DB.
+    /// Used only as the author of agent move comments; null falls back to the job user.
+    /// </summary>
+    private async Task<Guid?> ResolvePilotUserIdAsync(Guid tenantId, CancellationToken cancellationToken)
+    {
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs) || tenantId == Guid.Empty)
+            return null;
+
+        var pilotEmail = _configuration["TenantPilotUser:Email"]?.Trim();
+        if (string.IsNullOrWhiteSpace(pilotEmail))
+            pilotEmail = DefaultPilotEmail;
+
+        try
+        {
+            await using var connection = new NpgsqlConnection(tenantCs);
+            await connection.OpenAsync(cancellationToken);
+            await using var cmd = new NpgsqlCommand("""
+                SELECT "Id"
+                FROM users."Users"
+                WHERE "TenantId" = @TenantId
+                  AND LOWER("Email") = LOWER(@Email)
+                  AND "IsDeleted" = false
+                LIMIT 1
+                """, connection);
+            cmd.Parameters.AddWithValue("@TenantId", tenantId);
+            cmd.Parameters.AddWithValue("@Email", pilotEmail);
+            var value = await cmd.ExecuteScalarAsync(cancellationToken);
+            return value is Guid id && id != Guid.Empty ? id : null;
+        }
+        catch (PostgresException ex)
+        {
+            _logger.LogWarning(ex, "FTL pilot user lookup failed for tenant {TenantId}; agent comment falls back to the job user.", tenantId);
+            return null;
+        }
+    }
+
     private async Task<string?> ResolveFormIdFromFormDataAsync(string formDataJson, CancellationToken cancellationToken)
     {
         string? jsonId = null;
@@ -535,10 +589,15 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         string quoteType,
         CancellationToken cancellationToken)
     {
-        object? formData = formDataJson;
+        // The template always renders "Line Item" / "Subtotal" / "Total" (Quote 1 keys).
+        // For quote_2 / quote_3, also copy that section's rows/totals onto those canonical
+        // keys, so the PDF shows the right section even if Python ignores quoteType.
+        // The full formData (including the prefixed quote_2/quote_3 keys) is still sent.
+        var effectiveFormDataJson = BuildQuoteSectionFormData(formDataJson, quoteType);
+        object? formData = effectiveFormDataJson;
         try
         {
-            using var parsed = JsonDocument.Parse(formDataJson);
+            using var parsed = JsonDocument.Parse(effectiveFormDataJson);
             formData = JsonSerializer.Deserialize<object>(parsed.RootElement.GetRawText());
         }
         catch (JsonException)
@@ -573,7 +632,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         var responseJson = await PostAsync(chatUrl, content, cancellationToken);
         using var templateDoc = JsonDocument.Parse(template.GetRawText());
         var request = new WorkflowPdfPythonRequestDto(
-            FlattenFormData(formDataJson),
+            FlattenFormData(effectiveFormDataJson),
             "quote.pdf",
             new Dictionary<string, string>
             {
@@ -583,6 +642,58 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             },
             templateDoc.RootElement.Clone());
         return (responseJson, request);
+    }
+
+    /// <summary>
+    /// Copies the selected quote section onto the template's canonical keys:
+    /// quote_2 -&gt; "Line Item" = "quote_2 Line Item", "Subtotal" = "quote_2 Subtotal", etc.
+    /// (legacy ALT/OPT keys are accepted as fallback). quote_1 is sent unchanged.
+    /// </summary>
+    private static string BuildQuoteSectionFormData(string formDataJson, string quoteType)
+    {
+        if (string.Equals(quoteType, "quote_1", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(formDataJson))
+            return formDataJson;
+
+        JsonObject root;
+        try
+        {
+            root = JsonNode.Parse(formDataJson) as JsonObject ?? new JsonObject();
+            if (root.Count == 0)
+                return formDataJson;
+        }
+        catch (JsonException)
+        {
+            return formDataJson;
+        }
+
+        var legacyPrefix = string.Equals(quoteType, "quote_2", StringComparison.OrdinalIgnoreCase) ? "ALT" : "OPT";
+        CopySectionValue(root, "Line Item", $"{quoteType} Line Item", $"{legacyPrefix} Line Item");
+        CopySectionValue(root, "Subtotal", $"{quoteType} Subtotal", $"{legacyPrefix} Subtotal");
+        CopySectionValue(root, "Discount", $"{quoteType} Discount", $"{legacyPrefix} Discount");
+        CopySectionValue(root, "Freight", $"{quoteType} Freight", $"{legacyPrefix} Freight");
+        CopySectionValue(root, "HST", $"{quoteType} HST", $"{legacyPrefix} HST");
+        CopySectionValue(root, "Total", $"{quoteType} Total", $"{legacyPrefix} Total");
+        CopySectionValue(root, "Remarks", $"{quoteType} Remarks", $"{legacyPrefix} Remarks");
+        return root.ToJsonString();
+    }
+
+    private static void CopySectionValue(JsonObject root, string targetKey, string sourceKey, string legacySourceKey)
+    {
+        var source = FindNodeIgnoreCase(root, sourceKey) ?? FindNodeIgnoreCase(root, legacySourceKey);
+        if (source is not null)
+            root[targetKey] = source.DeepClone();
+    }
+
+    private static JsonNode? FindNodeIgnoreCase(JsonObject root, string key)
+    {
+        foreach (var prop in root)
+        {
+            if (string.Equals(prop.Key, key, StringComparison.OrdinalIgnoreCase))
+                return prop.Value;
+        }
+
+        return null;
     }
 
     private static IReadOnlyDictionary<string, string> FlattenFormData(string formDataJson)
@@ -1010,6 +1121,95 @@ LIMIT 1;
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Timeline comment written in the agent's voice (shown as AI Agent), instead of a raw
+    /// mode label like "FTL qualifier". Summarises what the agent actually did.
+    /// </summary>
+    private static string BuildAgentComment(
+        string mode,
+        string storedJson,
+        IReadOnlyDictionary<string, string> fields,
+        string? lineItemsJson,
+        bool synthesizedQualifier)
+    {
+        if (string.Equals(mode, FtlAgentStepDetector.Qualifier, StringComparison.OrdinalIgnoreCase))
+        {
+            if (synthesizedQualifier)
+                return "Qualifier agent: I could not confirm the qualification result, so this needs manual review.";
+
+            var parts = new List<string> { "Qualifier agent completed." };
+            parts.Add(string.Equals(ReadQualifyDecision(storedJson), "disqualify", StringComparison.OrdinalIgnoreCase)
+                ? "Decision: Not qualified."
+                : "Decision: Qualified.");
+            var matched = CountJsonArrayRows(Field(fields, "Matched Items"));
+            if (matched > 0)
+                parts.Add($"I matched {matched} item(s) from the enquiry.");
+            if (!string.IsNullOrWhiteSpace(Field(fields, "Reasoning")))
+                parts.Add($"Reasoning: {Truncate(Field(fields, "Reasoning")!.Trim(), 350)}");
+            if (!string.IsNullOrWhiteSpace(Field(fields, "Flags")))
+                parts.Add($"Flags: {Truncate(Field(fields, "Flags")!.Trim(), 200)}");
+            return string.Join(" ", parts);
+        }
+
+        var quoteParts = new List<string> { "Quote agent completed." };
+        var estimate = Field(fields, "estimate_number") ?? Field(fields, "Order Number");
+        if (!string.IsNullOrWhiteSpace(estimate))
+            quoteParts.Add($"Estimate {estimate.Trim()}.");
+        AddQuoteSection(quoteParts, fields, "Quote 1", "Line Item", "Total", CountJsonArrayRows(lineItemsJson));
+        AddQuoteSection(quoteParts, fields, "Quote 2", FirstField(fields, "quote_2 Line Item", "ALT Line Item"), FirstField(fields, "quote_2 Total", "ALT Total"));
+        AddQuoteSection(quoteParts, fields, "Quote 3", FirstField(fields, "quote_3 Line Item", "OPT Line Item"), FirstField(fields, "quote_3 Total", "OPT Total"));
+        return quoteParts.Count == 1
+            ? "Quote agent completed, but no line items were returned."
+            : string.Join(" ", quoteParts);
+    }
+
+    private static void AddQuoteSection(
+        List<string> parts,
+        IReadOnlyDictionary<string, string> fields,
+        string label,
+        string? itemsJson,
+        string? total)
+    {
+        var rows = CountJsonArrayRows(itemsJson);
+        if (rows <= 0)
+            return;
+        var money = FormatMoney(total);
+        parts.Add(money is null
+            ? $"I prepared {label} with {rows} line item(s)."
+            : $"I prepared {label} with {rows} line item(s), total {money}.");
+    }
+
+    private static void AddQuoteSection(
+        List<string> parts,
+        IReadOnlyDictionary<string, string> fields,
+        string label,
+        string itemsKey,
+        string totalKey,
+        int rows)
+    {
+        if (rows <= 0)
+            return;
+        var money = FormatMoney(Field(fields, totalKey));
+        parts.Add(money is null
+            ? $"I prepared {label} with {rows} line item(s)."
+            : $"I prepared {label} with {rows} line item(s), total {money}.");
+    }
+
+    private static string? Field(IReadOnlyDictionary<string, string> fields, string key) =>
+        fields.TryGetValue(key, out var value) && !string.IsNullOrWhiteSpace(value) ? value : null;
+
+    private static string? FirstField(IReadOnlyDictionary<string, string> fields, string key, string fallbackKey) =>
+        Field(fields, key) ?? Field(fields, fallbackKey);
+
+    private static string? FormatMoney(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return null;
+        return decimal.TryParse(value.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var amount)
+            ? "$" + amount.ToString("#,##0.00", CultureInfo.InvariantCulture)
+            : value.Trim();
     }
 
     private static string ResolveQualifyReview(string json, WorkflowStep step)
