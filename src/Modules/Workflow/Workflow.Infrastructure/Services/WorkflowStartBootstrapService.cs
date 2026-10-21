@@ -90,6 +90,25 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         return await RunApAgentBootstrapAsync(request, orderedSteps, startStep, dedicatedApAgent, cancellationToken);
     }
 
+    /// <summary>
+    /// Start/submit review for the START step. Designers may label the button
+    /// "Submit for Approval" etc., so use the step's own first ProceedAction
+    /// (preferring an exact "Submit") instead of assuming the literal "Submit".
+    /// </summary>
+    private static string ResolveStartProceedReview(WorkflowStep startStep)
+    {
+        var actions = WorkflowStepActionsHelper.ParseActions(startStep.ActionsJson)
+            .Where(a => !string.IsNullOrWhiteSpace(a.ProceedAction))
+            .ToList();
+        if (actions.Count == 0)
+            return WorkflowStepTransitionHelper.StartProceedReview;
+
+        return actions.FirstOrDefault(a =>
+                   string.Equals(a.ProceedAction!.Trim(), WorkflowStepTransitionHelper.StartProceedReview, StringComparison.OrdinalIgnoreCase))
+                   ?.ProceedAction!
+               ?? actions[0].ProceedAction!;
+    }
+
     private async Task<WorkflowStartBootstrapResult> RunApAgentBootstrapAsync(
         WorkflowStartBootstrapRequest request,
         IReadOnlyList<WorkflowStep> orderedSteps,
@@ -114,7 +133,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             startActivityId,
             userId,
             startStep.AssignedToUserId ?? userId,
-            WorkflowStepTransitionHelper.StartProceedReview,
+            ResolveStartProceedReview(startStep),
             mailboxForm: null,
             cancellationToken);
 
@@ -326,6 +345,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             ? startStep.ActivityId
             : startStep.Id.ToString("D");
 
+        var startReview = ResolveStartProceedReview(startStep);
         var reviewSync = await _legacyTransactionSync.SyncTransactionByActivityIdAsync(
             workflow.Id,
             instance.Id,
@@ -335,7 +355,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
             startActivityId,
             userId,
             startStep.AssignedToUserId ?? userId,
-            WorkflowStepTransitionHelper.StartProceedReview,
+            startReview,
             mailboxForm,
             cancellationToken);
 
@@ -347,7 +367,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
 
         var nextDefinitionStep = WorkflowStepActionsHelper.ResolveNextStepByReview(
                 startStep,
-                WorkflowStepTransitionHelper.StartProceedReview,
+                startReview,
                 orderedSteps)
             ?? orderedSteps.FirstOrDefault(s => s.Order > startStep.Order);
 
