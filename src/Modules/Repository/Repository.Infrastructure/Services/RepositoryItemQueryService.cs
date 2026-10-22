@@ -109,7 +109,22 @@ public sealed class RepositoryItemQueryService : IRepositoryItemQueryService
 
         if (!string.IsNullOrWhiteSpace(query.Search))
         {
-            where.Add("i.file_name LIKE @Search");
+            // Free-text search with no field name: match against every column already exposed
+            // as filterable for this repository (GET .../items/filter-fields), not just file_name --
+            // otherwise a search term that only appears in a custom field (PO number, invoice
+            // amount, etc.) silently returns nothing.
+            var searchColumns = allowedColumns
+                .Where(col => RepositoryItemTableColumns.Has(tableColumns, col))
+                .Select(RepositorySqlHelper.ColumnRef)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (searchColumns.Count == 0)
+                searchColumns.Add("file_name");
+
+            var searchOr = string.Join(
+                " OR ",
+                searchColumns.Select(col => $"TRIM(CAST(i.{col} AS varchar(4000))) ILIKE @Search"));
+            where.Add($"({searchOr})");
             parameters.Add(new NpgsqlParameter("@Search", $"%{query.Search.Trim()}%"));
         }
 
