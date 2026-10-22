@@ -32,10 +32,15 @@ public sealed class StagedFileEzfbBinder
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
 
-        var fileControlJsonIds = await LoadFileControlJsonIdsAsync(connection, normalizedFormId, cancellationToken);
+        var controls = await LoadControlsAsync(connection, normalizedFormId, cancellationToken);
+        var fileControlJsonIds = controls
+            .Where(c => IsFileControl(c.Type))
+            .Select(c => c.JsonId)
+            .ToList();
 
         var fields = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var explicitIndex = 0;
+        var updated = 0;
 
         foreach (var (staged, itemId) in archived)
         {
@@ -65,30 +70,76 @@ public sealed class StagedFileEzfbBinder
                 continue;
             }
 
+            // FILE_UPLOAD controls nested inside a TABLE/DYNAMIC_TABLE (e.g. a per-row receipt
+            // upload) are not standalone ezfb columns -- their value lives inside the parent
+            // table's row JSON. Writing targetJsonId as a flat field would either be silently
+            // skipped (jsonId matches the nested control) or, if targetJsonId is mistakenly the
+            // table's own jsonId, would overwrite every row with this raw itemId. Merge into the
+            // existing row JSON instead.
+            var control = controls.FirstOrDefault(c =>
+                string.Equals(c.JsonId, targetJsonId, StringComparison.OrdinalIgnoreCase));
+            var parent = control is { ParentId: > 0 }
+                ? controls.FirstOrDefault(c => c.Id == control.ParentId)
+                : null;
+
+            if (parent != null && IsTableControl(parent.Type))
+            {
+                var merged = await _apAgentMoveNext.MergeFileItemIntoTableCellAsync(
+                    normalizedFormId,
+                    formEntryItemId,
+                    targetJsonId,
+                    itemId,
+                    cancellationToken);
+                if (merged)
+                {
+                    updated++;
+                    _logger.LogInformation(
+                        "StagedFileEzfbBinder: merged itemId {ItemId} into table cell {JsonId} (form {FormId}, entry {FormEntryId}).",
+                        itemId,
+                        targetJsonId,
+                        normalizedFormId,
+                        formEntryItemId);
+                }
+                else
+                {
+                    _logger.LogWarning(
+                        "StagedFileEzfbBinder: could not merge itemId {ItemId} into table cell {JsonId} (form {FormId}, entry {FormEntryId}).",
+                        itemId,
+                        targetJsonId,
+                        normalizedFormId,
+                        formEntryItemId);
+                }
+
+                continue;
+            }
+
             // Legacy form FILE controls and WorkflowAttachments FormJsonId use 32-char N format.
             fields[targetJsonId] = itemId.ToString("N");
         }
 
-        if (fields.Count == 0)
-            return 0;
+        if (fields.Count > 0)
+        {
+            var flatUpdated = await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
+                normalizedFormId,
+                formEntryItemId,
+                fields,
+                lineItemsJson: null,
+                cancellationToken);
+            updated += flatUpdated;
 
-        var updated = await _apAgentMoveNext.ApplyFormDataToEzfbAsync(
-            normalizedFormId,
-            formEntryItemId,
-            fields,
-            lineItemsJson: null,
-            cancellationToken);
-
-        _logger.LogInformation(
-            "StagedFileEzfbBinder: form {FormId}, entry {FormEntryId}, wrote {Updated} FILE field(s) from staged archive.",
-            normalizedFormId,
-            formEntryItemId,
-            updated);
+            _logger.LogInformation(
+                "StagedFileEzfbBinder: form {FormId}, entry {FormEntryId}, wrote {Updated} FILE field(s) from staged archive.",
+                normalizedFormId,
+                formEntryItemId,
+                flatUpdated);
+        }
 
         return updated;
     }
 
-    private static async Task<IReadOnlyList<string>> LoadFileControlJsonIdsAsync(
+    private sealed record ControlRow(int Id, string JsonId, string? Type, int ParentId);
+
+    private static async Task<IReadOnlyList<ControlRow>> LoadControlsAsync(
         NpgsqlConnection connection,
         string normalizedFormId,
         CancellationToken cancellationToken)
@@ -96,21 +147,21 @@ public sealed class StagedFileEzfbBinder
         var candidates = await FormWFormIdResolver.BuildCandidatesAsync(connection, normalizedFormId, cancellationToken);
         foreach (var wFormId in candidates)
         {
-            var jsonIds = await QueryFileControlJsonIdsAsync(connection, wFormId, cancellationToken);
-            if (jsonIds.Count > 0)
-                return jsonIds;
+            var controls = await QueryControlsAsync(connection, wFormId, cancellationToken);
+            if (controls.Count > 0)
+                return controls;
         }
 
-        return Array.Empty<string>();
+        return Array.Empty<ControlRow>();
     }
 
-    private static async Task<List<string>> QueryFileControlJsonIdsAsync(
+    private static async Task<List<ControlRow>> QueryControlsAsync(
         NpgsqlConnection connection,
         object wFormIdValue,
         CancellationToken cancellationToken)
     {
         const string sql = """
-            SELECT "jsonId", type
+            SELECT id, "jsonId", type, COALESCE("parentId", 0)
             FROM dbo."wFormControl"
             WHERE "wFormId" = @FormId
               AND COALESCE("isDeleted", false) = false
@@ -119,16 +170,17 @@ public sealed class StagedFileEzfbBinder
             ORDER BY id
             """;
 
-        var list = new List<string>();
+        var list = new List<ControlRow>();
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@FormId", wFormIdValue);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
-            var jsonId = reader.GetString(0);
-            var type = reader.IsDBNull(1) ? null : reader.GetString(1);
-            if (IsFileControl(type))
-                list.Add(jsonId);
+            list.Add(new ControlRow(
+                reader.GetInt32(0),
+                reader.GetString(1),
+                reader.IsDBNull(2) ? null : reader.GetString(2),
+                reader.GetInt32(3)));
         }
 
         return list;
@@ -142,5 +194,14 @@ public sealed class StagedFileEzfbBinder
         var t = type.Trim();
         return t.Contains("FILE", StringComparison.OrdinalIgnoreCase)
             || t.Contains("ATTACHMENT", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsTableControl(string? type)
+    {
+        if (string.IsNullOrWhiteSpace(type))
+            return false;
+
+        var t = type.Trim();
+        return t.Contains("TABLE", StringComparison.OrdinalIgnoreCase);
     }
 }

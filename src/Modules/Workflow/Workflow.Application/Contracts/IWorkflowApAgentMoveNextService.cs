@@ -49,6 +49,19 @@ public interface IWorkflowApAgentMoveNextService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Writes an archived file's repository itemId into a FILE_UPLOAD cell nested inside a
+    /// TABLE/DYNAMIC_TABLE control, merging it into the existing row JSON instead of replacing
+    /// the whole column (which <see cref="ApplyFormDataToEzfbAsync"/> refuses to do for a bare
+    /// scalar value). Returns false when the cell/table cannot be resolved.
+    /// </summary>
+    Task<bool> MergeFileItemIntoTableCellAsync(
+        string formId,
+        Guid formEntryId,
+        string cellJsonId,
+        Guid itemId,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Apply <c>po_row</c> fields to ezfb form data (formId + formEntryId).
     /// Prefers <paramref name="agentResponseJson"/> from the move-next body when provided;
     /// otherwise falls back to the latest stored agentDataValidation row.
