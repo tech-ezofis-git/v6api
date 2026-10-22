@@ -322,17 +322,30 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         // One Python call per quote: quoteType tells Python which section's
         // line items / totals to render (quote_1 = "Line Item", quote_2 = "quote_2 Line Item",
         // quote_3 = "quote_3 Line Item" + matching totals).
-        // All three PDFs are archived before ExecuteDocumentAsync moves the ticket once.
+        // Generated PDFs are archived before ExecuteDocumentAsync moves the ticket once.
+        // A section Python marks as not applicable (quote_2/quote_3 "NO VALID ...":
+        // no line items) comes back with no pdf_base64. Skip that section instead
+        // of failing the whole job — failing here stranded the ticket on the
+        // Document Generate Agent step, invisible to the next approver.
         var documents = new List<FtlGeneratedDocument>();
         WorkflowPdfPythonRequestDto? mainRequest = null;
         foreach (var quoteType in new[] { "quote_1", "quote_2", "quote_3" })
         {
             var (responseJson, pythonRequest) = await PostDocumentAsync(
                 $"{jobId}-{quoteType}", chatUrl, pythonFormData, template, quoteType, cancellationToken);
-            if (quoteType == "quote_1")
-                mainRequest = pythonRequest;
 
-            var (pdfBytes, rawFileName) = ReadGeneratedPdf(responseJson);
+            if (!TryReadGeneratedPdf(responseJson, out var pdf))
+            {
+                _logger.LogWarning(
+                    "FTL document ({QuoteType}) returned no PDF for instance {InstanceId}; skipping this quote section. Response: {Response}",
+                    quoteType,
+                    args.InstanceId,
+                    Truncate(responseJson, 500));
+                continue;
+            }
+
+            mainRequest ??= pythonRequest;
+            var (pdfBytes, rawFileName) = pdf;
             var fileName = QuoteSectionFileName(rawFileName, quoteType);
 
             await using var pdfStream = new MemoryStream(pdfBytes);
@@ -375,6 +388,10 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
                 fileName,
                 args.InstanceId);
         }
+
+        if (documents.Count == 0)
+            throw new InvalidOperationException(
+                "FTL document agent did not return a PDF for any quote section (quote_1, quote_2, quote_3).");
 
         var main = documents[0];
         return new FtlDocumentGenerateResult(
@@ -726,6 +743,22 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         }
 
         return fields;
+    }
+
+    /// <summary>
+    /// False only when the response carries no pdf at all (Python's way of saying
+    /// this quote section is not applicable). Malformed pdf data still throws.
+    /// </summary>
+    private static bool TryReadGeneratedPdf(string responseJson, out (byte[] Bytes, string FileName) pdf)
+    {
+        pdf = default;
+        using var doc = JsonDocument.Parse(responseJson);
+        var element = FindProperty(doc.RootElement, "pdf_base64");
+        if (element.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(element.GetString()))
+            return false;
+
+        pdf = ReadGeneratedPdf(responseJson);
+        return true;
     }
 
     private static (byte[] Bytes, string FileName) ReadGeneratedPdf(string responseJson)

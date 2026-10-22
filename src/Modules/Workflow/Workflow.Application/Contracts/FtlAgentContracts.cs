@@ -25,7 +25,9 @@ public interface IFtlAgentPipelineService
 
     /// <summary>
     /// Sends the current form data and the document-node template to Python three times
-    /// (quoteType quote_1, quote_2, quote_3), archives all three PDFs. Does not move the workflow.
+    /// (quoteType quote_1, quote_2, quote_3) and archives each PDF Python returns.
+    /// A section with no valid quote (no pdf_base64 in the reply) is skipped;
+    /// fails only when no section returns a PDF. Does not move the workflow.
     /// </summary>
     Task<FtlDocumentGenerateResult> GenerateDocumentAsync(
         FtlAgentJobArgs args,
