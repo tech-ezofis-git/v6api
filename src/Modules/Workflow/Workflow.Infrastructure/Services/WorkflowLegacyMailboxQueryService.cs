@@ -340,6 +340,7 @@ EXISTS (
         CancellationToken cancellationToken)
     {
         var controlsByForm = new Dictionary<string, List<FormControlSlot>>(StringComparer.OrdinalIgnoreCase);
+        var allControlsByForm = new Dictionary<string, List<FormControlNode>>(StringComparer.OrdinalIgnoreCase);
         for (var i = 0; i < items.Count; i++)
         {
             var row = items[i];
@@ -359,6 +360,19 @@ EXISTS (
                 continue;
             }
 
+            if (!allControlsByForm.TryGetValue(row.FormId, out var allControls))
+            {
+                allControls = await LoadAllFormControlsAsync(connection, row.FormId, cancellationToken);
+                allControlsByForm[row.FormId] = allControls;
+            }
+
+            // The frontend needs a stable jsonId key, not the human label. WorkflowEzfbFormDataLoader
+            // deliberately emits both (Label primary + jsonId alias) for new-form columns, and FTL's
+            // table-row writer duplicates both per cell too -- collapse every such pair down to
+            // jsonId-only here, at any nesting depth (including inside DYNAMIC_TABLE row arrays),
+            // so inbox/sent/completed is always jsonId-keyed regardless of where formData came from.
+            formData = NormalizeFormDataKeysToJsonId(formData, allControls);
+
             if (!controlsByForm.TryGetValue(row.FormId, out var controls))
             {
                 controls = await LoadRootFormControlsAsync(connection, row.FormId, cancellationToken);
@@ -368,6 +382,129 @@ EXISTS (
             formData = IncludeEveryControl(formData, controls);
             if (!string.Equals(formData, row.FormData, StringComparison.Ordinal))
                 items[i] = row with { FormData = formData };
+        }
+    }
+
+    private sealed record FormControlNode(int Id, int ParentId, string JsonId, string? Name);
+
+    private static async Task<List<FormControlNode>> LoadAllFormControlsAsync(
+        NpgsqlConnection connection,
+        string formId,
+        CancellationToken cancellationToken)
+    {
+        const string sql = """
+            SELECT id, COALESCE("parentId", 0), "jsonId", name
+            FROM dbo."wFormControl"
+            WHERE "wFormId" = @FormId
+              AND "isDeleted" = false
+              AND "jsonId" IS NOT NULL
+              AND BTRIM("jsonId") <> ''
+            ORDER BY id
+            """;
+        var controls = new List<FormControlNode>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@FormId", formId);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            controls.Add(new FormControlNode(
+                reader.GetInt32(0),
+                reader.GetInt32(1),
+                reader.GetString(2).Trim(),
+                reader.IsDBNull(3) ? null : reader.GetString(3)));
+        }
+
+        return controls;
+    }
+
+    /// <summary>
+    /// Rewrites formData so every control is keyed by its jsonId only. Properties already named
+    /// with a known jsonId win; a label-named property for the same control is dropped once its
+    /// jsonId counterpart has been written (or renamed to the jsonId if no counterpart exists).
+    /// Unrecognized keys (e.g. FTL's "quote_2"/"compare" wrapper keys) pass through unchanged.
+    /// Applied recursively so nested DYNAMIC_TABLE row objects get the same treatment.
+    /// </summary>
+    private static string? NormalizeFormDataKeysToJsonId(string? formData, IReadOnlyList<FormControlNode> allControls)
+    {
+        if (string.IsNullOrWhiteSpace(formData) || allControls.Count == 0)
+            return formData;
+
+        var jsonIdSet = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var nameToJsonId = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var control in allControls)
+        {
+            jsonIdSet.Add(control.JsonId);
+            if (!string.IsNullOrWhiteSpace(control.Name))
+                nameToJsonId.TryAdd(control.Name.Trim(), control.JsonId);
+        }
+
+        try
+        {
+            using var doc = JsonDocument.Parse(formData);
+            if (doc.RootElement.ValueKind != JsonValueKind.Object)
+                return formData;
+
+            using var stream = new MemoryStream();
+            using (var writer = new Utf8JsonWriter(stream))
+                WriteWithJsonIdKeys(writer, doc.RootElement, nameToJsonId, jsonIdSet);
+
+            return Encoding.UTF8.GetString(stream.ToArray());
+        }
+        catch (JsonException)
+        {
+            return formData;
+        }
+    }
+
+    private static void WriteWithJsonIdKeys(
+        Utf8JsonWriter writer,
+        JsonElement element,
+        IReadOnlyDictionary<string, string> nameToJsonId,
+        IReadOnlySet<string> jsonIdSet)
+    {
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                writer.WriteStartObject();
+                var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // jsonId-named properties are authoritative -- write these first.
+                foreach (var prop in element.EnumerateObject())
+                {
+                    if (!jsonIdSet.Contains(prop.Name) || !written.Add(prop.Name))
+                        continue;
+                    writer.WritePropertyName(prop.Name);
+                    WriteWithJsonIdKeys(writer, prop.Value, nameToJsonId, jsonIdSet);
+                }
+
+                // Label-named properties: map to their jsonId; skip if that jsonId was already
+                // written above (the label duplicate is dropped), otherwise rename to jsonId.
+                foreach (var prop in element.EnumerateObject())
+                {
+                    if (jsonIdSet.Contains(prop.Name))
+                        continue;
+
+                    var canonicalKey = nameToJsonId.TryGetValue(prop.Name, out var mapped) ? mapped : prop.Name;
+                    if (!written.Add(canonicalKey))
+                        continue;
+
+                    writer.WritePropertyName(canonicalKey);
+                    WriteWithJsonIdKeys(writer, prop.Value, nameToJsonId, jsonIdSet);
+                }
+
+                writer.WriteEndObject();
+                break;
+
+            case JsonValueKind.Array:
+                writer.WriteStartArray();
+                foreach (var item in element.EnumerateArray())
+                    WriteWithJsonIdKeys(writer, item, nameToJsonId, jsonIdSet);
+                writer.WriteEndArray();
+                break;
+
+            default:
+                element.WriteTo(writer);
+                break;
         }
     }
 
