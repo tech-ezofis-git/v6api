@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Npgsql;
 using Microsoft.Extensions.Logging;
@@ -292,6 +293,14 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             }
 
             var valueToWrite = PrepareFormDataValueForEzfb(value, matchedControl, controls, fields);
+            if (valueToWrite is null)
+            {
+                _logger.LogWarning(
+                    "Refusing to write non-table value into TABLE column for formEntryId {FormEntryId}, key {FieldKey}; value would have replaced existing rows.",
+                    formEntryId,
+                    key);
+                continue;
+            }
             if (ShouldSkipBlankEzfbTableWrite(matchedControl, valueToWrite))
                 continue;
 
@@ -345,14 +354,17 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                     var lineValue = lineControl is null
                         ? NormalizeLineItemsJson(lineItemsJson)
                         : PrepareFormDataValueForEzfb(lineItemsJson, lineControl, controls, fields);
-                    await UpdateEzfbColumnAsync(
-                        connection,
-                        ezfbTable,
-                        formEntryId,
-                        lineItemsColumn,
-                        lineValue,
-                        cancellationToken);
-                    updated++;
+                    if (lineValue is not null)
+                    {
+                        await UpdateEzfbColumnAsync(
+                            connection,
+                            ezfbTable,
+                            formEntryId,
+                            lineItemsColumn,
+                            lineValue,
+                            cancellationToken);
+                        updated++;
+                    }
                 }
                 catch (Exception ex)
                 {
@@ -372,6 +384,121 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         }
 
         return updated;
+    }
+
+    public async Task<bool> MergeFileItemIntoTableCellAsync(
+        string formId,
+        Guid formEntryId,
+        string cellJsonId,
+        Guid itemId,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(formId) || formEntryId == Guid.Empty
+            || string.IsNullOrWhiteSpace(cellJsonId) || itemId == Guid.Empty)
+            return false;
+
+        var connectionString = _tenantContext.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return false;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
+        var wFormIdValue = await ResolveWFormIdParameterAsync(connection, normalizedFormId, cancellationToken);
+        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+
+        var cellControl = controls.FirstOrDefault(c =>
+            string.Equals(c.JsonId, cellJsonId, StringComparison.OrdinalIgnoreCase));
+        if (cellControl is null || cellControl.ParentId == 0)
+            return false;
+
+        var tableControl = controls.FirstOrDefault(c => c.Id == cellControl.ParentId);
+        if (tableControl is null || !(IsDynamicTableControl(tableControl) || IsPoLineItemTableControl(tableControl)))
+            return false;
+
+        var cellOutputKey = TableCellOutputKey(cellControl);
+        if (string.IsNullOrWhiteSpace(cellOutputKey))
+            return false;
+
+        var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
+        var ezfbTable = $"dbo.\"ezfb_{tableSuffix}_items\"";
+        var ezfbColumns = await LoadTableColumnsAsync(connection, "dbo", $"ezfb_{tableSuffix}_items", cancellationToken);
+        if (ezfbColumns.Count == 0)
+            return false;
+
+        var (columnOk, column) = await TryResolveOrCreateEzfbColumnAsync(
+            connection,
+            ezfbTable,
+            tableControl.JsonId,
+            ezfbColumns,
+            cancellationToken,
+            tableControl.Name,
+            tableControl.ColumnName);
+        if (!columnOk)
+            return false;
+
+        var current = await GetEzfbColumnValueAsync(connection, ezfbTable, formEntryId, column, cancellationToken);
+        var updatedJson = MergeCellIntoTableRows(current, cellOutputKey, itemId.ToString("N"));
+
+        await UpdateEzfbColumnAsync(connection, ezfbTable, formEntryId, column, updatedJson, cancellationToken);
+        return true;
+    }
+
+    /// <summary>
+    /// Sets one cell on a TABLE/DYNAMIC_TABLE row without disturbing any other row/cell.
+    /// A single existing row is reused; with several rows the first one still missing this
+    /// cell is preferred (no row selector exists in the upload API yet), falling back to the
+    /// most recently added row.
+    /// </summary>
+    private static string MergeCellIntoTableRows(string? currentJson, string cellKey, string cellValue)
+    {
+        JsonArray? rows = null;
+        if (!string.IsNullOrWhiteSpace(currentJson) && IsJsonArrayValue(currentJson))
+        {
+            try
+            {
+                rows = JsonNode.Parse(currentJson) as JsonArray;
+            }
+            catch (JsonException)
+            {
+                rows = null;
+            }
+        }
+
+        rows ??= new JsonArray();
+
+        JsonObject? target = null;
+        if (rows.Count == 1)
+        {
+            target = rows[0] as JsonObject;
+        }
+        else if (rows.Count > 1)
+        {
+            foreach (var node in rows)
+            {
+                if (node is not JsonObject candidate)
+                    continue;
+                if (!candidate.TryGetPropertyValue(cellKey, out var existing)
+                    || existing is null
+                    || (existing is JsonValue blankValue && blankValue.TryGetValue<string>(out var s) && string.IsNullOrWhiteSpace(s)))
+                {
+                    target = candidate;
+                    break;
+                }
+            }
+
+            target ??= rows[^1] as JsonObject;
+        }
+
+        if (target is null)
+        {
+            target = new JsonObject();
+            rows.Add(target);
+        }
+
+        target[cellKey] = cellValue;
+        return rows.ToJsonString();
     }
 
     public async Task<int> ApplyPoRowFromStoredAgentValidationAsync(
@@ -1196,7 +1323,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             && trimmed.EndsWith("}", StringComparison.Ordinal);
     }
 
-    private static string PrepareFormDataValueForEzfb(
+    private static string? PrepareFormDataValueForEzfb(
         string value,
         FormControlRow? matchedControl,
         IReadOnlyList<FormControlRow> controls,
@@ -1214,7 +1341,18 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
                 var assembled = AssembleTableRowFromChildFields(fields, children);
                 if (!string.IsNullOrWhiteSpace(assembled))
                     return assembled;
+
+                return tableJson;
             }
+
+            // A TABLE/DYNAMIC_TABLE ezfb column only ever holds a JSON array of rows.
+            // NormalizeDynamicTableJson passes through anything it cannot parse as
+            // array/object (e.g. a bare file itemId meant for a nested FILE_UPLOAD
+            // cell, submitted under the table's own jsonId by mistake). Writing that
+            // scalar here would wipe out every existing row, so refuse the write
+            // instead of corrupting the column.
+            if (!IsJsonArrayValue(tableJson))
+                return null;
 
             return tableJson;
         }
