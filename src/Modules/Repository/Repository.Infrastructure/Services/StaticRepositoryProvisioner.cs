@@ -716,8 +716,15 @@ public sealed class StaticRepositoryProvisioner : IStaticRepositoryProvisioner
         if (!addedAny)
             return string.Empty;
 
+        // allItemsColumns holds PHYSICAL column names (snake_case reserved + original-case
+        // custom), not the logical PascalCase names RepositorySqlHelper.ReservedItemColumns
+        // keys on ("TenantId" etc.) -- comparing physical "tenant_id" against that set never
+        // matched (case-insensitive, but still a different string), so every reserved column
+        // was wrongly treated as "custom", quoted, and appended again on top of
+        // ReservedItemColumnsOrdered below, producing a duplicate-column INSERT at trigger
+        // time. Compare against the physical reserved list instead.
         var customCols = allItemsColumns
-            .Where(c => !RepositorySqlHelper.ReservedItemColumns.Contains(c))
+            .Where(c => !ReservedItemColumnsOrdered.Contains(c, StringComparer.OrdinalIgnoreCase))
             .Select(RepositorySqlHelper.QuoteCustomColumn)
             .ToList();
 
