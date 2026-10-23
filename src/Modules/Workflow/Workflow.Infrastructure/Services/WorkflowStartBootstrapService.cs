@@ -645,7 +645,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
         if (_attachmentArchive == null || request.StagedFiles is not { Count: > 0 })
             return (repositoryItemId, blobPath);
 
-        var archivedStagedFiles = new List<(StartWorkflowStagedFileRef Staged, Guid ItemId)>();
+        var archivedStagedFiles = new List<(StartWorkflowStagedFileRef Staged, Guid ItemId, string? FileName)>();
         foreach (var staged in request.StagedFiles)
         {
             if (staged.RepositoryId == Guid.Empty)
@@ -678,7 +678,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                         attached.ProcessAddonId);
 
                     var bindRef = staged with { FileId = existingItemId };
-                    archivedStagedFiles.Add((bindRef, attached.ItemId));
+                    archivedStagedFiles.Add((bindRef, attached.ItemId, attached.FileName));
                     repositoryItemId ??= attached.ItemId;
                     blobPath ??= attached.FilePath;
                     continue;
@@ -729,7 +729,7 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 archived.ProcessAddonId,
                 staged.ResolveFormJsonId());
 
-            archivedStagedFiles.Add((staged, archived.ItemId));
+            archivedStagedFiles.Add((staged, archived.ItemId, archived.FileName));
             repositoryItemId ??= archived.ItemId;
             blobPath ??= archived.FilePath;
         }

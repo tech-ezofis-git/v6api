@@ -22,7 +22,7 @@ public sealed class StagedFileEzfbBinder
         string connectionString,
         string? formId,
         Guid formEntryItemId,
-        IReadOnlyList<(StartWorkflowStagedFileRef Staged, Guid ItemId)> archived,
+        IReadOnlyList<(StartWorkflowStagedFileRef Staged, Guid ItemId, string? FileName)> archived,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(formId) || formEntryItemId == Guid.Empty || archived.Count == 0)
@@ -42,7 +42,7 @@ public sealed class StagedFileEzfbBinder
         var explicitIndex = 0;
         var updated = 0;
 
-        foreach (var (staged, itemId) in archived)
+        foreach (var (staged, itemId, archivedFileName) in archived)
         {
             if (itemId == Guid.Empty)
                 continue;
@@ -84,11 +84,15 @@ public sealed class StagedFileEzfbBinder
 
             if (parent != null && IsTableControl(parent.Type))
             {
+                var resolvedFileName = !string.IsNullOrWhiteSpace(archivedFileName)
+                    ? archivedFileName
+                    : staged.FileName;
                 var merged = await _apAgentMoveNext.MergeFileItemIntoTableCellAsync(
                     normalizedFormId,
                     formEntryItemId,
                     targetJsonId,
                     itemId,
+                    resolvedFileName,
                     cancellationToken);
                 if (merged)
                 {

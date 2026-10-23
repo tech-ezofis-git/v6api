@@ -391,6 +391,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
         Guid formEntryId,
         string cellJsonId,
         Guid itemId,
+        string? fileName = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(formId) || formEntryId == Guid.Empty
@@ -439,7 +440,7 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             return false;
 
         var current = await GetEzfbColumnValueAsync(connection, ezfbTable, formEntryId, column, cancellationToken);
-        var updatedJson = MergeCellIntoTableRows(current, cellOutputKey, itemId.ToString("N"));
+        var updatedJson = MergeCellIntoTableRows(current, cellOutputKey, itemId.ToString("N"), fileName);
 
         await UpdateEzfbColumnAsync(connection, ezfbTable, formEntryId, column, updatedJson, cancellationToken);
         return true;
@@ -449,9 +450,10 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
     /// Sets one cell on a TABLE/DYNAMIC_TABLE row without disturbing any other row/cell.
     /// A single existing row is reused; with several rows the first one still missing this
     /// cell is preferred (no row selector exists in the upload API yet), falling back to the
-    /// most recently added row.
+    /// most recently added row. The cell value is a <c>{"itemid","filename"}</c> JSON object so
+    /// the archived file's name travels with its itemId instead of just a bare itemId string.
     /// </summary>
-    private static string MergeCellIntoTableRows(string? currentJson, string cellKey, string cellValue)
+    private static string MergeCellIntoTableRows(string? currentJson, string cellKey, string itemId, string? fileName)
     {
         JsonArray? rows = null;
         if (!string.IsNullOrWhiteSpace(currentJson) && IsJsonArrayValue(currentJson))
@@ -497,7 +499,11 @@ public sealed class WorkflowApAgentMoveNextService : IWorkflowApAgentMoveNextSer
             rows.Add(target);
         }
 
-        target[cellKey] = cellValue;
+        target[cellKey] = new JsonObject
+        {
+            ["itemid"] = itemId,
+            ["filename"] = string.IsNullOrWhiteSpace(fileName) ? null : fileName
+        };
         return rows.ToJsonString();
     }
 

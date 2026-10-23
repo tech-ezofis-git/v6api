@@ -86,3 +86,28 @@ public sealed record FormControlDistinctValuesResult(
     string? JsonId,
     string? ColumnName,
     IReadOnlyList<string>? Values);
+
+public enum FormEntryByColumnStatus
+{
+    /// <summary>One or more entries matched (get), or exactly one entry was updated (update).</summary>
+    Found = 1,
+    /// <summary>No entry matched the given column value.</summary>
+    NotFound = 0,
+    /// <summary>formId/columnName/columnValue/fields failed validation, the column does not exist
+    /// on this form, or (update only) more than one entry matched -- updating all of them
+    /// unambiguously is refused rather than silently changing unrelated records.</summary>
+    InvalidRequest = 2
+}
+
+/// <summary>
+/// Load or update ezfb_{form}_items entries by an arbitrary column value instead of requiring
+/// the caller to already know the item_id GUID (v5 master-form-by-column parity).
+/// </summary>
+public sealed record FormEntryByColumnResult(
+    FormEntryByColumnStatus Status,
+    string? Message,
+    string? FormId,
+    string? ColumnName,
+    string? ResolvedColumn,
+    IReadOnlyList<Dictionary<string, object?>>? Entries,
+    int UpdatedCount = 0);

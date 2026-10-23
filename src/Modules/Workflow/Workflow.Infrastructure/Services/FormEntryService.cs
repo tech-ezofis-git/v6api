@@ -339,6 +339,293 @@ public sealed class FormEntryService : IFormEntryService
             new FormAllMeta(page, pageSize, totalItems));
     }
 
+    public async Task<FormEntryByColumnResult> GetEntriesByColumnAsync(
+        string formId,
+        string columnName,
+        string columnValue,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(formId))
+            return InvalidByColumn(formId, columnName, "form id is required.");
+        if (string.IsNullOrWhiteSpace(columnName))
+            return InvalidByColumn(formId, columnName, "column name is required.");
+        if (string.IsNullOrWhiteSpace(columnValue))
+            return InvalidByColumn(formId, columnName, "column value is required.");
+
+        var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
+        var connectionString = _tenantContext.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        if (await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken) == null)
+            return NotFoundByColumn(normalizedFormId, columnName, "form not found.");
+
+        var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
+        var tableName = $"ezfb_{tableSuffix}_items";
+        if (!await EzfbTableExistsAsync(connection, tableName, cancellationToken))
+            return NotFoundByColumn(normalizedFormId, columnName, "form entry table not found.");
+
+        var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
+        if (ezfbColumns.Count == 0)
+            return NotFoundByColumn(normalizedFormId, columnName, "form entry table has no columns.");
+
+        var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
+        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+
+        if (!TryResolveLookupColumn(columnName, controls, ezfbColumns, out var resolvedColumn))
+            return InvalidByColumn(normalizedFormId, columnName, $"column '{columnName}' was not found on this form.");
+
+        var rows = await LoadEntriesByColumnValueAsync(
+            connection, tableName, ezfbColumns, resolvedColumn, columnValue, cancellationToken);
+        if (rows.Count == 0)
+            return NotFoundByColumn(normalizedFormId, columnName, "no form entries match the given column value.", resolvedColumn);
+
+        await MergeFormDataJsonAsync(rows, normalizedFormId, cancellationToken);
+
+        return new FormEntryByColumnResult(
+            FormEntryByColumnStatus.Found,
+            null,
+            normalizedFormId,
+            columnName,
+            resolvedColumn,
+            rows);
+    }
+
+    public async Task<FormEntryByColumnResult> UpdateEntriesByColumnAsync(
+        string formId,
+        string columnName,
+        string columnValue,
+        FormEntryUpsertRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(formId))
+            return InvalidByColumn(formId, columnName, "form id is required.");
+        if (string.IsNullOrWhiteSpace(columnName))
+            return InvalidByColumn(formId, columnName, "column name is required.");
+        if (string.IsNullOrWhiteSpace(columnValue))
+            return InvalidByColumn(formId, columnName, "column value is required.");
+
+        var fieldMap = NormalizeFields(request.Fields);
+        if (fieldMap.Count == 0)
+            return InvalidByColumn(formId, columnName, "fields are required.");
+
+        var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
+        var connectionString = _tenantContext.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+        var userId = _currentUserProvider.GetUserId()
+            ?? throw new InvalidOperationException("Authenticated user is required.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var formMeta = await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken);
+        if (formMeta == null)
+            return NotFoundByColumn(normalizedFormId, columnName, "form not found.");
+
+        var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
+        var tableName = $"ezfb_{tableSuffix}_items";
+        if (!await EzfbTableExistsAsync(connection, tableName, cancellationToken))
+            return NotFoundByColumn(normalizedFormId, columnName, "form entry table not found.");
+
+        var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
+        if (ezfbColumns.Count == 0)
+            return NotFoundByColumn(normalizedFormId, columnName, "form entry table has no columns.");
+
+        var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
+        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+
+        if (!TryResolveLookupColumn(columnName, controls, ezfbColumns, out var resolvedColumn))
+            return InvalidByColumn(normalizedFormId, columnName, $"column '{columnName}' was not found on this form.");
+
+        var matchingIds = await FindEntryIdsByColumnValueAsync(
+            connection, tableName, resolvedColumn, columnValue, cancellationToken);
+        if (matchingIds.Count == 0)
+            return NotFoundByColumn(normalizedFormId, columnName, "no form entries match the given column value.", resolvedColumn);
+        if (matchingIds.Count > 1)
+            return InvalidByColumn(
+                normalizedFormId,
+                columnName,
+                $"{matchingIds.Count} form entries match '{columnName}' = '{columnValue}'; expected exactly one to update unambiguously.",
+                resolvedColumn);
+
+        var entryId = matchingIds[0];
+
+        await EnsureMissingControlColumnsAsync(
+            connection,
+            tableName,
+            tableSuffix,
+            wFormIdValue,
+            controls,
+            ezfbColumns,
+            cancellationToken);
+
+        var resolvedFields = ResolveFieldColumns(fieldMap, controls, ezfbColumns);
+        if (resolvedFields.Count == 0)
+            return InvalidByColumn(normalizedFormId, columnName, "no matching ezfb columns for submitted fields.", resolvedColumn);
+
+        var duplicate = await CheckUniqueColumnsAsync(
+            connection,
+            tableName,
+            formMeta.UniqueColumns,
+            resolvedFields,
+            entryId,
+            controls,
+            cancellationToken);
+        if (duplicate != null)
+            return InvalidByColumn(normalizedFormId, columnName, duplicate.Output ?? "duplicate value for a unique column.", resolvedColumn);
+
+        var userStamp = userId.ToString("D");
+        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+
+        var updated = await UpdateEntryAsync(connection, tableName, entryId, resolvedFields, now, userStamp, cancellationToken);
+        if (!updated)
+            return NotFoundByColumn(normalizedFormId, columnName, "form entry not found.", resolvedColumn);
+
+        var row = await LoadEntryRowAsync(connection, tableName, ezfbColumns, entryId, cancellationToken);
+        var rows = row != null
+            ? new List<Dictionary<string, object?>> { row }
+            : new List<Dictionary<string, object?>>();
+        if (rows.Count > 0)
+            await MergeFormDataJsonAsync(rows, normalizedFormId, cancellationToken);
+
+        return new FormEntryByColumnResult(
+            FormEntryByColumnStatus.Found,
+            "updated form entry",
+            normalizedFormId,
+            columnName,
+            resolvedColumn,
+            rows,
+            UpdatedCount: 1);
+    }
+
+    private static FormEntryByColumnResult InvalidByColumn(string? formId, string? columnName, string message, string? resolvedColumn = null) =>
+        new(FormEntryByColumnStatus.InvalidRequest, message, formId, columnName, resolvedColumn, null);
+
+    private static FormEntryByColumnResult NotFoundByColumn(string? formId, string? columnName, string message, string? resolvedColumn = null) =>
+        new(FormEntryByColumnStatus.NotFound, message, formId, columnName, resolvedColumn, null);
+
+    /// <summary>
+    /// Resolves a caller-supplied column name against a control's stored columnName/Name/jsonId
+    /// first (same precedence as submitted field keys), falling back to treating it as the
+    /// physical ezfb column (or label/jsonId) directly when no wFormControl row matches.
+    /// </summary>
+    private static bool TryResolveLookupColumn(
+        string columnName,
+        IReadOnlyList<FormControlRow> controls,
+        IReadOnlySet<string> ezfbColumns,
+        out string resolvedColumn)
+    {
+        if (TryResolveControlForField(columnName, controls, out var control) && control is not null
+            && EzfbColumnNaming.TryResolveEzfbColumn(control.ColumnName, control.Name, control.JsonId, ezfbColumns, out resolvedColumn))
+            return true;
+
+        return EzfbColumnNaming.TryResolveEzfbColumn(columnName, columnName, ezfbColumns, out resolvedColumn);
+    }
+
+    private static async Task<List<Guid>> FindEntryIdsByColumnValueAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        string resolvedColumn,
+        string columnValue,
+        CancellationToken cancellationToken)
+    {
+        var escapedCol = EscapeColumn(resolvedColumn);
+        var sql = $"""
+            SELECT item_id
+            FROM dbo.{tableName}
+            WHERE "{escapedCol}" = @Value AND (is_deleted = false OR is_deleted IS NULL);
+            """;
+
+        var ids = new List<Guid>();
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Value", columnValue);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+            ids.Add(reader.GetGuid(0));
+        return ids;
+    }
+
+    private static async Task<List<Dictionary<string, object?>>> LoadEntriesByColumnValueAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        IReadOnlySet<string> ezfbColumns,
+        string resolvedColumn,
+        string columnValue,
+        CancellationToken cancellationToken)
+    {
+        var selectColumns = ezfbColumns
+            .Where(c => !IsSystemColumn(c) || c.Equals("item_id", StringComparison.OrdinalIgnoreCase))
+            .Select(c => $"\"{EscapeColumn(c)}\"")
+            .ToList();
+        var rows = new List<Dictionary<string, object?>>();
+        if (selectColumns.Count == 0)
+            return rows;
+
+        var escapedCol = EscapeColumn(resolvedColumn);
+        var sql = $"""
+            SELECT {string.Join(", ", selectColumns)}
+            FROM dbo.{tableName}
+            WHERE "{escapedCol}" = @Value AND (is_deleted = false OR is_deleted IS NULL);
+            """;
+
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@Value", columnValue);
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
+            for (var i = 0; i < reader.FieldCount; i++)
+            {
+                var name = reader.GetName(i);
+                row[name] = reader.IsDBNull(i) ? null : reader.GetValue(i);
+            }
+
+            rows.Add(row);
+        }
+
+        return rows;
+    }
+
+    /// <summary>Merges jsonId-keyed WorkflowForms form data (if any) onto each row's item_id, in place.</summary>
+    private async Task MergeFormDataJsonAsync(
+        List<Dictionary<string, object?>> rows,
+        string normalizedFormId,
+        CancellationToken cancellationToken)
+    {
+        foreach (var row in rows)
+        {
+            if (!row.TryGetValue("item_id", out var itemObj) || itemObj == null)
+                continue;
+
+            var entryId = itemObj switch
+            {
+                Guid guid => guid,
+                string text when Guid.TryParse(text, out var parsed) => parsed,
+                _ => Guid.Empty
+            };
+            if (entryId == Guid.Empty)
+                continue;
+
+            var formDataJson = await _formDataLoader.LoadFormDataJsonAsync(normalizedFormId, entryId, cancellationToken);
+            if (string.IsNullOrWhiteSpace(formDataJson))
+                continue;
+
+            try
+            {
+                using var doc = JsonDocument.Parse(formDataJson);
+                if (doc.RootElement.ValueKind == JsonValueKind.Object)
+                    foreach (var prop in doc.RootElement.EnumerateObject())
+                        row[prop.Name] = JsonElementToObject(prop.Value);
+            }
+            catch (JsonException ex)
+            {
+                _logger.LogDebug(ex, "Could not merge jsonId form data for entry {EntryId}.", entryId);
+            }
+        }
+    }
+
     private static string MapEntrySortColumn(string? criteria, IReadOnlySet<string> ezfbColumns)
     {
         var c = (criteria ?? "modified_at").Trim();
