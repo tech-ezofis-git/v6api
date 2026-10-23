@@ -341,14 +341,17 @@ public sealed class FormEntryService : IFormEntryService
 
     public async Task<FormEntryByColumnResult> GetEntriesByColumnAsync(
         string formId,
-        string columnName,
+        string? columnName,
         string? columnValue = null,
+        IReadOnlyList<FormEntryColumnFilter>? filters = null,
+        string? columnId = null,
         CancellationToken cancellationToken = default)
     {
+        var lookupKey = FirstNonBlank(columnName, columnId);
         if (string.IsNullOrWhiteSpace(formId))
-            return InvalidByColumn(formId, columnName, "form id is required.");
-        if (string.IsNullOrWhiteSpace(columnName))
-            return InvalidByColumn(formId, columnName, "column name is required.");
+            return InvalidByColumn(formId, lookupKey, "form id is required.");
+        if (string.IsNullOrWhiteSpace(lookupKey))
+            return InvalidByColumn(formId, lookupKey, "columnName or columnId is required.");
 
         var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
         var connectionString = _tenantContext.ConnectionString
@@ -358,33 +361,36 @@ public sealed class FormEntryService : IFormEntryService
         await connection.OpenAsync(cancellationToken);
 
         if (await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken) == null)
-            return NotFoundByColumn(normalizedFormId, columnName, "form not found.");
+            return NotFoundByColumn(normalizedFormId, lookupKey, "form not found.");
 
         var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
         var tableName = $"ezfb_{tableSuffix}_items";
         if (!await EzfbTableExistsAsync(connection, tableName, cancellationToken))
-            return NotFoundByColumn(normalizedFormId, columnName, "form entry table not found.");
+            return NotFoundByColumn(normalizedFormId, lookupKey, "form entry table not found.");
 
         var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
         if (ezfbColumns.Count == 0)
-            return NotFoundByColumn(normalizedFormId, columnName, "form entry table has no columns.");
+            return NotFoundByColumn(normalizedFormId, lookupKey, "form entry table has no columns.");
 
         var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
         var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
 
-        if (!TryResolveLookupColumn(columnName, controls, ezfbColumns, out var resolvedColumn))
-            return InvalidByColumn(normalizedFormId, columnName, $"column '{columnName}' was not found on this form.");
+        if (!TryResolveLookupColumn(lookupKey, controls, ezfbColumns, out var resolvedColumn))
+            return InvalidByColumn(normalizedFormId, lookupKey, $"column '{lookupKey}' was not found on this form.");
 
-        // Column only → every distinct non-empty value for that column (no row filter).
+        if (!TryResolveColumnFilters(filters, controls, ezfbColumns, out var resolvedFilters, out var filterError))
+            return InvalidByColumn(normalizedFormId, lookupKey, filterError ?? "invalid filters.", resolvedColumn);
+
+        // Column only (optional filters) → distinct non-empty values for that column.
         if (string.IsNullOrWhiteSpace(columnValue))
         {
             var values = await LoadDistinctColumnValuesAsync(
-                connection, tableName, resolvedColumn, cancellationToken);
+                connection, tableName, resolvedColumn, resolvedFilters, cancellationToken);
             return new FormEntryByColumnResult(
                 FormEntryByColumnStatus.Found,
                 null,
                 normalizedFormId,
-                columnName,
+                lookupKey,
                 resolvedColumn,
                 Entries: null,
                 UpdatedCount: 0,
@@ -392,9 +398,9 @@ public sealed class FormEntryService : IFormEntryService
         }
 
         var rows = await LoadEntriesByColumnValueAsync(
-            connection, tableName, ezfbColumns, resolvedColumn, columnValue, cancellationToken);
+            connection, tableName, ezfbColumns, resolvedColumn, columnValue, resolvedFilters, cancellationToken);
         if (rows.Count == 0)
-            return NotFoundByColumn(normalizedFormId, columnName, "no form entries match the given column value.", resolvedColumn);
+            return NotFoundByColumn(normalizedFormId, lookupKey, "no form entries match the given column value.", resolvedColumn);
 
         await MergeFormDataJsonAsync(rows, normalizedFormId, cancellationToken);
 
@@ -402,7 +408,7 @@ public sealed class FormEntryService : IFormEntryService
             FormEntryByColumnStatus.Found,
             null,
             normalizedFormId,
-            columnName,
+            lookupKey,
             resolvedColumn,
             rows);
     }
@@ -571,6 +577,7 @@ public sealed class FormEntryService : IFormEntryService
         IReadOnlySet<string> ezfbColumns,
         string resolvedColumn,
         string columnValue,
+        IReadOnlyList<(string Column, string Value)> filters,
         CancellationToken cancellationToken)
     {
         var selectColumns = ezfbColumns
@@ -582,14 +589,22 @@ public sealed class FormEntryService : IFormEntryService
             return rows;
 
         var escapedCol = EscapeColumn(resolvedColumn);
+        var whereParts = new List<string>
+        {
+            $"\"{escapedCol}\" = @Value",
+            "(is_deleted = false OR is_deleted IS NULL)"
+        };
+        AppendFilterPredicates(whereParts, filters);
+
         var sql = $"""
             SELECT {string.Join(", ", selectColumns)}
             FROM dbo.{tableName}
-            WHERE "{escapedCol}" = @Value AND (is_deleted = false OR is_deleted IS NULL);
+            WHERE {string.Join(" AND ", whereParts)};
             """;
 
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Value", columnValue);
+        AddFilterParameters(cmd, filters);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {
@@ -604,6 +619,77 @@ public sealed class FormEntryService : IFormEntryService
         }
 
         return rows;
+    }
+
+    /// <summary>
+    /// Resolves optional AND filters. Each filter's columnName/columnId uses the same lookup
+    /// as the target column (label, jsonId, or physical ezfb column).
+    /// </summary>
+    private static bool TryResolveColumnFilters(
+        IReadOnlyList<FormEntryColumnFilter>? filters,
+        IReadOnlyList<FormControlRow> controls,
+        IReadOnlySet<string> ezfbColumns,
+        out List<(string Column, string Value)> resolved,
+        out string? error)
+    {
+        resolved = [];
+        error = null;
+        if (filters is null || filters.Count == 0)
+            return true;
+
+        for (var i = 0; i < filters.Count; i++)
+        {
+            var filter = filters[i];
+            var key = FirstNonBlank(filter.ColumnName, filter.ColumnId);
+            if (string.IsNullOrWhiteSpace(key))
+            {
+                error = $"filters[{i}]: columnName or columnId is required.";
+                return false;
+            }
+
+            if (string.IsNullOrWhiteSpace(filter.ColumnValue))
+            {
+                error = $"filters[{i}]: columnValue is required.";
+                return false;
+            }
+
+            if (!TryResolveLookupColumn(key, controls, ezfbColumns, out var resolvedColumn))
+            {
+                error = $"filters[{i}]: column '{key}' was not found on this form.";
+                return false;
+            }
+
+            resolved.Add((resolvedColumn, filter.ColumnValue.Trim()));
+        }
+
+        return true;
+    }
+
+    private static string? FirstNonBlank(params string?[] values)
+    {
+        foreach (var value in values)
+        {
+            if (!string.IsNullOrWhiteSpace(value))
+                return value.Trim();
+        }
+
+        return null;
+    }
+
+    private static void AppendFilterPredicates(
+        List<string> whereParts,
+        IReadOnlyList<(string Column, string Value)> filters)
+    {
+        for (var i = 0; i < filters.Count; i++)
+            whereParts.Add($"\"{EscapeColumn(filters[i].Column)}\" = @Filter{i}");
+    }
+
+    private static void AddFilterParameters(
+        NpgsqlCommand cmd,
+        IReadOnlyList<(string Column, string Value)> filters)
+    {
+        for (var i = 0; i < filters.Count; i++)
+            cmd.Parameters.AddWithValue($"@Filter{i}", filters[i].Value);
     }
 
     /// <summary>Merges jsonId-keyed WorkflowForms form data (if any) onto each row's item_id, in place.</summary>
@@ -1349,7 +1435,8 @@ public sealed class FormEntryService : IFormEntryService
                 control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var resolvedColumn))
             return new FormControlDistinctValuesResult(FormControlDistinctValuesStatus.ColumnNotFound, normalizedFormId, wFormControlName, control.JsonId, null, null);
 
-        var values = await LoadDistinctColumnValuesAsync(connection, tableName, resolvedColumn, cancellationToken);
+        var values = await LoadDistinctColumnValuesAsync(
+            connection, tableName, resolvedColumn, filters: [], cancellationToken);
         return new FormControlDistinctValuesResult(
             FormControlDistinctValuesStatus.Found,
             normalizedFormId,
@@ -1363,20 +1450,28 @@ public sealed class FormEntryService : IFormEntryService
         NpgsqlConnection connection,
         string tableName,
         string column,
+        IReadOnlyList<(string Column, string Value)> filters,
         CancellationToken cancellationToken)
     {
         var escaped = EscapeColumn(column);
+        var whereParts = new List<string>
+        {
+            "(is_deleted = false OR is_deleted IS NULL)",
+            $"\"{escaped}\" IS NOT NULL",
+            $"TRIM(CAST(\"{escaped}\" AS text)) <> ''"
+        };
+        AppendFilterPredicates(whereParts, filters);
+
         var sql = $"""
             SELECT DISTINCT "{escaped}"
             FROM dbo.{tableName}
-            WHERE (is_deleted = false OR is_deleted IS NULL)
-              AND "{escaped}" IS NOT NULL
-              AND TRIM(CAST("{escaped}" AS text)) <> ''
+            WHERE {string.Join(" AND ", whereParts)}
             ORDER BY "{escaped}"
             """;
 
         var values = new List<string>();
         await using var cmd = new NpgsqlCommand(sql, connection);
+        AddFilterParameters(cmd, filters);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
         {

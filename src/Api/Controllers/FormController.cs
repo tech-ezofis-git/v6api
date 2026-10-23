@@ -378,10 +378,11 @@ public sealed class FormController : ControllerBase
     }
 
     /// <summary>
-    /// Load by column instead of item_id. <c>columnName</c> is required and may be the physical
-    /// ezfb column, control label, stored columnName, or <c>jsonId</c> — all resolve the same way.
-    /// Omit <c>columnValue</c> to get every distinct non-empty value (<c>values</c>); supply it to
-    /// get matching entry rows (<c>entries</c>).
+    /// Load by column instead of item_id. Target column is <c>columnName</c> and/or <c>columnId</c>
+    /// (physical ezfb column, control label, stored columnName, or jsonId).
+    /// Omit <c>columnValue</c> to get distinct non-empty values (<c>values</c>); supply it to get
+    /// matching entry rows (<c>entries</c>). Optional <c>filters</c> AND-narrow either result
+    /// (each filter also accepts name or id).
     /// </summary>
     [HttpPost("{id}/entry/by-column")]
     [ProducesResponseType(typeof(FormEntryByColumnResult), StatusCodes.Status200OK)]
@@ -399,8 +400,10 @@ public sealed class FormController : ControllerBase
         {
             var result = await _formEntryService.GetEntriesByColumnAsync(
                 id,
-                request.ColumnName ?? string.Empty,
+                request.ColumnName,
                 request.ColumnValue,
+                request.Filters,
+                request.ColumnId,
                 cancellationToken);
 
             return result.Status switch
@@ -522,12 +525,15 @@ public sealed class FormController : ControllerBase
 
 /// <summary>
 /// Body for POST/PUT /api/form/{id}/entry/by-column.
-/// <see cref="ColumnName"/> may be ezfb column, label, or jsonId. For GET, omit
-/// <see cref="ColumnValue"/> to return all distinct values for that column/jsonId.
+/// Target column: <see cref="ColumnName"/> and/or <see cref="ColumnId"/> (ezfb column, label, or jsonId).
+/// POST: omit <see cref="ColumnValue"/> for distinct <c>values</c>; optional <see cref="Filters"/>
+/// AND-narrow those values (or entries when <see cref="ColumnValue"/> is set).
 /// </summary>
 public sealed record FormEntryByColumnRequest(
-    string? ColumnName,
+    string? ColumnName = null,
     string? ColumnValue = null,
+    string? ColumnId = null,
+    IReadOnlyList<FormEntryColumnFilter>? Filters = null,
     Dictionary<string, JsonElement>? Fields = null);
 
 public sealed record FormMasterFileUploadResponse(
