@@ -378,9 +378,10 @@ public sealed class FormController : ControllerBase
     }
 
     /// <summary>
-    /// Load form entries by an arbitrary column value instead of the item_id GUID (e.g. a master
-    /// form's business key). <paramref name="request"/>.ColumnName may be the physical ezfb
-    /// column, the control's label, or (legacy forms) its jsonId.
+    /// Load by column instead of item_id. <c>columnName</c> is required and may be the physical
+    /// ezfb column, control label, stored columnName, or <c>jsonId</c> — all resolve the same way.
+    /// Omit <c>columnValue</c> to get every distinct non-empty value (<c>values</c>); supply it to
+    /// get matching entry rows (<c>entries</c>).
     /// </summary>
     [HttpPost("{id}/entry/by-column")]
     [ProducesResponseType(typeof(FormEntryByColumnResult), StatusCodes.Status200OK)]
@@ -399,7 +400,7 @@ public sealed class FormController : ControllerBase
             var result = await _formEntryService.GetEntriesByColumnAsync(
                 id,
                 request.ColumnName ?? string.Empty,
-                request.ColumnValue ?? string.Empty,
+                request.ColumnValue,
                 cancellationToken);
 
             return result.Status switch
@@ -519,10 +520,14 @@ public sealed class FormController : ControllerBase
              string.Equals(c.Value, "Administrator", StringComparison.OrdinalIgnoreCase)));
 }
 
-/// <summary>Body for POST/PUT /api/form/{id}/entry/by-column.</summary>
+/// <summary>
+/// Body for POST/PUT /api/form/{id}/entry/by-column.
+/// <see cref="ColumnName"/> may be ezfb column, label, or jsonId. For GET, omit
+/// <see cref="ColumnValue"/> to return all distinct values for that column/jsonId.
+/// </summary>
 public sealed record FormEntryByColumnRequest(
     string? ColumnName,
-    string? ColumnValue,
+    string? ColumnValue = null,
     Dictionary<string, JsonElement>? Fields = null);
 
 public sealed record FormMasterFileUploadResponse(

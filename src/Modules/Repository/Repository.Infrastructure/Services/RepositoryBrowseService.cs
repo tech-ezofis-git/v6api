@@ -28,8 +28,9 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken)
             ?? throw new InvalidOperationException("Repository not found.");
 
-        var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
-            repo.Fields.Where(f => f.IncludeInFolderStructure))
+        // Last IncludeInFolderStructure level is the archive file name (not a folder). Omit it
+        // from browse structure so drilling to the level before last lists files, not fake folders.
+        var folderFields = GetBrowsePathFolderFields(repo.Fields)
             .Select(f => new BrowseFolderFieldDto(f.Level, f.Name, f.SqlColumnName))
             .ToList();
 
@@ -142,8 +143,7 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         if (!RepositorySqlHelper.IsValidItemsTableName(repo.ItemsTableName))
             throw new InvalidOperationException("Invalid items table.");
 
-        var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
-            repo.Fields.Where(f => f.IncludeInFolderStructure));
+        var folderFields = GetBrowsePathFolderFields(repo.Fields);
 
         if (folderFields.Count == 0)
             throw new InvalidOperationException("No folder structure fields configured for this repository.");
@@ -257,6 +257,18 @@ public sealed class RepositoryBrowseService : IRepositoryBrowseService
         }
 
         return new PagedResult<BrowseGroupDto>(list, page, pageSize, total);
+    }
+
+    /// <summary>
+    /// Folder levels for browse/tree UI only — excludes the archive naming field when it is the
+    /// deepest IncludeInFolderStructure level (that value is the file stem, not a folder).
+    /// </summary>
+    private static IReadOnlyList<RepositoryFieldDto> GetBrowsePathFolderFields(
+        IReadOnlyList<RepositoryFieldDto> allFields)
+    {
+        var ordered = RepositoryFolderStructureHelper.OrderFolderFields(
+            allFields.Where(f => f.IncludeInFolderStructure));
+        return RepositoryArchiveFileNameResolver.PathFolderFields(allFields, ordered);
     }
 
     private static Dictionary<string, string> BuildFieldToSqlColumnMap(IReadOnlyList<RepositoryFieldDto> fields)

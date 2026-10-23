@@ -102,6 +102,8 @@ public enum FormEntryByColumnStatus
 /// <summary>
 /// Load or update ezfb_{form}_items entries by an arbitrary column value instead of requiring
 /// the caller to already know the item_id GUID (v5 master-form-by-column parity).
+/// When get is called with columnName only (no columnValue), <see cref="Values"/> holds every
+/// distinct non-empty value for that column; <see cref="Entries"/> is used when filtering by value.
 /// </summary>
 public sealed record FormEntryByColumnResult(
     FormEntryByColumnStatus Status,
@@ -110,4 +112,5 @@ public sealed record FormEntryByColumnResult(
     string? ColumnName,
     string? ResolvedColumn,
     IReadOnlyList<Dictionary<string, object?>>? Entries,
-    int UpdatedCount = 0);
+    int UpdatedCount = 0,
+    IReadOnlyList<string>? Values = null);

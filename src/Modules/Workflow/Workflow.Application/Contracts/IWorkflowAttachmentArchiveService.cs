@@ -39,7 +39,11 @@ public interface IWorkflowAttachmentArchiveService
         string? formJsonId = null,
         string? namingFieldFallback = null);
 
-    /// <summary>Link an already-archived repository item to the ticket (WorkflowAttachments + processAddon). No re-upload.</summary>
+    /// <summary>
+    /// Link an already-archived repository item to the ticket (WorkflowAttachments + processAddon). No re-upload.
+    /// When <paramref name="namingFieldFallback"/> is set (typically the ticket reference number), fills the
+    /// repository naming field if it is still empty or only holds the upload file name.
+    /// </summary>
     Task<WorkflowAttachmentArchiveResult?> AttachExistingArchiveItemAsync(
         Guid tenantId,
         Guid workflowId,
@@ -49,7 +53,8 @@ public interface IWorkflowAttachmentArchiveService
         string? fileName,
         int? transactionId,
         Guid userId,
-        CancellationToken cancellationToken = default);
+        CancellationToken cancellationToken = default,
+        string? namingFieldFallback = null);
 }
 
 public sealed record WorkflowAttachmentArchiveResult(

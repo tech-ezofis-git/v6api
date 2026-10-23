@@ -358,7 +358,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             // This stage was archived earlier (e.g. OCR auto-archive before the ticket existed),
             // so the original archive call never had namingFieldFallback -- backfill it onto the
             // already-archived item now that it's known, rather than leaving the naming field
-            // (e.g. a per-ticket request number) permanently null.
+            // (e.g. a per-ticket request number) permanently null / holding the upload file name.
             var fieldValuesForReturn = new Dictionary<string, string>(row.FieldValues, StringComparer.OrdinalIgnoreCase);
             await TryBackfillNamingFieldOnArchivedItemAsync(
                 connection,
@@ -366,6 +366,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
                 alreadyPromoted,
                 fieldValuesForReturn,
                 namingFieldFallback,
+                row.FileName,
                 userId,
                 cancellationToken);
 
@@ -413,7 +414,8 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         RepositoryNamingFieldMetadataInjector.ApplyFallbackIfMissing(
             repo.Fields,
             fieldValues,
-            namingFieldFallback);
+            namingFieldFallback,
+            row.FileName);
 
         fieldValues = CollapseFieldValuesToSqlColumns(fieldValues, repo.Fields);
 
@@ -424,7 +426,8 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             row.FileType,
             FileSize: row.FileSize,
             Metadata: metadataJson,
-            AllowIncompleteFolderMetadata: allowIncompleteFolderMetadata);
+            AllowIncompleteFolderMetadata: allowIncompleteFolderMetadata,
+            NamingFieldFallback: namingFieldFallback);
 
         var result = await _archiveUpload.UploadItemAsync(
             repositoryId,
@@ -458,10 +461,45 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             row.FileType);
     }
 
+    public async Task BackfillNamingFieldIfMissingAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        string? namingFieldFallback,
+        string? originalFileName = null,
+        Guid? userId = null,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(namingFieldFallback) || itemId == Guid.Empty || repositoryId == Guid.Empty)
+            return;
+
+        var connectionString = _connectionProvider.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+
+        var repo = await _provisioner.GetRepositoryAsync(repositoryId, tenantId, cancellationToken);
+        if (repo == null)
+            return;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var fieldValues = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        await TryBackfillNamingFieldOnArchivedItemAsync(
+            connection,
+            repo,
+            itemId,
+            fieldValues,
+            namingFieldFallback,
+            originalFileName,
+            userId,
+            cancellationToken);
+    }
+
     /// <summary>
     /// Fills the resolved naming field (e.g. a per-ticket request number) on an item that was
-    /// archived before <paramref name="namingFieldFallback"/> was known, and only when that
-    /// column is still empty -- never overwrites a value OCR or the original archive already set.
+    /// archived before <paramref name="namingFieldFallback"/> was known. Applies when the column
+    /// is empty or only holds the upload file name (old overwrite bug) -- never overwrites a real
+    /// OCR/caller value.
     /// </summary>
     private static async Task TryBackfillNamingFieldOnArchivedItemAsync(
         NpgsqlConnection connection,
@@ -469,6 +507,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         Guid itemId,
         IDictionary<string, string> fieldValues,
         string? namingFieldFallback,
+        string? originalFileName,
         Guid? userId,
         CancellationToken cancellationToken)
     {
@@ -484,20 +523,68 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             || !RepositorySqlHelper.IsValidItemsTableName(repo.ItemsTableName))
             return;
 
-        if (fieldValues.TryGetValue(namingField.SqlColumnName, out var existing) && !string.IsNullOrWhiteSpace(existing))
+        // Prefer live DB value over stage metadata -- attach-existing may pass an empty dictionary.
+        var column = namingField.SqlColumnName.Replace("\"", "\"\"", StringComparison.Ordinal);
+        string? existingInDb = null;
+        {
+            var readSql = $"""
+                SELECT "{column}"::text
+                FROM repository.{repo.ItemsTableName}
+                WHERE id = @ItemId AND is_deleted = false
+                LIMIT 1
+                """;
+            await using var readCmd = new NpgsqlCommand(readSql, connection);
+            readCmd.Parameters.AddWithValue("@ItemId", itemId);
+            var raw = await readCmd.ExecuteScalarAsync(cancellationToken);
+            if (raw is string s)
+                existingInDb = s;
+            else if (raw is not null and not DBNull)
+                existingInDb = raw.ToString();
+        }
+
+        var existingFromMeta = fieldValues.TryGetValue(namingField.SqlColumnName, out var bySql)
+                && !string.IsNullOrWhiteSpace(bySql)
+            ? bySql
+            : fieldValues.TryGetValue(namingField.Name, out var byName) && !string.IsNullOrWhiteSpace(byName)
+                ? byName
+                : null;
+
+        var existing = !string.IsNullOrWhiteSpace(existingInDb) ? existingInDb : existingFromMeta;
+        if (!string.IsNullOrWhiteSpace(existing)
+            && !RepositoryNamingFieldMetadataInjector.IsFileNamePlaceholder(existing, originalFileName))
             return;
 
         var fallback = namingFieldFallback.Trim();
-        var column = namingField.SqlColumnName.Replace("\"", "\"\"", StringComparison.Ordinal);
+        var fileName = string.IsNullOrWhiteSpace(originalFileName)
+            ? null
+            : Path.GetFileName(originalFileName.Trim());
+        var fileStem = string.IsNullOrWhiteSpace(fileName)
+            ? null
+            : Path.GetFileNameWithoutExtension(fileName);
+
         var sql = $"""
             UPDATE repository.{repo.ItemsTableName}
             SET "{column}" = @Value, modified_at_utc = now(), modified_by = COALESCE(@UserId, modified_by)
-            WHERE id = @ItemId AND is_deleted = false AND ("{column}" IS NULL OR TRIM("{column}") = '')
+            WHERE id = @ItemId AND is_deleted = false
+              AND (
+                "{column}" IS NULL
+                OR TRIM("{column}"::text) = ''
+                OR (
+                    @FileName IS NOT NULL
+                    AND (
+                        lower(TRIM("{column}"::text)) = lower(@FileName)
+                        OR (@FileStem IS NOT NULL AND lower(TRIM("{column}"::text)) = lower(@FileStem))
+                        OR (@FileStem IS NOT NULL AND lower(regexp_replace(TRIM("{column}"::text), '\.[^.]+$', '')) = lower(@FileStem))
+                    )
+                )
+              )
             """;
         await using var cmd = new NpgsqlCommand(sql, connection);
         cmd.Parameters.AddWithValue("@Value", fallback);
         cmd.Parameters.AddWithValue("@UserId", (object?)userId ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@ItemId", itemId);
+        cmd.Parameters.AddWithValue("@FileName", (object?)fileName ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@FileStem", (object?)fileStem ?? DBNull.Value);
         if (await cmd.ExecuteNonQueryAsync(cancellationToken) > 0)
             fieldValues[namingField.SqlColumnName] = fallback;
     }

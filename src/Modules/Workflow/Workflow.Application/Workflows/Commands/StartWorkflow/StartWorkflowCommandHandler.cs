@@ -23,6 +23,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
     private readonly IApAgentJobProgressService _apAgentJobProgress;
     private readonly IWorkflowSecurityService _security;
     private readonly IMjbUsMailWorkflowStarter _mjbMailStarter;
+    private readonly IEmlAttachmentExtractionService _emlAttachmentExtraction;
     private readonly ILogger<StartWorkflowCommandHandler> _logger;
 
     public StartWorkflowCommandHandler(
@@ -39,6 +40,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         IApAgentJobProgressService apAgentJobProgress,
         IWorkflowSecurityService security,
         IMjbUsMailWorkflowStarter mjbMailStarter,
+        IEmlAttachmentExtractionService emlAttachmentExtraction,
         ILogger<StartWorkflowCommandHandler> logger)
     {
         _repository = repository;
@@ -54,6 +56,7 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
         _apAgentJobProgress = apAgentJobProgress;
         _security = security;
         _mjbMailStarter = mjbMailStarter;
+        _emlAttachmentExtraction = emlAttachmentExtraction;
         _logger = logger;
     }
 
@@ -276,6 +279,38 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
                 }
             }
 
+            // RFQ / quote-request starts often archive a .eml: pull embedded PDF/PNG (etc.) into
+            // their own attachments. Deduped by content hash; failure never blocks ticket start.
+            // WatchFox also calls this — second run is a no-op for already-extracted parts.
+            if (ShouldExtractEmlAttachments(request))
+            {
+                try
+                {
+                    var extraction = await _emlAttachmentExtraction.ExtractAsync(
+                        tenantId,
+                        request.WorkflowId,
+                        instance.Id,
+                        userId,
+                        sourceRepositoryId: null,
+                        sourceItemId: null,
+                        cancellationToken);
+
+                    _logger.LogInformation(
+                        "Start workflow instance {InstanceId}: extracted {ExtractedCount} embedded attachment(s) from {SourceFileName}, skipped {SkippedCount}.",
+                        instance.Id,
+                        extraction.Extracted.Count,
+                        extraction.SourceFileName,
+                        extraction.Skipped.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "Start workflow instance {InstanceId}: .eml attachment extraction failed; ticket still started.",
+                        instance.Id);
+                }
+            }
+
             return new StartWorkflowCommandResult(
                 instance.Id,
                 bootstrap.FirstTransactionId,
@@ -294,5 +329,33 @@ public sealed class StartWorkflowCommandHandler : IRequestHandler<StartWorkflowC
             if (attachmentStream != null)
                 await attachmentStream.DisposeAsync();
         }
+    }
+
+    private static bool ShouldExtractEmlAttachments(StartWorkflowCommand request)
+    {
+        if (request.Attachment is { } att && LooksLikeEml(att.FileName, att.ContentType))
+            return true;
+
+        if (request.StagedFiles is { Count: > 0 })
+        {
+            foreach (var staged in request.StagedFiles)
+            {
+                if (LooksLikeEml(staged.FileName, contentType: null))
+                    return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool LooksLikeEml(string? fileName, string? contentType)
+    {
+        if (!string.IsNullOrWhiteSpace(fileName)
+            && fileName.EndsWith(".eml", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        return !string.IsNullOrWhiteSpace(contentType)
+            && (contentType.Contains("rfc822", StringComparison.OrdinalIgnoreCase)
+                || contentType.Equals("message/rfc822", StringComparison.OrdinalIgnoreCase));
     }
 }

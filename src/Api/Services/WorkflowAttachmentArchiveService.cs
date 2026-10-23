@@ -49,6 +49,8 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
         CancellationToken cancellationToken = default,
         bool allowIncompleteFolderMetadata = false)
     {
+        var referenceNumber = await FindReferenceNumberAsync(workflowId, instanceId, cancellationToken);
+
         var request = new RepositoryUploadItemRequest(
             fileStream,
             fileName,
@@ -60,7 +62,8 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             StorageProviderCode: null,
             fileSize,
             metadataJson,
-            AllowIncompleteFolderMetadata: allowIncompleteFolderMetadata);
+            AllowIncompleteFolderMetadata: allowIncompleteFolderMetadata,
+            NamingFieldFallback: referenceNumber);
 
         var upload = await _archiveUpload.UploadItemAsync(
             repositoryId,
@@ -204,7 +207,8 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
         string? fileName,
         int? transactionId,
         Guid userId,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        string? namingFieldFallback = null)
     {
         if (repositoryId == Guid.Empty || itemId == Guid.Empty)
             return null;
@@ -227,6 +231,24 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             : item.FileName;
         if (string.IsNullOrWhiteSpace(resolvedName))
             resolvedName = $"{itemId:D}.bin";
+
+        // Pre-archived (OCR/export) items never had the ticket reference number at archive time.
+        // Fill Request Number / naming field now when still empty or only holding the file name.
+        var fallback = namingFieldFallback;
+        if (string.IsNullOrWhiteSpace(fallback))
+            fallback = await FindReferenceNumberAsync(workflowId, instanceId, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(fallback))
+        {
+            await _uploadIndex.BackfillNamingFieldIfMissingAsync(
+                repositoryId,
+                tenantId,
+                item.Id,
+                fallback,
+                resolvedName,
+                userId,
+                cancellationToken);
+        }
 
         var filePath = item.FilePath;
         if (string.IsNullOrWhiteSpace(filePath))
@@ -277,6 +299,33 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             1,
             null,
             Array.Empty<string>());
+    }
+
+    private async Task<string?> FindReferenceNumberAsync(
+        Guid workflowId,
+        Guid instanceId,
+        CancellationToken cancellationToken)
+    {
+        var connectionString = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(connectionString))
+            return null;
+
+        var suffix = workflowId.ToString("N")[..8];
+        var table = $"workflow.workflow_instances_{suffix}";
+
+        var sql = $"""
+            SELECT reference_number
+            FROM {table}
+            WHERE id = @InstanceId
+            LIMIT 1;
+            """;
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@InstanceId", instanceId);
+        var result = await cmd.ExecuteScalarAsync(cancellationToken);
+        return result as string;
     }
 
     private async Task<Guid> FindAttachmentIdAsync(
