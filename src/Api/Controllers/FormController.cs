@@ -377,6 +377,87 @@ public sealed class FormController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Load form entries by an arbitrary column value instead of the item_id GUID (e.g. a master
+    /// form's business key). <paramref name="request"/>.ColumnName may be the physical ezfb
+    /// column, the control's label, or (legacy forms) its jsonId.
+    /// </summary>
+    [HttpPost("{id}/entry/by-column")]
+    [ProducesResponseType(typeof(FormEntryByColumnResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> GetEntriesByColumn(
+        string id,
+        [FromBody] FormEntryByColumnRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return NotFound();
+
+        try
+        {
+            var result = await _formEntryService.GetEntriesByColumnAsync(
+                id,
+                request.ColumnName ?? string.Empty,
+                request.ColumnValue ?? string.Empty,
+                cancellationToken);
+
+            return result.Status switch
+            {
+                FormEntryByColumnStatus.Found => Ok(result),
+                FormEntryByColumnStatus.InvalidRequest => BadRequest(new { error = result.Message }),
+                _ => NotFound(new { error = result.Message })
+            };
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Update the single form entry matching an arbitrary column value (v5 master-form-by-column
+    /// parity). Fails with 400 when zero or more than one entry matches the given value, so an
+    /// ambiguous lookup never silently updates the wrong (or several) records.
+    /// </summary>
+    [HttpPut("{id}/entry/by-column")]
+    [ProducesResponseType(typeof(FormEntryByColumnResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> UpdateEntriesByColumn(
+        string id,
+        [FromBody] FormEntryByColumnRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return NotFound();
+
+        try
+        {
+            var result = await _formEntryService.UpdateEntriesByColumnAsync(
+                id,
+                request.ColumnName ?? string.Empty,
+                request.ColumnValue ?? string.Empty,
+                new FormEntryUpsertRequest { Fields = request.Fields },
+                cancellationToken);
+
+            return result.Status switch
+            {
+                FormEntryByColumnStatus.Found => Ok(result),
+                FormEntryByColumnStatus.InvalidRequest => BadRequest(new { error = result.Message }),
+                _ => NotFound(new { error = result.Message })
+            };
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     /// <summary>Get form entry by itemId (v5 GET /api/form/{id}/entry/{entryId}).</summary>
     [HttpGet("{id}/entry/{entryId:guid}")]
     [ProducesResponseType(typeof(IReadOnlyList<Dictionary<string, object?>>), StatusCodes.Status200OK)]
@@ -437,6 +518,12 @@ public sealed class FormController : ControllerBase
             (string.Equals(c.Value, "Admin", StringComparison.OrdinalIgnoreCase) ||
              string.Equals(c.Value, "Administrator", StringComparison.OrdinalIgnoreCase)));
 }
+
+/// <summary>Body for POST/PUT /api/form/{id}/entry/by-column.</summary>
+public sealed record FormEntryByColumnRequest(
+    string? ColumnName,
+    string? ColumnValue,
+    Dictionary<string, JsonElement>? Fields = null);
 
 public sealed record FormMasterFileUploadResponse(
     int MasterFileProcessId,

@@ -59,6 +59,7 @@ public interface IWorkflowApAgentMoveNextService
         Guid formEntryId,
         string cellJsonId,
         Guid itemId,
+        string? fileName = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

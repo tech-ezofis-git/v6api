@@ -40,4 +40,28 @@ public interface IFormEntryService
         string wFormId,
         string wFormControlName,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Load form entries whose given column equals the given value, instead of requiring the
+    /// caller to already know the item_id GUID. <paramref name="columnName"/> may be the physical
+    /// ezfb column name, the control's label, or (legacy forms) its jsonId -- resolved the same
+    /// way as <see cref="UpsertEntryAsync(string, Guid, FormEntryUpsertRequest, CancellationToken)"/>.
+    /// </summary>
+    Task<FormEntryByColumnResult> GetEntriesByColumnAsync(
+        string formId,
+        string columnName,
+        string columnValue,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Update the form entry whose given column equals the given value. Returns
+    /// <see cref="FormEntryByColumnStatus.InvalidRequest"/> when zero or more than one entry
+    /// matches, so an ambiguous lookup never silently updates the wrong (or several) records.
+    /// </summary>
+    Task<FormEntryByColumnResult> UpdateEntriesByColumnAsync(
+        string formId,
+        string columnName,
+        string columnValue,
+        FormEntryUpsertRequest request,
+        CancellationToken cancellationToken = default);
 }
