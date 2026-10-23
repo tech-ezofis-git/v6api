@@ -462,6 +462,43 @@ public sealed class FormController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Master-form insert/update by column names and values (label, jsonId, or physical column).
+    /// With <c>matchColumn</c> / <c>matchFilters</c>: update the matching row, or insert when none
+    /// matches. Without a match key: always insert. Returns the saved entry row.
+    /// </summary>
+    [HttpPost("{id}/entry/upsert")]
+    [ProducesResponseType(typeof(FormEntryByColumnResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> UpsertEntryByColumns(
+        string id,
+        [FromBody] FormEntryUpsertByColumnsRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return NotFound();
+
+        try
+        {
+            var result = await _formEntryService.UpsertEntryByColumnsAsync(id, request, cancellationToken);
+            return result.Status switch
+            {
+                FormEntryByColumnStatus.Found => Ok(result),
+                FormEntryByColumnStatus.InvalidRequest => BadRequest(new { error = result.Message }),
+                _ => NotFound(new { error = result.Message })
+            };
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     /// <summary>Get form entry by itemId (v5 GET /api/form/{id}/entry/{entryId}).</summary>
     [HttpGet("{id}/entry/{entryId:guid}")]
     [ProducesResponseType(typeof(IReadOnlyList<Dictionary<string, object?>>), StatusCodes.Status200OK)]

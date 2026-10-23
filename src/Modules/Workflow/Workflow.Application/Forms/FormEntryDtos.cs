@@ -109,6 +109,18 @@ public sealed record FormEntryColumnFilter(
     string? ColumnValue = null);
 
 /// <summary>
+/// Insert or update a master-form entry by column names/values (label, jsonId, or physical column).
+/// When <see cref="MatchColumn"/> / <see cref="MatchFilters"/> is set, finds an existing row and
+/// updates it; when no row matches, inserts. With no match key, always inserts.
+/// </summary>
+public sealed record FormEntryUpsertByColumnsRequest(
+    Dictionary<string, JsonElement>? Fields = null,
+    string? MatchColumn = null,
+    string? MatchColumnId = null,
+    string? MatchValue = null,
+    IReadOnlyList<FormEntryColumnFilter>? MatchFilters = null);
+
+/// <summary>
 /// Load or update ezfb_{form}_items entries by an arbitrary column value instead of requiring
 /// the caller to already know the item_id GUID (v5 master-form-by-column parity).
 /// When get is called with columnName/columnId only (no columnValue), <see cref="Values"/> holds
