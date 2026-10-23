@@ -695,6 +695,9 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 continue;
 
             // fileId is the stage row. Archive it from stage data, then link the new itemId.
+            // namingFieldFallback: when the repository's archive-naming field (e.g. a per-ticket
+            // "Request Number") has no value from the upload, use this ticket's own reference
+            // number instead of leaving it blank -- never overrides an explicit value.
             var archived = await _attachmentArchive.PromoteFromStageAsync(
                 instance.TenantId,
                 workflow.Id,
@@ -705,7 +708,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                 userId,
                 cancellationToken,
                 allowIncompleteFolderMetadata: true,
-                formJsonId: staged.ResolveFormJsonId());
+                formJsonId: staged.ResolveFormJsonId(),
+                namingFieldFallback: instance.ReferenceNumber);
 
             if (archived == null)
             {

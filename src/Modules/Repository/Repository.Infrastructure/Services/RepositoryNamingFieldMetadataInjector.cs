@@ -19,13 +19,19 @@ internal static class RepositoryNamingFieldMetadataInjector
         if (namingField == null)
             return;
 
-        var archiveFileName = TryGetArchiveFileName(originalFileName, contentType);
-        if (string.IsNullOrWhiteSpace(archiveFileName))
+        // Only a naming field that genuinely represents "the uploaded file's name" (field Name/
+        // SqlColumnName is literally "Filename") should ever be backfilled from the upload --
+        // for that field it always wins, even over an existing value, since OCR can only have
+        // put a placeholder there. A naming field that happens to be the deepest
+        // IncludeInFolderStructure level for an unrelated reason (e.g. a "Request Number" field
+        // used to name the archive file/folder) must never be overwritten with the file name:
+        // doing so silently destroyed whatever real value that field was supposed to hold
+        // whenever the caller didn't also supply one.
+        if (!RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
             return;
 
-        // Filename column must keep the uploaded file name, not a placeholder such as "string".
-        if (HasNamingValue(metadata, namingField)
-            && !RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
+        var archiveFileName = TryGetArchiveFileName(originalFileName, contentType);
+        if (string.IsNullOrWhiteSpace(archiveFileName))
             return;
 
         // Prefer a single key so stage UPDATE SET does not list the same column twice
@@ -34,6 +40,34 @@ internal static class RepositoryNamingFieldMetadataInjector
             metadata[namingField.SqlColumnName.Trim()] = archiveFileName;
         else
             metadata[namingField.Name.Trim()] = archiveFileName;
+    }
+
+    /// <summary>
+    /// Fills the resolved naming field with <paramref name="fallbackValue"/> when it still has no
+    /// value after stage/OCR/original-filename injection -- e.g. a workflow ticket's reference
+    /// number for a repository whose naming field is a per-ticket request number. Never overrides
+    /// a value the caller/OCR already supplied, and never applies to a field that represents the
+    /// literal uploaded file name (that one only ever comes from the upload itself).
+    /// </summary>
+    public static void ApplyFallbackIfMissing(
+        IReadOnlyList<RepositoryFieldDto> allFields,
+        IDictionary<string, string> metadata,
+        string? fallbackValue)
+    {
+        if (string.IsNullOrWhiteSpace(fallbackValue))
+            return;
+
+        var namingField = ResolveNamingField(allFields);
+        if (namingField == null || RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
+            return;
+
+        if (HasNamingValue(metadata, namingField))
+            return;
+
+        if (!string.IsNullOrWhiteSpace(namingField.SqlColumnName))
+            metadata[namingField.SqlColumnName.Trim()] = fallbackValue.Trim();
+        else
+            metadata[namingField.Name.Trim()] = fallbackValue.Trim();
     }
 
     public static void EnsureInFieldList(
@@ -59,6 +93,13 @@ internal static class RepositoryNamingFieldMetadataInjector
                 return;
             }
         }
+
+        // Same rule as InjectFromOriginalFileName: only suggest the upload's own file name for a
+        // naming field that genuinely represents "Filename". A naming field with no value that
+        // happens to be an unrelated business field (e.g. "Request Number") should stay unset
+        // here, not be suggested as if the file name were its answer.
+        if (!RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
+            return;
 
         var archiveFileName = TryGetArchiveFileName(originalFileName, contentType);
         if (string.IsNullOrWhiteSpace(archiveFileName))

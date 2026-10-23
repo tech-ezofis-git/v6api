@@ -43,14 +43,22 @@ public interface IRepositoryUploadIndexService
         Guid? userId,
         CancellationToken cancellationToken = default);
 
-    /// <summary>Promote a staged monitor file into repository archive (items table + blob) using stage field data.</summary>
+    /// <summary>
+    /// Promote a staged monitor file into repository archive (items table + blob) using stage field data.
+    /// When the repository's resolved naming field (see RepositoryArchiveFileNameResolver) has no value
+    /// from the stage row or OCR, <paramref name="namingFieldFallback"/> fills it -- e.g. the workflow
+    /// ticket's reference number for a repository whose naming field is a per-ticket request number.
+    /// Never overrides an explicit value and never applies to a field that represents the literal
+    /// uploaded file name (that one is always backfilled from the file name itself).
+    /// </summary>
     Task<UploadIndexPromoteResult?> PromoteStageAsync(
         Guid stageId,
         Guid repositoryId,
         Guid tenantId,
         Guid? userId,
         CancellationToken cancellationToken = default,
-        bool allowIncompleteFolderMetadata = false);
+        bool allowIncompleteFolderMetadata = false,
+        string? namingFieldFallback = null);
 
     Task<UploadIndexLoadResult?> LoadAsync(
         Guid stageId,
