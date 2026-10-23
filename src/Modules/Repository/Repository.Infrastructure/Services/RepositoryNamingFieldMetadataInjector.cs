@@ -46,13 +46,16 @@ internal static class RepositoryNamingFieldMetadataInjector
     /// Fills the resolved naming field with <paramref name="fallbackValue"/> when it still has no
     /// value after stage/OCR/original-filename injection -- e.g. a workflow ticket's reference
     /// number for a repository whose naming field is a per-ticket request number. Never overrides
-    /// a value the caller/OCR already supplied, and never applies to a field that represents the
-    /// literal uploaded file name (that one only ever comes from the upload itself).
+    /// a real caller/OCR value, and never applies to a field that represents the literal uploaded
+    /// file name (that one only ever comes from the upload itself).
+    /// When <paramref name="originalFileName"/> is set, a naming value that is only the upload's
+    /// own file name/stem (left by the old filename-overwrite bug) is treated as missing.
     /// </summary>
     public static void ApplyFallbackIfMissing(
         IReadOnlyList<RepositoryFieldDto> allFields,
         IDictionary<string, string> metadata,
-        string? fallbackValue)
+        string? fallbackValue,
+        string? originalFileName = null)
     {
         if (string.IsNullOrWhiteSpace(fallbackValue))
             return;
@@ -61,13 +64,37 @@ internal static class RepositoryNamingFieldMetadataInjector
         if (namingField == null || RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
             return;
 
-        if (HasNamingValue(metadata, namingField))
+        var existing = ResolveNamingValue(metadata, namingField);
+        if (!string.IsNullOrWhiteSpace(existing) && !IsFileNamePlaceholder(existing, originalFileName))
             return;
 
         if (!string.IsNullOrWhiteSpace(namingField.SqlColumnName))
             metadata[namingField.SqlColumnName.Trim()] = fallbackValue.Trim();
         else
             metadata[namingField.Name.Trim()] = fallbackValue.Trim();
+    }
+
+    /// <summary>
+    /// True when <paramref name="value"/> is only the uploaded file's name or stem -- i.e. not a
+    /// real business value for a naming field like Request Number.
+    /// </summary>
+    public static bool IsFileNamePlaceholder(string? value, string? originalFileName)
+    {
+        if (string.IsNullOrWhiteSpace(value) || string.IsNullOrWhiteSpace(originalFileName))
+            return false;
+
+        var file = Path.GetFileName(originalFileName.Trim());
+        if (string.IsNullOrWhiteSpace(file))
+            return false;
+
+        var stem = Path.GetFileNameWithoutExtension(file);
+        var val = value.Trim();
+        var valStem = Path.GetFileNameWithoutExtension(val);
+
+        return string.Equals(val, file, StringComparison.OrdinalIgnoreCase)
+            || (!string.IsNullOrWhiteSpace(stem)
+                && (string.Equals(val, stem, StringComparison.OrdinalIgnoreCase)
+                    || string.Equals(valStem, stem, StringComparison.OrdinalIgnoreCase)));
     }
 
     public static void EnsureInFieldList(

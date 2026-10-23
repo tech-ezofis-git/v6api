@@ -42,15 +42,15 @@ public interface IFormEntryService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Load form entries whose given column equals the given value, instead of requiring the
-    /// caller to already know the item_id GUID. <paramref name="columnName"/> may be the physical
-    /// ezfb column name, the control's label, or (legacy forms) its jsonId -- resolved the same
-    /// way as <see cref="UpsertEntryAsync(string, Guid, FormEntryUpsertRequest, CancellationToken)"/>.
+    /// Load form entries by column. <paramref name="columnName"/> is required (physical ezfb
+    /// column, control label, or jsonId). When <paramref name="columnValue"/> is omitted/blank,
+    /// returns every distinct non-empty value for that column in <see cref="FormEntryByColumnResult.Values"/>.
+    /// When a value is supplied, returns matching entry rows in <see cref="FormEntryByColumnResult.Entries"/>.
     /// </summary>
     Task<FormEntryByColumnResult> GetEntriesByColumnAsync(
         string formId,
         string columnName,
-        string columnValue,
+        string? columnValue = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

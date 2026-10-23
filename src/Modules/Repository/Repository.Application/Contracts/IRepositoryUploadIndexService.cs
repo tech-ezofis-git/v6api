@@ -60,6 +60,20 @@ public interface IRepositoryUploadIndexService
         bool allowIncompleteFolderMetadata = false,
         string? namingFieldFallback = null);
 
+    /// <summary>
+    /// Fills the repository naming field (e.g. Request Number) on an already-archived item when it
+    /// is still empty or only holds the upload file name. Used when start/json attaches a pre-archived
+    /// item and the ticket reference number was not known at archive time.
+    /// </summary>
+    Task BackfillNamingFieldIfMissingAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        string? namingFieldFallback,
+        string? originalFileName = null,
+        Guid? userId = null,
+        CancellationToken cancellationToken = default);
+
     Task<UploadIndexLoadResult?> LoadAsync(
         Guid stageId,
         Guid tenantId,

@@ -665,7 +665,8 @@ public sealed class WorkflowStartBootstrapService : IWorkflowStartBootstrapServi
                     staged.FileName,
                     currentTransactionId,
                     userId,
-                    cancellationToken);
+                    cancellationToken,
+                    namingFieldFallback: instance.ReferenceNumber);
 
                 if (attached != null)
                 {

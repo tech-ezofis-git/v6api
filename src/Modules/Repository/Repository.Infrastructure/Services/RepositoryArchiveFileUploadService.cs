@@ -80,6 +80,15 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
                 "{\"Supplier\":\"Acme\",\"PoNumber\":\"PO-1\",\"InvoiceNumber\":\"12335\"}.");
         }
 
+        // Apply before mandatory/folder checks so a ticket reference number can satisfy a naming
+        // field (e.g. Expense Request Number) that is not present on the stage row.
+        ApplyOriginalFileNameToFilenameField(repo.Fields, fieldValues, request.FileName);
+        RepositoryNamingFieldMetadataInjector.ApplyFallbackIfMissing(
+            repo.Fields,
+            fieldValues,
+            request.NamingFieldFallback,
+            request.FileName);
+
         var folderFieldDefs = repo.Fields
             .Where(f => f.IncludeInFolderStructure)
             .OrderBy(f => f.Level)
@@ -122,8 +131,6 @@ public sealed class RepositoryArchiveFileUploadService : IRepositoryArchiveFileU
 
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
-
-        ApplyOriginalFileNameToFilenameField(repo.Fields, fieldValues, request.FileName);
 
         var archiveBaseFileName = RepositoryArchiveFileNameResolver.ResolveArchiveBaseFileName(
             repo.Fields,

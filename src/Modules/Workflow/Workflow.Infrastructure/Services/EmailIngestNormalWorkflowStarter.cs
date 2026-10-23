@@ -118,6 +118,7 @@ public sealed class EmailIngestNormalWorkflowStarter : IEmailIngestNormalWorkflo
 
         var envType = _configuration["WorkflowStart:EnvType"] ?? "trial";
 
+        // Pass FileName so StartWorkflow can detect .eml and extract embedded PDF/PNG attachments.
         return await _mediator.Send(new StartWorkflowCommand(
             workflow.Id,
             Context: contextJson,
@@ -125,7 +126,7 @@ public sealed class EmailIngestNormalWorkflowStarter : IEmailIngestNormalWorkflo
             Attachment: null,
             TriggerApAgentPythonJob: false,
             FormDataFields: formData,
-            StagedFiles: [new StartWorkflowStagedFileRef(repositoryGuid, stageFileId)]),
+            StagedFiles: [new StartWorkflowStagedFileRef(repositoryGuid, stageFileId, FileName: fileName)]),
             cancellationToken);
     }
 

@@ -342,15 +342,13 @@ public sealed class FormEntryService : IFormEntryService
     public async Task<FormEntryByColumnResult> GetEntriesByColumnAsync(
         string formId,
         string columnName,
-        string columnValue,
+        string? columnValue = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(formId))
             return InvalidByColumn(formId, columnName, "form id is required.");
         if (string.IsNullOrWhiteSpace(columnName))
             return InvalidByColumn(formId, columnName, "column name is required.");
-        if (string.IsNullOrWhiteSpace(columnValue))
-            return InvalidByColumn(formId, columnName, "column value is required.");
 
         var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
         var connectionString = _tenantContext.ConnectionString
@@ -376,6 +374,22 @@ public sealed class FormEntryService : IFormEntryService
 
         if (!TryResolveLookupColumn(columnName, controls, ezfbColumns, out var resolvedColumn))
             return InvalidByColumn(normalizedFormId, columnName, $"column '{columnName}' was not found on this form.");
+
+        // Column only → every distinct non-empty value for that column (no row filter).
+        if (string.IsNullOrWhiteSpace(columnValue))
+        {
+            var values = await LoadDistinctColumnValuesAsync(
+                connection, tableName, resolvedColumn, cancellationToken);
+            return new FormEntryByColumnResult(
+                FormEntryByColumnStatus.Found,
+                null,
+                normalizedFormId,
+                columnName,
+                resolvedColumn,
+                Entries: null,
+                UpdatedCount: 0,
+                Values: values);
+        }
 
         var rows = await LoadEntriesByColumnValueAsync(
             connection, tableName, ezfbColumns, resolvedColumn, columnValue, cancellationToken);
@@ -507,9 +521,9 @@ public sealed class FormEntryService : IFormEntryService
         new(FormEntryByColumnStatus.NotFound, message, formId, columnName, resolvedColumn, null);
 
     /// <summary>
-    /// Resolves a caller-supplied column name against a control's stored columnName/Name/jsonId
-    /// first (same precedence as submitted field keys), falling back to treating it as the
-    /// physical ezfb column (or label/jsonId) directly when no wFormControl row matches.
+    /// Resolves a caller-supplied key (physical ezfb column, control label/Name, stored
+    /// columnName, or jsonId) to the physical ezfb column used for distinct-values and
+    /// entry lookup. Same precedence as submitted field keys.
     /// </summary>
     private static bool TryResolveLookupColumn(
         string columnName,
@@ -521,7 +535,11 @@ public sealed class FormEntryService : IFormEntryService
             && EzfbColumnNaming.TryResolveEzfbColumn(control.ColumnName, control.Name, control.JsonId, ezfbColumns, out resolvedColumn))
             return true;
 
-        return EzfbColumnNaming.TryResolveEzfbColumn(columnName, columnName, ezfbColumns, out resolvedColumn);
+        // No control row (or control has no physical column yet): treat the key as label and/or jsonId.
+        if (EzfbColumnNaming.TryResolveEzfbColumn(columnName, columnName, ezfbColumns, out resolvedColumn))
+            return true;
+
+        return EzfbColumnNaming.TryResolveEzfbColumn(null, columnName, ezfbColumns, out resolvedColumn);
     }
 
     private static async Task<List<Guid>> FindEntryIdsByColumnValueAsync(
@@ -1247,6 +1265,8 @@ public sealed class FormEntryService : IFormEntryService
             return false;
 
         var key = fieldKey.Trim();
+
+        // 1) Control label / Name
         foreach (var row in controls)
         {
             if (!string.IsNullOrWhiteSpace(row.Name)
@@ -1257,6 +1277,18 @@ public sealed class FormEntryService : IFormEntryService
             }
         }
 
+        // 2) Stored physical columnName
+        foreach (var row in controls)
+        {
+            if (!string.IsNullOrWhiteSpace(row.ColumnName)
+                && string.Equals(row.ColumnName.Trim(), key, StringComparison.OrdinalIgnoreCase))
+            {
+                control = row;
+                return true;
+            }
+        }
+
+        // 3) jsonId (raw or sanitized to ezfb column)
         foreach (var row in controls)
         {
             if (string.Equals(row.JsonId, key, StringComparison.OrdinalIgnoreCase))

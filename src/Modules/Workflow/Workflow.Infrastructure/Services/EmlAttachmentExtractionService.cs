@@ -177,24 +177,45 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
     /// MimeKit's <c>MimeMessage.Attachments</c> only returns parts with
     /// Content-Disposition: attachment, which misses photos/receipts/screenshots that many mail
     /// clients forward as Content-Disposition: inline with a Content-ID (used to render inline in
-    /// the HTML body) -- the exact shape a forwarded "Fw:" email's embedded JPGs/PNGs take. Any
-    /// named MimePart is a candidate here; the existing extension allow-list and size cap still
-    /// filter out everything that isn't meant to be archived.
+    /// the HTML body) -- the exact shape a forwarded "Fw:" email's embedded JPGs/PNGs take.
+    /// Also includes PDF/PNG/JPEG parts that have no filename (only a mime type / Content-ID);
+    /// the extension allow-list and size cap still filter what gets archived.
     /// </summary>
     private static IEnumerable<MimePart> EnumerateCandidateAttachmentParts(MimeMessage message)
     {
         foreach (var entity in message.BodyParts)
         {
-            if (entity is MimePart part && (part.IsAttachment || !string.IsNullOrWhiteSpace(part.FileName)))
+            if (entity is not MimePart part)
+                continue;
+
+            if (part.IsAttachment || !string.IsNullOrWhiteSpace(part.FileName))
+            {
+                yield return part;
+                continue;
+            }
+
+            // Inline PDF/PNG/JPEG with no FileName (common in RFQ / quote-request .eml forwards).
+            if (IsArchivableEmbeddedMime(part.ContentType?.MimeType))
                 yield return part;
         }
+    }
+
+    private static bool IsArchivableEmbeddedMime(string? mimeType)
+    {
+        if (string.IsNullOrWhiteSpace(mimeType))
+            return false;
+
+        return mimeType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase)
+            || mimeType.Equals("image/png", StringComparison.OrdinalIgnoreCase)
+            || mimeType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase)
+            || mimeType.Equals("image/jpg", StringComparison.OrdinalIgnoreCase);
     }
 
     private static string GuessExtension(string? mimeType) => mimeType?.ToLowerInvariant() switch
     {
         "application/pdf" => ".pdf",
         "image/png" => ".png",
-        "image/jpeg" => ".jpg",
+        "image/jpeg" or "image/jpg" => ".jpg",
         _ => ".bin"
     };
 

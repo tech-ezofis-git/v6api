@@ -353,7 +353,11 @@ public sealed record RepositoryUploadItemRequest(
     string? StorageProviderCode = null,
     long? FileSize = null,
     string? Metadata = null,
-    bool AllowIncompleteFolderMetadata = false);
+    bool AllowIncompleteFolderMetadata = false,
+    /// <summary>Used only when the resolved naming field still has no value after metadata/filename
+    /// injection -- e.g. a workflow ticket's reference number for a repository whose naming field
+    /// is a per-ticket request number. Never overrides a value already present.</summary>
+    string? NamingFieldFallback = null);
 
 public sealed record RepositoryUploadItemResult(
     Guid ItemId,

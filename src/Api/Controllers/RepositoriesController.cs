@@ -285,7 +285,11 @@ public sealed class RepositoriesController : ControllerBase
         }
     }
 
-    /// <summary>Folder fields and browse paths for this repository (driven by RepositoryFields, not hardcoded).</summary>
+    /// <summary>
+    /// Folder fields and browse paths for this repository (driven by RepositoryFields).
+    /// The last IncludeInFolderStructure level (archive file name) is omitted — it is not a folder;
+    /// clicking the level before last lists files.
+    /// </summary>
     [HttpGet("/api/repositories/{id:guid}/browse/structure")]
     public async Task<IActionResult> BrowseStructure(Guid id, CancellationToken cancellationToken)
     {
