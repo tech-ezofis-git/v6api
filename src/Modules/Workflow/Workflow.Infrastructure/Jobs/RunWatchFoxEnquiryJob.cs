@@ -101,6 +101,36 @@ public sealed class RunWatchFoxEnquiryJob
                     args.WorkflowId,
                     started.InstanceId,
                     fileName);
+
+                // Additive enrichment only: pull any PDFs/Excel/Word files embedded in the .eml
+                // into their own attachments. The .eml itself stays archived exactly as above --
+                // a failure here must not fail ticket creation.
+                try
+                {
+                    var extraction = await services.GetRequiredService<IEmlAttachmentExtractionService>().ExtractAsync(
+                        args.TenantId,
+                        args.WorkflowId,
+                        started.InstanceId,
+                        actorUserId,
+                        sourceRepositoryId: null,
+                        sourceItemId: null);
+
+                    _logger.LogInformation(
+                        "WatchFox enquiry {EventKey} instance {InstanceId}: extracted {ExtractedCount} embedded attachment(s) from {FileName}, skipped {SkippedCount}.",
+                        args.EventKey,
+                        started.InstanceId,
+                        extraction.Extracted.Count,
+                        fileName,
+                        extraction.Skipped.Count);
+                }
+                catch (Exception ex)
+                {
+                    _logger.LogWarning(
+                        ex,
+                        "WatchFox enquiry {EventKey} instance {InstanceId}: .eml attachment extraction failed; ticket still started.",
+                        args.EventKey,
+                        started.InstanceId);
+                }
             }
             finally
             {

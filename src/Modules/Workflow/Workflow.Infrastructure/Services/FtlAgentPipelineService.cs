@@ -250,6 +250,125 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             moved.NextStepName);
     }
 
+    /// <summary>
+    /// Same qualifier call + form refresh as <see cref="ExecuteAsync"/>'s qualifier branch, minus
+    /// the move-next: re-sends the ticket's archived RFQ file, writes the new response straight to
+    /// ezfb and the mailbox snapshot, and appends a fresh agent_data_validation row. The ticket's
+    /// step/stage is never touched.
+    /// </summary>
+    public async Task<FtlQualifierRegenerateResult> RegenerateQualifierAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default)
+    {
+        var chatUrl = _agentsChat.ResolveChatUrl();
+        if (string.IsNullOrWhiteSpace(chatUrl))
+            throw new InvalidOperationException("Agents:ChatUrl is not configured.");
+
+        var workflow = await _repository.GetByIdWithStepsAsync(args.WorkflowId, cancellationToken)
+            ?? throw new InvalidOperationException("Workflow not found.");
+        var step = workflow.Steps.FirstOrDefault(s =>
+            string.Equals(s.ActivityId, args.ActivityId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s.Id.ToString("D"), args.ActivityId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"FTL step {args.ActivityId} was not found.");
+
+        var sessionId = $"regenerate-{Guid.NewGuid():N}";
+        var responseJson = await PostQualifierAsync(args, sessionId, chatUrl, cancellationToken);
+
+        var synthesizedQualifier = false;
+        var storedJson = PreferLongestQuoteLineItems(StripPdf(responseJson));
+        storedJson = NormalizeAgentOutput(FtlAgentStepDetector.Qualifier, storedJson, ref synthesizedQualifier);
+        if (synthesizedQualifier)
+        {
+            _logger.LogWarning(
+                "FTL qualifier regenerate for instance {InstanceId} did not include qualifier_result.",
+                args.InstanceId);
+        }
+
+        var formId = args.FormId ?? workflow.FormId;
+        var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(formId))
+            formId = identity?.FormId;
+        var formEntryId = identity?.FormEntryId;
+        var attachment = (await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken))
+            .FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
+        var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
+
+        var fields = ExtractFormFields(storedJson);
+        var mapped = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson: null, cancellationToken);
+
+        await EnsureEzfbColumnsForMappedFieldsAsync(formId, mapped, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(formId)
+            && formEntryId is { } entryId && entryId != Guid.Empty
+            && repositoryId is { } repoId && repoId != Guid.Empty
+            && attachment?.ItemId is { } itemId
+            && mapped.TableFields.Count > 0)
+        {
+            await _moveNextSupport.ApplyMetadataAsync(
+                args.TenantId,
+                new ApAgentMetadataApplyRequest(
+                    args.WorkflowId,
+                    args.InstanceId,
+                    formId,
+                    entryId,
+                    repoId,
+                    itemId,
+                    mapped.TableFields,
+                    LineItemsJson: null),
+                args.UserId,
+                cancellationToken);
+        }
+
+        await _moveNextSupport.SaveAgentValidationAsync(
+            args.WorkflowId,
+            args.InstanceId,
+            step,
+            args.UserId,
+            new MoveToNextStepApAgentPayload(
+                TransactionId: null,
+                InstanceId: args.InstanceId,
+                AiAgentResponseJson: storedJson,
+                AiAgentHtml: null,
+                RepositoryItemId: attachment?.ItemId,
+                RepositoryId: repositoryId,
+                FormId: formId,
+                FormEntryId: formEntryId),
+            legacyTransactionId: null,
+            cancellationToken);
+
+        var updated = 0;
+        if (!string.IsNullOrWhiteSpace(formId) && formEntryId is { } writeEntryId && writeEntryId != Guid.Empty)
+        {
+            updated = await _moveNextSupport.ApplyFormDataToEzfbAsync(
+                formId,
+                writeEntryId,
+                mapped.FormDataFields,
+                lineItemsJson: null,
+                cancellationToken);
+
+            await WriteFormTableColumnsAsync(formId, writeEntryId, mapped.TableColumns, cancellationToken);
+        }
+
+        await SyncLineItemsToMailboxAsync(args.WorkflowId, args.InstanceId, mapped.TableColumns, cancellationToken);
+
+        var mailboxFormDataJson = MoveToNextStepFormDataComposer.FromParsedFields(mapped.FormDataFields, lineItemsJson: null);
+        if (!string.IsNullOrWhiteSpace(mailboxFormDataJson))
+        {
+            await _mailbox.PropagateInstanceFormDataAsync(
+                args.WorkflowId,
+                args.InstanceId,
+                new MailboxFormSnapshot(formId, formEntryId, mailboxFormDataJson),
+                cancellationToken);
+        }
+
+        _logger.LogInformation(
+            "FTL qualifier regenerated for instance {InstanceId}: {UpdatedColumns} ezfb column(s) refreshed. Step not moved.",
+            args.InstanceId,
+            updated);
+
+        return new FtlQualifierRegenerateResult(storedJson, mailboxFormDataJson ?? "{}");
+    }
+
     private async Task ExecuteDocumentAsync(FtlAgentJobArgs args, string jobId, CancellationToken cancellationToken)
     {
         var generated = await GenerateDocumentAsync(args, cancellationToken);
@@ -400,6 +519,132 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             main.FileName,
             mainRequest!,
             documents);
+    }
+
+    /// <summary>
+    /// Same as <see cref="GenerateDocumentAsync"/>, but the quote PDF(s) it replaces are
+    /// soft-deleted once the new ones are confirmed archived -- the ticket only ever shows the
+    /// latest PDF per quote section. The old PDFs are never touched until the new run succeeds,
+    /// so a failed regenerate leaves the previous documents exactly as they were.
+    /// </summary>
+    public async Task<FtlDocumentGenerateResult> RegenerateDocumentAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default)
+    {
+        var workflowSuffix = args.WorkflowId.ToString("N")[..8];
+        var previous = await LoadPreviousQuoteDocumentsAsync(workflowSuffix, args.InstanceId, cancellationToken);
+
+        var generated = await GenerateDocumentAsync(args, cancellationToken);
+
+        if (previous.Count > 0)
+        {
+            await RetireDocumentsAsync(workflowSuffix, previous, args.UserId, cancellationToken);
+            _logger.LogInformation(
+                "FTL document regenerate for instance {InstanceId}: retired {Count} previous quote PDF(s).",
+                args.InstanceId,
+                previous.Count);
+        }
+
+        return generated;
+    }
+
+    /// <summary>Non-deleted attachments on this instance whose name matches a quote-doc PDF (see <see cref="QuoteSectionFileName"/>).</summary>
+    private async Task<List<(Guid AttachmentId, Guid ItemId, Guid RepositoryId)>> LoadPreviousQuoteDocumentsAsync(
+        string workflowSuffix,
+        Guid instanceId,
+        CancellationToken cancellationToken)
+    {
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return [];
+
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+
+        var sql = $"""
+            SELECT id, item_id, repository_id, file_name
+            FROM workflow.workflow_attachments_{workflowSuffix}
+            WHERE workflow_instance_id = @InstanceId
+              AND is_deleted = false
+              AND item_id IS NOT NULL
+              AND repository_id IS NOT NULL
+            """;
+        await using var cmd = new NpgsqlCommand(sql, connection);
+        cmd.Parameters.AddWithValue("@InstanceId", instanceId);
+
+        var result = new List<(Guid AttachmentId, Guid ItemId, Guid RepositoryId)>();
+        await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            var fileName = reader.IsDBNull(3) ? string.Empty : reader.GetString(3);
+            if (!IsQuoteDocumentFileName(fileName))
+                continue;
+
+            result.Add((reader.GetGuid(0), reader.GetGuid(1), reader.GetGuid(2)));
+        }
+
+        return result;
+    }
+
+    private static bool IsQuoteDocumentFileName(string fileName) =>
+        fileName.EndsWith("_quote_1.pdf", StringComparison.OrdinalIgnoreCase)
+        || fileName.EndsWith("_quote_2.pdf", StringComparison.OrdinalIgnoreCase)
+        || fileName.EndsWith("_quote_3.pdf", StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>
+    /// Soft-deletes the given attachments everywhere they can surface: workflow_attachments
+    /// (Attachments section), process_addon (the GetInstanceAttachments fallback list), and the
+    /// repository item itself. Never a hard delete -- the blob and history stay intact.
+    /// </summary>
+    private async Task RetireDocumentsAsync(
+        string workflowSuffix,
+        List<(Guid AttachmentId, Guid ItemId, Guid RepositoryId)> documents,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var tenantCs = _connectionProvider.ConnectionString;
+        if (string.IsNullOrWhiteSpace(tenantCs))
+            return;
+
+        await using var connection = new NpgsqlConnection(tenantCs);
+        await connection.OpenAsync(cancellationToken);
+
+        foreach (var (attachmentId, itemId, repositoryId) in documents)
+        {
+            await using var attachmentCmd = new NpgsqlCommand(
+                $"""
+                UPDATE workflow.workflow_attachments_{workflowSuffix}
+                SET is_deleted = true, modified_at_utc = now(), modified_by = @UserId
+                WHERE id = @AttachmentId;
+                """,
+                connection);
+            attachmentCmd.Parameters.AddWithValue("@AttachmentId", attachmentId);
+            attachmentCmd.Parameters.AddWithValue("@UserId", userId);
+            await attachmentCmd.ExecuteNonQueryAsync(cancellationToken);
+
+            await using var addonCmd = new NpgsqlCommand(
+                $"""
+                UPDATE workflow.process_addon_{workflowSuffix}
+                SET is_deleted = true, modified_at = now(), modified_by = @UserId
+                WHERE item_id = @ItemId AND is_deleted = false;
+                """,
+                connection);
+            addonCmd.Parameters.AddWithValue("@ItemId", itemId);
+            addonCmd.Parameters.AddWithValue("@UserId", userId);
+            await addonCmd.ExecuteNonQueryAsync(cancellationToken);
+
+            var repositorySuffix = repositoryId.ToString("N")[..8];
+            await using var itemCmd = new NpgsqlCommand(
+                $"""
+                UPDATE repository.items_{repositorySuffix}
+                SET is_deleted = true, modified_at_utc = now(), modified_by = @UserId
+                WHERE id = @ItemId AND is_deleted = false;
+                """,
+                connection);
+            itemCmd.Parameters.AddWithValue("@ItemId", itemId);
+            itemCmd.Parameters.AddWithValue("@UserId", userId);
+            await itemCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
     }
 
     /// <summary>Python may return the same name for all three sections; keep them distinct.</summary>

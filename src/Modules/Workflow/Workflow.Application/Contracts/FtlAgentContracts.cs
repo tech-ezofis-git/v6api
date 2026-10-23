@@ -34,6 +34,24 @@ public interface IFtlAgentPipelineService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Same as <see cref="GenerateDocumentAsync"/>, but the quote PDF(s) it replaces are
+    /// soft-deleted once the new ones are confirmed archived -- only the latest PDF per quote
+    /// section stays visible. Does not move the workflow.
+    /// </summary>
+    Task<FtlDocumentGenerateResult> RegenerateDocumentAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Re-sends the ticket's already-archived RFQ file to the Qualify Agent and refreshes
+    /// formData/validation with the new response. Never moves the workflow -- the caller is
+    /// responsible for only calling this while the ticket is on the Qualify Agent step.
+    /// </summary>
+    Task<FtlQualifierRegenerateResult> RegenerateQualifierAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Preview only: remap jsonId formData to field names, call Python chat once for the
     /// selected quoteType (quote_1 when omitted), return the PDF.
     /// Does not archive or move the workflow.
@@ -70,3 +88,8 @@ public sealed record FtlDocumentPreviewResult(
     string PdfBase64,
     string FormDataJson,
     string QuoteType = "quote_1");
+
+/// <summary>Refreshed qualifier output. FormDataJson is jsonId-keyed, same shape as mailbox formData.</summary>
+public sealed record FtlQualifierRegenerateResult(
+    string AgentResponseJson,
+    string FormDataJson);

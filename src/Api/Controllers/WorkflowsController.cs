@@ -73,6 +73,7 @@ public sealed class WorkflowsController : ControllerBase
     private readonly IWorkflowTicketSearchService _ticketSearch;
     private readonly IWorkflowSecurityService _workflowSecurity;
     private readonly IFtlAgentPipelineService _ftlAgentPipeline;
+    private readonly IEmlAttachmentExtractionService _emlAttachmentExtraction;
 
     public WorkflowsController(
         IMediator mediator,
@@ -93,7 +94,8 @@ public sealed class WorkflowsController : ControllerBase
         IWorkflowInboxShareAssignmentService inboxShareAssignment,
         IWorkflowTicketSearchService ticketSearch,
         IWorkflowSecurityService workflowSecurity,
-        IFtlAgentPipelineService ftlAgentPipeline)
+        IFtlAgentPipelineService ftlAgentPipeline,
+        IEmlAttachmentExtractionService emlAttachmentExtraction)
     {
         _mediator = mediator;
         _workflowSchemaService = workflowSchemaService;
@@ -114,6 +116,7 @@ public sealed class WorkflowsController : ControllerBase
         _ticketSearch = ticketSearch;
         _workflowSecurity = workflowSecurity;
         _ftlAgentPipeline = ftlAgentPipeline;
+        _emlAttachmentExtraction = emlAttachmentExtraction;
     }
 
     /// <summary>
@@ -171,6 +174,130 @@ public sealed class WorkflowsController : ControllerBase
             return BadRequest(new { error = ex.Message });
         }
     }
+
+    /// <summary>
+    /// Regenerate the Qualify Agent's data for this ticket without moving it off the Qualify
+    /// Agent step: re-sends the already-archived RFQ file, refreshes formData/validation with
+    /// the new response. Only allowed while the ticket is on the Qualify Agent step.
+    /// </summary>
+    [HttpPost("{workflowId:guid}/instances/{instanceId:guid}/ftl/regenerate-qualifier")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(FtlQualifierRegenerateResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> RegenerateFtlQualifier(
+        Guid workflowId,
+        Guid instanceId,
+        [FromBody] FtlRegenerateRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.ActivityId))
+            return BadRequest(new { error = "activityId is required." });
+
+        var tenantId = _tenantProvider.GetTenantId();
+        var userId = GetCurrentUserId();
+        if (tenantId is null || userId is null)
+            return BadRequest(new { error = "Tenant and authenticated user are required." });
+
+        var workflow = await _mediator.Send(new GetWorkflowByIdQuery(workflowId), cancellationToken);
+        if (workflow == null)
+            return NotFound(new { error = "Workflow not found." });
+
+        var step = ResolveFtlStep(workflow.Steps, request.ActivityId);
+        if (step == null)
+            return BadRequest(new { error = $"No workflow step found for activityId '{request.ActivityId}'." });
+
+        if (!IsFtlStage(step, "QUALIFY_AGENT"))
+            return BadRequest(new { error = "Qualification can only be regenerated while the ticket is on the Qualify Agent step." });
+
+        try
+        {
+            var result = await _ftlAgentPipeline.RegenerateQualifierAsync(
+                new FtlAgentJobArgs(
+                    tenantId.Value,
+                    userId.Value,
+                    workflowId,
+                    instanceId,
+                    request.ActivityId,
+                    FtlAgentStepDetector.Qualifier,
+                    workflow.RepositoryId,
+                    workflow.FormId),
+                cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Regenerate the quote PDF(s) for this ticket without moving it: re-renders quote_1/2/3,
+    /// archives each new PDF, then replaces the previous PDF(s) for this ticket (soft-deleted,
+    /// never hard-deleted) once the new ones are confirmed archived -- a failed regenerate run
+    /// leaves the previous documents untouched. Only allowed on the Document Generate Agent
+    /// step or any step after it.
+    /// </summary>
+    [HttpPost("{workflowId:guid}/instances/{instanceId:guid}/ftl/regenerate-document")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(FtlDocumentGenerateResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> RegenerateFtlDocument(
+        Guid workflowId,
+        Guid instanceId,
+        [FromBody] FtlRegenerateRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.ActivityId))
+            return BadRequest(new { error = "activityId is required." });
+
+        var tenantId = _tenantProvider.GetTenantId();
+        var userId = GetCurrentUserId();
+        if (tenantId is null || userId is null)
+            return BadRequest(new { error = "Tenant and authenticated user are required." });
+
+        var workflow = await _mediator.Send(new GetWorkflowByIdQuery(workflowId), cancellationToken);
+        if (workflow == null)
+            return NotFound(new { error = "Workflow not found." });
+
+        var step = ResolveFtlStep(workflow.Steps, request.ActivityId);
+        if (step == null)
+            return BadRequest(new { error = $"No workflow step found for activityId '{request.ActivityId}'." });
+
+        var documentStep = workflow.Steps.FirstOrDefault(s => IsFtlStage(s, "DOCUMENT_GENERATE_AGENT"));
+        if (documentStep == null || step.Order < documentStep.Order)
+            return BadRequest(new { error = "The PDF can only be regenerated on or after the Document Generate Agent step." });
+
+        try
+        {
+            var result = await _ftlAgentPipeline.RegenerateDocumentAsync(
+                new FtlAgentJobArgs(
+                    tenantId.Value,
+                    userId.Value,
+                    workflowId,
+                    instanceId,
+                    request.ActivityId,
+                    FtlAgentStepDetector.Document,
+                    workflow.RepositoryId,
+                    workflow.FormId),
+                cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    private static WorkflowStepItem? ResolveFtlStep(IReadOnlyList<WorkflowStepItem> steps, string activityId) =>
+        steps.FirstOrDefault(s =>
+            string.Equals(s.ActivityId, activityId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s.Id.ToString("D"), activityId, StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsFtlStage(WorkflowStepItem step, string stageType) =>
+        string.Equals(step.StageType?.Trim(), stageType, StringComparison.OrdinalIgnoreCase)
+        || string.Equals(step.Name?.Trim(), stageType.Replace('_', ' '), StringComparison.OrdinalIgnoreCase);
 
     private static string? ReadJsonBodyProperty(JsonElement body, string name)
     {
@@ -1778,6 +1905,52 @@ public sealed class WorkflowsController : ControllerBase
         }
     }
 
+    /// <summary>
+    /// Extract attachments embedded in a .eml already archived on this instance (e.g. the RFQ
+    /// email the ticket started from) and archive each one separately in the Attachments section.
+    /// Does not change how the ticket started or touch the original .eml. Optional body targets a
+    /// specific already-archived .eml by repositoryId/itemId; omit to use the most recently
+    /// archived .eml-shaped attachment on the instance. Skips anything already extracted
+    /// (by content hash) and anything outside the configured type/size allow-list.
+    /// </summary>
+    [HttpPost("{workflowId:guid}/instances/{instanceId:guid}/attachments/extract-eml")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(EmlAttachmentExtractionResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> ExtractEmlAttachments(
+        Guid workflowId,
+        Guid instanceId,
+        [FromBody] ExtractEmlAttachmentsRequest? request,
+        CancellationToken cancellationToken)
+    {
+        var tenantId = _tenantProvider.GetTenantId();
+        var userId = GetCurrentUserId();
+        if (tenantId is null || userId is null)
+            return BadRequest(new { error = "Tenant and authenticated user are required." });
+
+        try
+        {
+            var result = await _emlAttachmentExtraction.ExtractAsync(
+                tenantId.Value,
+                workflowId,
+                instanceId,
+                userId.Value,
+                request?.RepositoryId,
+                request?.ItemId,
+                cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex) when (ex.Message.Contains("not found", StringComparison.OrdinalIgnoreCase))
+        {
+            return NotFound(new { error = ex.Message });
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
     /// <summary>Approve a workflow step and optionally move to next stage.</summary>
     [HttpPost("instances/{instanceId:guid}/steps/{stepInstanceId:guid}/approve")]
     [ProducesResponseType(typeof(ApproveStepCommandResult), StatusCodes.Status200OK)]
@@ -2651,6 +2824,12 @@ public record AddCommentRequest(string Comments, Guid? StepInstanceId = null, st
 
 /// <summary>Request to add an attachment to a workflow instance.</summary>
 public record AddAttachmentRequest(string FileName, string FilePath, long? FileSize = null, string? ContentType = null);
+
+/// <summary>Optional: target a specific already-archived .eml. Omit both to auto-detect.</summary>
+public record ExtractEmlAttachmentsRequest(Guid? RepositoryId = null, Guid? ItemId = null);
+
+/// <summary>Activity id of the step the ticket is currently on (same convention as move-next).</summary>
+public record FtlRegenerateRequest(string ActivityId);
 
 /// <summary>Request to approve a workflow step.</summary>
 public record ApproveStepRequest(string? Comments = null, bool MoveToNextStep = true);
