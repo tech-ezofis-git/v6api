@@ -182,7 +182,7 @@ public sealed class WorkflowsController : ControllerBase
     /// </summary>
     [HttpPost("{workflowId:guid}/instances/{instanceId:guid}/ftl/regenerate-qualifier")]
     [Consumes("application/json")]
-    [ProducesResponseType(typeof(FtlQualifierRegenerateResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(FtlRegenerateFormResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     public async Task<IActionResult> RegenerateFtlQualifier(
@@ -220,6 +220,63 @@ public sealed class WorkflowsController : ControllerBase
                     instanceId,
                     request.ActivityId,
                     FtlAgentStepDetector.Qualifier,
+                    workflow.RepositoryId,
+                    workflow.FormId),
+                cancellationToken);
+            return Ok(result);
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Regenerate the Quote Agent's data for this ticket without moving it off the Quote Agent
+    /// step: re-sends the already-archived RFQ file (plus the stored qualifier result) to the
+    /// Quote Agent and refreshes formData/validation with the new response. Only allowed while
+    /// the ticket is on the Quote Agent step.
+    /// </summary>
+    [HttpPost("{workflowId:guid}/instances/{instanceId:guid}/ftl/regenerate-quote")]
+    [Consumes("application/json")]
+    [ProducesResponseType(typeof(FtlRegenerateFormResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> RegenerateFtlQuote(
+        Guid workflowId,
+        Guid instanceId,
+        [FromBody] FtlRegenerateRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(request.ActivityId))
+            return BadRequest(new { error = "activityId is required." });
+
+        var tenantId = _tenantProvider.GetTenantId();
+        var userId = GetCurrentUserId();
+        if (tenantId is null || userId is null)
+            return BadRequest(new { error = "Tenant and authenticated user are required." });
+
+        var workflow = await _mediator.Send(new GetWorkflowByIdQuery(workflowId), cancellationToken);
+        if (workflow == null)
+            return NotFound(new { error = "Workflow not found." });
+
+        var step = ResolveFtlStep(workflow.Steps, request.ActivityId);
+        if (step == null)
+            return BadRequest(new { error = $"No workflow step found for activityId '{request.ActivityId}'." });
+
+        if (!IsFtlStage(step, "QUOTE_AGENT"))
+            return BadRequest(new { error = "The quote can only be regenerated while the ticket is on the Quote Agent step." });
+
+        try
+        {
+            var result = await _ftlAgentPipeline.RegenerateQuoteAsync(
+                new FtlAgentJobArgs(
+                    tenantId.Value,
+                    userId.Value,
+                    workflowId,
+                    instanceId,
+                    request.ActivityId,
+                    FtlAgentStepDetector.Quote,
                     workflow.RepositoryId,
                     workflow.FormId),
                 cancellationToken);
