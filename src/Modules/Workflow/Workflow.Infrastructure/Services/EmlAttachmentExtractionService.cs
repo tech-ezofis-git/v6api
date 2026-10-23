@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Text.RegularExpressions;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MimeKit;
@@ -121,6 +122,15 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
                 continue;
             }
 
+            if (_options.SkipSignatureImages
+                && IsLikelySignatureOrLogoImage(part, attachmentName, bytes))
+            {
+                skipped.Add(new SkippedEmlAttachment(
+                    attachmentName,
+                    "Company logo / email signature image; not archived as an attachment."));
+                continue;
+            }
+
             var contentHash = Convert.ToHexString(SHA256.HashData(bytes));
             if (await AlreadyExtractedAsync(connection, instanceId, contentHash, cancellationToken))
             {
@@ -215,6 +225,56 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
             || mimeType.Equals("image/png", StringComparison.OrdinalIgnoreCase)
             || mimeType.Equals("image/jpeg", StringComparison.OrdinalIgnoreCase)
             || mimeType.Equals("image/jpg", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// Signature / company-logo chrome: logo-like file names, or small inline/CID images.
+    /// Larger inline photos (RFQ screenshots) are kept.
+    /// </summary>
+    private bool IsLikelySignatureOrLogoImage(MimePart part, string fileName, byte[] bytes)
+    {
+        if (!IsImagePart(part, fileName))
+            return false;
+
+        if (HasSignatureImageFileName(fileName))
+            return true;
+
+        // HTML-embedded signature chrome: Content-Disposition: inline and/or a Content-ID.
+        var disposition = part.ContentDisposition?.Disposition;
+        var isInline = string.Equals(disposition, ContentDisposition.Inline, StringComparison.OrdinalIgnoreCase)
+            || (string.IsNullOrWhiteSpace(disposition) && !string.IsNullOrWhiteSpace(part.ContentId));
+
+        return isInline && bytes.Length < _options.MinNonSignatureImageBytes;
+    }
+
+    private static bool IsImagePart(MimePart part, string fileName)
+    {
+        var mime = part.ContentType?.MimeType ?? string.Empty;
+        if (mime.StartsWith("image/", StringComparison.OrdinalIgnoreCase))
+            return true;
+
+        var ext = Path.GetExtension(fileName);
+        return ext.Equals(".png", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".jpg", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".jpeg", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".gif", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".webp", StringComparison.OrdinalIgnoreCase)
+            || ext.Equals(".bmp", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasSignatureImageFileName(string? fileName)
+    {
+        var name = Path.GetExtension(fileName ?? string.Empty).Length > 0
+            ? Path.GetFileNameWithoutExtension(fileName)
+            : (fileName ?? string.Empty);
+        name = name.Trim();
+        if (string.IsNullOrEmpty(name))
+            return false;
+
+        return Regex.IsMatch(
+            name,
+            @"^(image|img|logo|signature|sig|banner|badge|icon|cid_|untitled|company[_-]?logo|email[_-]?logo)\d*$",
+            RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
     }
 
     private static string GuessExtension(string? mimeType) => mimeType?.ToLowerInvariant() switch

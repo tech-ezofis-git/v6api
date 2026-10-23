@@ -36,21 +36,26 @@ public sealed class GetInstanceAttachmentsQueryHandler : IRequestHandler<GetInst
                 .Select(a => a.CreatedBy)),
             cancellationToken);
 
-        var attachmentItems = attachments.Select(a => new AttachmentItem(
-            a.Id,
-            a.WorkflowInstanceId,
-            request.WorkflowId,
-            a.FileName ?? string.Empty,
-            a.FilePath ?? string.Empty,
-            a.FileSize,
-            a.ContentType,
-            a.CreatedAtUtc,
-            a.CreatedBy,
-            uploaderEmails.GetValueOrDefault(a.CreatedBy),
-            a.ModifiedBy,
-            a.ModifiedAtUtc,
-            RepositoryId: a.RepositoryId ?? workflowRepositoryGuid,
-            ItemId: a.ItemId)).ToList();
+        var attachmentItems = attachments.Select(a =>
+        {
+            var fileName = a.FileName ?? string.Empty;
+            return new AttachmentItem(
+                a.Id,
+                a.WorkflowInstanceId,
+                request.WorkflowId,
+                fileName,
+                a.FilePath ?? string.Empty,
+                a.FileSize,
+                a.ContentType,
+                a.CreatedAtUtc,
+                a.CreatedBy,
+                uploaderEmails.GetValueOrDefault(a.CreatedBy),
+                a.ModifiedBy,
+                a.ModifiedAtUtc,
+                RepositoryId: a.RepositoryId ?? workflowRepositoryGuid,
+                ItemId: a.ItemId,
+                IsOriginal: WorkflowAttachmentOriginality.IsOriginal(fileName, a.ContentType));
+        }).ToList();
 
         var knownItemIds = attachmentItems
             .Where(a => a.ItemId is { } id && id != Guid.Empty)
@@ -63,11 +68,12 @@ public sealed class GetInstanceAttachmentsQueryHandler : IRequestHandler<GetInst
             if (knownItemIds.Contains(addon.ItemId))
                 continue;
 
+            var fileName = addon.FileName ?? string.Empty;
             attachmentItems.Add(new AttachmentItem(
                 Id: Guid.Empty,
                 WorkflowInstanceId: request.InstanceId,
                 WorkflowId: request.WorkflowId,
-                FileName: addon.FileName ?? string.Empty,
+                FileName: fileName,
                 FilePath: string.Empty,
                 FileSize: null,
                 ContentType: null,
@@ -77,10 +83,18 @@ public sealed class GetInstanceAttachmentsQueryHandler : IRequestHandler<GetInst
                 ModifiedBy: null,
                 ModifiedAtUtc: null,
                 RepositoryId: addon.RepositoryId,
-                ItemId: addon.ItemId));
+                ItemId: addon.ItemId,
+                IsOriginal: WorkflowAttachmentOriginality.IsOriginal(fileName, contentType: null)));
 
             knownItemIds.Add(addon.ItemId);
         }
+
+        // Original .eml first, then other originals (quote PDFs), then supporting files by recency.
+        attachmentItems = attachmentItems
+            .OrderByDescending(a => WorkflowAttachmentOriginality.LooksLikeEml(a.FileName, a.ContentType))
+            .ThenByDescending(a => a.IsOriginal)
+            .ThenByDescending(a => a.CreatedAtUtc)
+            .ToList();
 
         var tableName = _dynamicTableRepository.GetTableName(request.WorkflowId, "WorkflowAttachments");
 
