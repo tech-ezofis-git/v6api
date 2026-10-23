@@ -34,6 +34,15 @@ public interface IFtlAgentPipelineService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Same as <see cref="GenerateDocumentAsync"/>, but the quote PDF(s) it replaces are
+    /// soft-deleted once the new ones are confirmed archived -- only the latest PDF per quote
+    /// section stays visible. Does not move the workflow.
+    /// </summary>
+    Task<FtlDocumentGenerateResult> RegenerateDocumentAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Re-sends the ticket's already-archived RFQ file to the Qualify Agent and refreshes
     /// formData/validation with the new response. Never moves the workflow -- the caller is
     /// responsible for only calling this while the ticket is on the Qualify Agent step.

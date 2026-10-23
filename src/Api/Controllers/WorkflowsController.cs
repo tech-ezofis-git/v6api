@@ -232,10 +232,11 @@ public sealed class WorkflowsController : ControllerBase
     }
 
     /// <summary>
-    /// Regenerate the quote PDF(s) for this ticket without moving it: re-renders quote_1/2/3
-    /// and archives each new PDF as its own attachment. The previous PDFs are left untouched
-    /// (preserved, not deleted) so nothing is lost if the regenerate run itself fails partway.
-    /// Only allowed on the Document Generate Agent step or any step after it.
+    /// Regenerate the quote PDF(s) for this ticket without moving it: re-renders quote_1/2/3,
+    /// archives each new PDF, then replaces the previous PDF(s) for this ticket (soft-deleted,
+    /// never hard-deleted) once the new ones are confirmed archived -- a failed regenerate run
+    /// leaves the previous documents untouched. Only allowed on the Document Generate Agent
+    /// step or any step after it.
     /// </summary>
     [HttpPost("{workflowId:guid}/instances/{instanceId:guid}/ftl/regenerate-document")]
     [Consumes("application/json")]
@@ -270,7 +271,7 @@ public sealed class WorkflowsController : ControllerBase
 
         try
         {
-            var result = await _ftlAgentPipeline.GenerateDocumentAsync(
+            var result = await _ftlAgentPipeline.RegenerateDocumentAsync(
                 new FtlAgentJobArgs(
                     tenantId.Value,
                     userId.Value,
