@@ -102,9 +102,10 @@ public sealed class RunWatchFoxEnquiryJob
                     started.InstanceId,
                     fileName);
 
-                // Additive enrichment only: pull any PDFs/Excel/Word files embedded in the .eml
-                // into their own attachments. The .eml itself stays archived exactly as above --
-                // a failure here must not fail ticket creation.
+                // Additive enrichment only: pull any allowed-type files embedded in the .eml
+                // (PDF/Office/CSV/image attachments, explicit or inline) into their own
+                // attachments. The .eml itself stays archived exactly as above -- a failure here
+                // must not fail ticket creation.
                 try
                 {
                     var extraction = await services.GetRequiredService<IEmlAttachmentExtractionService>().ExtractAsync(

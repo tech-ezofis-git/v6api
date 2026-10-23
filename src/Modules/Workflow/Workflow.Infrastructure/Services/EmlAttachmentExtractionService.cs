@@ -81,11 +81,8 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
         var skipped = new List<SkippedEmlAttachment>();
         var allowedExtensions = new HashSet<string>(_options.AllowedExtensions, StringComparer.OrdinalIgnoreCase);
 
-        foreach (var entity in message.Attachments)
+        foreach (var part in EnumerateCandidateAttachmentParts(message))
         {
-            if (entity is not MimePart part)
-                continue;
-
             var attachmentName = string.IsNullOrWhiteSpace(part.FileName)
                 ? $"attachment-{extracted.Count + skipped.Count + 1}{GuessExtension(part.ContentType?.MimeType)}"
                 : part.FileName.Trim();
@@ -174,6 +171,23 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
             fileName);
 
         return new EmlAttachmentExtractionResult(itemId, fileName, extracted, skipped);
+    }
+
+    /// <summary>
+    /// MimeKit's <c>MimeMessage.Attachments</c> only returns parts with
+    /// Content-Disposition: attachment, which misses photos/receipts/screenshots that many mail
+    /// clients forward as Content-Disposition: inline with a Content-ID (used to render inline in
+    /// the HTML body) -- the exact shape a forwarded "Fw:" email's embedded JPGs/PNGs take. Any
+    /// named MimePart is a candidate here; the existing extension allow-list and size cap still
+    /// filter out everything that isn't meant to be archived.
+    /// </summary>
+    private static IEnumerable<MimePart> EnumerateCandidateAttachmentParts(MimeMessage message)
+    {
+        foreach (var entity in message.BodyParts)
+        {
+            if (entity is MimePart part && (part.IsAttachment || !string.IsNullOrWhiteSpace(part.FileName)))
+                yield return part;
+        }
     }
 
     private static string GuessExtension(string? mimeType) => mimeType?.ToLowerInvariant() switch
