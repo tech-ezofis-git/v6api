@@ -514,17 +514,14 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         if (string.IsNullOrWhiteSpace(namingFieldFallback))
             return;
 
-        var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
-            repo.Fields.Where(f => f.IncludeInFolderStructure));
-        var namingField = RepositoryArchiveFileNameResolver.ResolveNamingField(repo.Fields, folderFields);
-        if (namingField == null
-            || RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField)
-            || string.IsNullOrWhiteSpace(namingField.SqlColumnName)
+        var targetField = RepositoryNamingFieldMetadataInjector.ResolveTicketReferenceTargetField(repo.Fields);
+        if (targetField == null
+            || string.IsNullOrWhiteSpace(targetField.SqlColumnName)
             || !RepositorySqlHelper.IsValidItemsTableName(repo.ItemsTableName))
             return;
 
         // Prefer live DB value over stage metadata -- attach-existing may pass an empty dictionary.
-        var column = namingField.SqlColumnName.Replace("\"", "\"\"", StringComparison.Ordinal);
+        var column = targetField.SqlColumnName.Replace("\"", "\"\"", StringComparison.Ordinal);
         string? existingInDb = null;
         {
             var readSql = $"""
@@ -542,10 +539,10 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
                 existingInDb = raw.ToString();
         }
 
-        var existingFromMeta = fieldValues.TryGetValue(namingField.SqlColumnName, out var bySql)
+        var existingFromMeta = fieldValues.TryGetValue(targetField.SqlColumnName, out var bySql)
                 && !string.IsNullOrWhiteSpace(bySql)
             ? bySql
-            : fieldValues.TryGetValue(namingField.Name, out var byName) && !string.IsNullOrWhiteSpace(byName)
+            : fieldValues.TryGetValue(targetField.Name, out var byName) && !string.IsNullOrWhiteSpace(byName)
                 ? byName
                 : null;
 
@@ -586,7 +583,7 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         cmd.Parameters.AddWithValue("@FileName", (object?)fileName ?? DBNull.Value);
         cmd.Parameters.AddWithValue("@FileStem", (object?)fileStem ?? DBNull.Value);
         if (await cmd.ExecuteNonQueryAsync(cancellationToken) > 0)
-            fieldValues[namingField.SqlColumnName] = fallback;
+            fieldValues[targetField.SqlColumnName] = fallback;
     }
 
     public async Task<UploadIndexDeleteFilesResult> DeleteStageFilesAsync(
