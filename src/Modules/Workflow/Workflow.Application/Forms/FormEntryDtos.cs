@@ -100,10 +100,20 @@ public enum FormEntryByColumnStatus
 }
 
 /// <summary>
+/// Optional AND filter for POST by-column. <see cref="ColumnName"/> / <see cref="ColumnId"/>
+/// may be the control label, jsonId, or physical ezfb column (same resolution as the target column).
+/// </summary>
+public sealed record FormEntryColumnFilter(
+    string? ColumnName = null,
+    string? ColumnId = null,
+    string? ColumnValue = null);
+
+/// <summary>
 /// Load or update ezfb_{form}_items entries by an arbitrary column value instead of requiring
 /// the caller to already know the item_id GUID (v5 master-form-by-column parity).
-/// When get is called with columnName only (no columnValue), <see cref="Values"/> holds every
-/// distinct non-empty value for that column; <see cref="Entries"/> is used when filtering by value.
+/// When get is called with columnName/columnId only (no columnValue), <see cref="Values"/> holds
+/// every distinct non-empty value for that column (optionally narrowed by <c>filters</c>);
+/// <see cref="Entries"/> is used when filtering by the target column's value.
 /// </summary>
 public sealed record FormEntryByColumnResult(
     FormEntryByColumnStatus Status,
