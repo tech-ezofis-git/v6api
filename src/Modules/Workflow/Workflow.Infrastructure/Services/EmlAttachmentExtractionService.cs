@@ -1,4 +1,5 @@
 using System.Security.Cryptography;
+using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using MimeKit;
@@ -70,6 +71,11 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
 
         var (repositoryId, itemId, fileName) = source.Value;
 
+        // Copy folder/document fields from the source .eml onto each extracted file so they
+        // share Company Name / Project / etc. and appear under the same repo browse path.
+        var metadataJson = await BuildMetadataJsonFromSourceItemAsync(
+            repositoryId, tenantId, itemId, cancellationToken);
+
         var fileContent = await _itemQuery.OpenItemFileAsync(repositoryId, tenantId, itemId, cancellationToken)
             ?? throw new InvalidOperationException("The .eml attachment's file content could not be opened.");
 
@@ -133,7 +139,7 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
                 attachmentName,
                 contentType,
                 bytes.Length,
-                metadataJson: null,
+                metadataJson,
                 transactionId: null,
                 userId,
                 cancellationToken,
@@ -218,6 +224,64 @@ public sealed class EmlAttachmentExtractionService : IEmlAttachmentExtractionSer
         "image/jpeg" or "image/jpg" => ".jpg",
         _ => ".bin"
     };
+
+    private static readonly HashSet<string> MetadataCopyExcludedColumns = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Id", "Code", "TenantId", "RepositoryId", "FolderId", "StorageProviderId",
+        "FilePath", "FileName", "FileType", "FileSize", "TotalPages", "IsDeleted",
+        "CreatedAtUtc", "CreatedBy", "ModifiedAtUtc", "ModifiedBy",
+        "WorkflowInstanceId", "OcrText", "OcrJson", "SummaryJson", "ActiveItem", "IsVerified",
+        "FileVersion", "Revision", "StageStatus", "MailId", "ArchivedFrom", "ArchivedAt"
+    };
+
+    /// <summary>
+    /// Builds archive metadata JSON from the source .eml item's custom/folder fields so extracted
+    /// PDF/PNG siblings land in the same Document Details / browse folders.
+    /// </summary>
+    private async Task<string?> BuildMetadataJsonFromSourceItemAsync(
+        Guid repositoryId,
+        Guid tenantId,
+        Guid itemId,
+        CancellationToken cancellationToken)
+    {
+        try
+        {
+            var item = await _itemQuery.GetItemAsync(repositoryId, tenantId, itemId, cancellationToken);
+            if (item?.Fields is not { Count: > 0 })
+                return null;
+
+            var metadata = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var (key, raw) in item.Fields)
+            {
+                if (string.IsNullOrWhiteSpace(key) || MetadataCopyExcludedColumns.Contains(key))
+                    continue;
+                if (raw is null || raw is DBNull)
+                    continue;
+
+                var text = raw switch
+                {
+                    string s => s.Trim(),
+                    DateTime dt => dt.ToString("O"),
+                    DateTimeOffset dto => dto.ToString("O"),
+                    _ => Convert.ToString(raw, System.Globalization.CultureInfo.InvariantCulture)?.Trim()
+                };
+                if (string.IsNullOrWhiteSpace(text))
+                    continue;
+
+                metadata[key.Trim()] = text;
+            }
+
+            return metadata.Count == 0 ? null : JsonSerializer.Serialize(metadata);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(
+                ex,
+                "Could not copy metadata from source EML item {ItemId}; extracted attachments will archive without inherited fields.",
+                itemId);
+            return null;
+        }
+    }
 
     private static async Task<(Guid RepositoryId, Guid ItemId, string FileName)?> ResolveExplicitSourceAsync(
         NpgsqlConnection connection,

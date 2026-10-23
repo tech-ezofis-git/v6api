@@ -124,8 +124,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         if (string.IsNullOrWhiteSpace(formId))
             formId = identity?.FormId;
         var formEntryId = identity?.FormEntryId;
-        var attachment = (await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken))
-            .FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
+        var attachmentRows = await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var attachment = attachmentRows.FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
         var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
         var isQuote = string.Equals(args.Mode, FtlAgentStepDetector.Quote, StringComparison.OrdinalIgnoreCase);
         var fields = isQuote
@@ -168,20 +168,20 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         if (!string.IsNullOrWhiteSpace(formId)
             && formEntryId is { } entryId && entryId != Guid.Empty
             && repositoryId is { } repoId && repoId != Guid.Empty
-            && attachment?.ItemId is { } itemId
             && mapped.TableFields.Count > 0)
         {
-            await _moveNextSupport.ApplyMetadataAsync(
+            // Apply Company/Project/etc. to every archived attachment (EML + extracted PDF/PNG),
+            // not only FirstOrDefault — otherwise only one file shows Document Details / appears
+            // under the repo folder structure.
+            await ApplyMetadataToAllAttachmentsAsync(
                 args.TenantId,
-                new ApAgentMetadataApplyRequest(
-                    args.WorkflowId,
-                    args.InstanceId,
-                    formId,
-                    entryId,
-                    repoId,
-                    itemId,
-                    mapped.TableFields,
-                    LineItemsJson: null),
+                args.WorkflowId,
+                args.InstanceId,
+                formId,
+                entryId,
+                repoId,
+                mapped.TableFields,
+                attachmentRows,
                 args.UserId,
                 cancellationToken);
         }
@@ -289,8 +289,8 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         if (string.IsNullOrWhiteSpace(formId))
             formId = identity?.FormId;
         var formEntryId = identity?.FormEntryId;
-        var attachment = (await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken))
-            .FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
+        var attachmentRows = await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var attachment = attachmentRows.FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
         var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
 
         var fields = ExtractFormFields(storedJson);
@@ -301,20 +301,17 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
         if (!string.IsNullOrWhiteSpace(formId)
             && formEntryId is { } entryId && entryId != Guid.Empty
             && repositoryId is { } repoId && repoId != Guid.Empty
-            && attachment?.ItemId is { } itemId
             && mapped.TableFields.Count > 0)
         {
-            await _moveNextSupport.ApplyMetadataAsync(
+            await ApplyMetadataToAllAttachmentsAsync(
                 args.TenantId,
-                new ApAgentMetadataApplyRequest(
-                    args.WorkflowId,
-                    args.InstanceId,
-                    formId,
-                    entryId,
-                    repoId,
-                    itemId,
-                    mapped.TableFields,
-                    LineItemsJson: null),
+                args.WorkflowId,
+                args.InstanceId,
+                formId,
+                entryId,
+                repoId,
+                mapped.TableFields,
+                attachmentRows,
                 args.UserId,
                 cancellationToken);
         }
@@ -1260,6 +1257,70 @@ LIMIT 1;
         if (lineItems.ValueKind == JsonValueKind.Array && lineItems.GetArrayLength() > 0)
             return lineItems.GetRawText();
         return null;
+    }
+
+    /// <summary>
+    /// Writes agent-mapped fields (Company Name, Project, …) onto every repository item linked
+    /// from this ticket's attachments. Previously only the first attachment received metadata,
+    /// so extracted PDF/PNG siblings stayed empty and never appeared under repo folder browse.
+    /// </summary>
+    private async Task ApplyMetadataToAllAttachmentsAsync(
+        Guid tenantId,
+        Guid workflowId,
+        Guid instanceId,
+        string formId,
+        Guid formEntryId,
+        Guid defaultRepositoryId,
+        IReadOnlyDictionary<string, string> tableFields,
+        IReadOnlyList<WorkflowAttachmentRowDto> attachmentRows,
+        Guid userId,
+        CancellationToken cancellationToken)
+    {
+        var targets = attachmentRows
+            .Where(r => r.ItemId is { } id && id != Guid.Empty)
+            .GroupBy(r => r.ItemId!.Value)
+            .Select(g => g.First())
+            .ToList();
+
+        if (targets.Count == 0)
+            return;
+
+        foreach (var row in targets)
+        {
+            var repoId = row.RepositoryId is { } rid && rid != Guid.Empty ? rid : defaultRepositoryId;
+            if (repoId == Guid.Empty)
+                continue;
+
+            try
+            {
+                await _moveNextSupport.ApplyMetadataAsync(
+                    tenantId,
+                    new ApAgentMetadataApplyRequest(
+                        workflowId,
+                        instanceId,
+                        formId,
+                        formEntryId,
+                        repoId,
+                        row.ItemId!.Value,
+                        tableFields,
+                        LineItemsJson: null),
+                    userId,
+                    cancellationToken);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(
+                    ex,
+                    "FTL metadata apply failed for attachment item {ItemId} on instance {InstanceId}; continuing with remaining attachments.",
+                    row.ItemId,
+                    instanceId);
+            }
+        }
+
+        _logger.LogInformation(
+            "FTL metadata applied to {Count} attachment item(s) on instance {InstanceId}.",
+            targets.Count,
+            instanceId);
     }
 
     private static Guid? ParseGuid(string? value) =>
