@@ -126,6 +126,7 @@ public sealed class FormEntryService : IFormEntryService
             resolvedFields,
             now,
             userStamp,
+            ezfbColumns,
             cancellationToken);
         if (!updated)
             return Failed("form entry not found");
@@ -511,7 +512,7 @@ public sealed class FormEntryService : IFormEntryService
         if (isUpdate)
         {
             var updated = await UpdateEntryAsync(
-                connection, tableName, entryId, resolvedFields, now, userStamp, cancellationToken);
+                connection, tableName, entryId, resolvedFields, now, userStamp, ezfbColumns, cancellationToken);
             if (!updated)
                 return NotFoundByColumn(normalizedFormId, matchKey, "form entry not found.");
         }
@@ -626,7 +627,8 @@ public sealed class FormEntryService : IFormEntryService
         var userStamp = userId.ToString("D");
         var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 
-        var updated = await UpdateEntryAsync(connection, tableName, entryId, resolvedFields, now, userStamp, cancellationToken);
+        var updated = await UpdateEntryAsync(
+            connection, tableName, entryId, resolvedFields, now, userStamp, ezfbColumns, cancellationToken);
         if (!updated)
             return NotFoundByColumn(normalizedFormId, columnName, "form entry not found.", resolvedColumn);
 
@@ -1019,19 +1021,74 @@ public sealed class FormEntryService : IFormEntryService
         return false;
     }
 
+    private static readonly HashSet<string> UpsertBodyReservedKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "fields", "field", "data", "entry", "entryId", "formEntryId", "item_id", "itemId",
+        "id", "formId", "wFormId", "created_at", "modified_at", "created_by", "modified_by",
+        "is_deleted", "EncryptOutput", "creditconsumed", "output"
+    };
+
+    /// <summary>
+    /// Accepts <c>{ "fields": { ... } }</c> (any casing), or a flat column→value map at the root
+    /// (master-form edit often posts the row without a <c>fields</c> wrapper).
+    /// </summary>
     private static FormEntryUpsertRequest ParseUpsertRequest(JsonElement body)
     {
         if (body.ValueKind != JsonValueKind.Object)
             return new FormEntryUpsertRequest();
 
-        if (!body.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object)
-            return new FormEntryUpsertRequest();
+        if (TryGetObjectPropertyIgnoreCase(body, "fields", out var fields)
+            || TryGetObjectPropertyIgnoreCase(body, "field", out fields)
+            || TryGetObjectPropertyIgnoreCase(body, "data", out fields))
+        {
+            return new FormEntryUpsertRequest { Fields = EnumerateFieldsObject(fields) };
+        }
 
+        // Flat map: treat non-reserved root properties as fields.
+        var flat = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in body.EnumerateObject())
+        {
+            if (UpsertBodyReservedKeys.Contains(prop.Name))
+                continue;
+            if (IsSystemColumn(prop.Name))
+                continue;
+            flat[prop.Name] = prop.Value;
+        }
+
+        return new FormEntryUpsertRequest { Fields = flat.Count > 0 ? flat : null };
+    }
+
+    private static bool TryGetObjectPropertyIgnoreCase(JsonElement body, string name, out JsonElement value)
+    {
+        foreach (var prop in body.EnumerateObject())
+        {
+            if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (prop.Value.ValueKind != JsonValueKind.Object)
+            {
+                value = default;
+                return false;
+            }
+
+            value = prop.Value;
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static Dictionary<string, JsonElement> EnumerateFieldsObject(JsonElement fields)
+    {
         var dict = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
         foreach (var prop in fields.EnumerateObject())
+        {
+            if (IsSystemColumn(prop.Name) || UpsertBodyReservedKeys.Contains(prop.Name))
+                continue;
             dict[prop.Name] = prop.Value;
+        }
 
-        return new FormEntryUpsertRequest { Fields = dict };
+        return dict;
     }
 
     private static Dictionary<string, string> NormalizeFields(Dictionary<string, JsonElement>? fields)
@@ -1042,9 +1099,18 @@ public sealed class FormEntryService : IFormEntryService
 
         foreach (var (key, value) in fields)
         {
-            var text = JsonElementToStorageString(value);
-            if (!string.IsNullOrWhiteSpace(text))
-                map[key.Trim()] = text;
+            if (string.IsNullOrWhiteSpace(key) || IsSystemColumn(key))
+                continue;
+
+            // Keep empty strings so master-form edit can clear a column; drop only null/undefined.
+            if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            {
+                map[key.Trim()] = string.Empty;
+                continue;
+            }
+
+            var text = JsonElementToStorageString(value) ?? string.Empty;
+            map[key.Trim()] = text;
         }
 
         return map;
@@ -1117,20 +1183,33 @@ public sealed class FormEntryService : IFormEntryService
         IReadOnlySet<string> ezfbColumns)
     {
         var resolved = new List<KeyValuePair<string, string>>();
+        var seenColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in fields)
         {
+            if (string.IsNullOrWhiteSpace(key) || IsSystemColumn(key))
+                continue;
+
+            string? column = null;
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
                 if (EzfbColumnNaming.TryResolveEzfbColumn(
                         control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var col))
-                    resolved.Add(new KeyValuePair<string, string>(col, value));
-                continue;
+                    column = col;
             }
 
-            // No wFormControl match: the incoming key could itself be a Label (new forms) or a
-            // jsonId (old forms) -- try it both ways.
-            if (EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out var colFromKey))
-                resolved.Add(new KeyValuePair<string, string>(colFromKey, value));
+            // Control matched but had no physical column yet, or key is a bare label/jsonId/physical name.
+            if (column is null
+                && EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out var colFromKey))
+                column = colFromKey;
+
+            if (column is null
+                && EzfbColumnNaming.TryResolveEzfbColumn(null, key, ezfbColumns, out var colFromJson))
+                column = colFromJson;
+
+            if (column is null || !seenColumns.Add(column))
+                continue;
+
+            resolved.Add(new KeyValuePair<string, string>(column, value));
         }
 
         return resolved;
@@ -1298,13 +1377,21 @@ public sealed class FormEntryService : IFormEntryService
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
         string modifiedAt,
         string modifiedBy,
+        IReadOnlySet<string> ezfbColumns,
         CancellationToken cancellationToken)
     {
+        if (resolvedFields.Count == 0)
+            return false;
+
         var sets = resolvedFields
             .Select((f, i) => $"\"{EscapeColumn(f.Key)}\" = @V{i}")
             .ToList();
-        sets.Add("modified_at = @ModifiedAt");
-        sets.Add("modified_by = @ModifiedBy");
+        var hasModifiedAt = ezfbColumns.Contains("modified_at");
+        var hasModifiedBy = ezfbColumns.Contains("modified_by");
+        if (hasModifiedAt)
+            sets.Add("modified_at = @ModifiedAt");
+        if (hasModifiedBy)
+            sets.Add("modified_by = @ModifiedBy");
 
         var sql = $"""
             UPDATE dbo.{tableName}
@@ -1314,9 +1401,11 @@ public sealed class FormEntryService : IFormEntryService
 
         await using var cmd = new NpgsqlCommand(sql, connection);
         for (var i = 0; i < resolvedFields.Count; i++)
-            cmd.Parameters.AddWithValue($"@V{i}", resolvedFields[i].Value);
-        cmd.Parameters.AddWithValue("@ModifiedAt", modifiedAt);
-        cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
+            cmd.Parameters.AddWithValue($"@V{i}", (object?)resolvedFields[i].Value ?? DBNull.Value);
+        if (hasModifiedAt)
+            cmd.Parameters.AddWithValue("@ModifiedAt", modifiedAt);
+        if (hasModifiedBy)
+            cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
         cmd.Parameters.AddWithValue("@ItemId", entryId);
 
         return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;
