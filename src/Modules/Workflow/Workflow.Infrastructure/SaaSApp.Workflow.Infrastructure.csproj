@@ -18,6 +18,8 @@
     <PackageReference Include="System.IdentityModel.Tokens.Jwt" Version="8.2.1" />
     <PackageReference Include="Azure.Storage.Blobs" Version="12.22.2" />
     <PackageReference Include="Hangfire.Core" Version="1.8.14" />
+    <!-- EML parsing for attachment extraction (RunEmlAttachmentExtractionService). -->
+    <PackageReference Include="MimeKit" Version="4.15.1" />
     <PackageReference Include="MediatR" Version="12.4.1" />
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.11" />
     <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.1" />

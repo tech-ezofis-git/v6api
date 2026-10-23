@@ -93,6 +93,8 @@ public static class WorkflowInfrastructureServiceCollectionExtensions
         services.AddScoped<WorkflowPdfFormDataMapper>();
         services.AddScoped<IMasterResolveService, MasterResolveService>();
         services.AddScoped<RunEmailIngestPollJob>();
+        services.Configure<EmlAttachmentExtractionOptions>(configuration.GetSection(EmlAttachmentExtractionOptions.SectionName));
+        services.AddScoped<IEmlAttachmentExtractionService, EmlAttachmentExtractionService>();
         services.AddScoped<IWorkflowSecurityService, WorkflowSecurityService>();
         services.AddScoped<IWorkflowInitiationService, WorkflowInitiationService>();
         services.AddScoped<IWorkflowSlaService, WorkflowSlaService>();
