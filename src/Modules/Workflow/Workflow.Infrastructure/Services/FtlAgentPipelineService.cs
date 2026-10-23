@@ -256,7 +256,7 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
     /// ezfb and the mailbox snapshot, and appends a fresh agent_data_validation row. The ticket's
     /// step/stage is never touched.
     /// </summary>
-    public async Task<FtlQualifierRegenerateResult> RegenerateQualifierAsync(
+    public async Task<FtlRegenerateFormResult> RegenerateQualifierAsync(
         FtlAgentJobArgs args,
         CancellationToken cancellationToken = default)
     {
@@ -363,7 +363,144 @@ public sealed class FtlAgentPipelineService : IFtlAgentPipelineService
             args.InstanceId,
             updated);
 
-        return new FtlQualifierRegenerateResult(storedJson, mailboxFormDataJson ?? "{}");
+        return new FtlRegenerateFormResult(storedJson, mailboxFormDataJson ?? "{}");
+    }
+
+    /// <summary>
+    /// Same quote call + form refresh as <see cref="ExecuteAsync"/>'s quote branch, minus the
+    /// move-next: re-sends the ticket's archived RFQ file plus the stored qualifier result,
+    /// merges the new line items/fields over the existing form data (agent-owned tables are
+    /// replaced, everything else the user already entered is protected), and writes straight to
+    /// ezfb and the mailbox snapshot. The ticket's step/stage is never touched.
+    /// </summary>
+    public async Task<FtlRegenerateFormResult> RegenerateQuoteAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default)
+    {
+        var chatUrl = _agentsChat.ResolveChatUrl();
+        if (string.IsNullOrWhiteSpace(chatUrl))
+            throw new InvalidOperationException("Agents:ChatUrl is not configured.");
+
+        var workflow = await _repository.GetByIdWithStepsAsync(args.WorkflowId, cancellationToken)
+            ?? throw new InvalidOperationException("Workflow not found.");
+        var step = workflow.Steps.FirstOrDefault(s =>
+            string.Equals(s.ActivityId, args.ActivityId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(s.Id.ToString("D"), args.ActivityId, StringComparison.OrdinalIgnoreCase))
+            ?? throw new InvalidOperationException($"FTL step {args.ActivityId} was not found.");
+
+        var sessionId = $"regenerate-{Guid.NewGuid():N}";
+        var responseJson = await PostQuoteAsync(args, sessionId, chatUrl, cancellationToken);
+
+        var synthesized = false;
+        var storedJson = PreferLongestQuoteLineItems(StripPdf(responseJson));
+        storedJson = NormalizeAgentOutput(FtlAgentStepDetector.Quote, storedJson, ref synthesized);
+        _logger.LogInformation(
+            "FTL quote regenerate Line Item rows for instance {InstanceId}: {Count}",
+            args.InstanceId,
+            CountJsonArrayRows(ExtractQuoteLineItems(storedJson)));
+
+        var formId = args.FormId ?? workflow.FormId;
+        var identity = await _mailbox.TryGetProcessFormIdentityAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        if (string.IsNullOrWhiteSpace(formId))
+            formId = identity?.FormId;
+        var formEntryId = identity?.FormEntryId;
+        var attachmentRows = await _attachments.GetAttachmentsAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var attachment = attachmentRows.FirstOrDefault(r => r.ItemId is { } item && item != Guid.Empty);
+        var repositoryId = ParseGuid(args.RepositoryId) ?? attachment?.RepositoryId ?? ParseGuid(workflow.RepositoryId);
+
+        var fields = ExtractQuoteFormFields(storedJson);
+        var lineItemsJson = ExtractQuoteLineItems(storedJson);
+        var mapped = await RemapFieldsToJsonIdsAsync(formId, fields, lineItemsJson, cancellationToken);
+
+        var existingFormData = await LoadExistingFormDataAsync(args.WorkflowId, args.InstanceId, cancellationToken);
+        var protectedIds = NonEmptyFormKeys(existingFormData);
+        // Same rule as ExecuteAsync: every quote table (main, quote_2, quote_3, legacy ALT/OPT,
+        // Compare) and any object-shaped dynamic table (Internal Notes, ...) is agent-owned and
+        // gets replaced by a fresh quote; everything else the user already entered stays protected.
+        var lineItemIds = mapped.TableColumns
+            .Where(column => IsQuoteLineItemTable(column.Label)
+                || NormalizeFieldKey(column.Label) == "compare"
+                || (!string.IsNullOrWhiteSpace(column.Json) && column.Json.TrimStart().StartsWith('{')))
+            .Select(column => column.JsonId)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var id in lineItemIds)
+            protectedIds.Remove(id);
+
+        mapped = mapped with
+        {
+            FormDataFields = MergeQuoteFormData(existingFormData, mapped.FormDataFields, lineItemIds),
+            TableFields = KeepAddedFields(mapped.TableFields, mapped.FormDataFields, protectedIds),
+            TableColumns = mapped.TableColumns.Where(column => !protectedIds.Contains(column.JsonId)).ToList()
+        };
+
+        await EnsureEzfbColumnsForMappedFieldsAsync(formId, mapped, cancellationToken);
+
+        if (!string.IsNullOrWhiteSpace(formId)
+            && formEntryId is { } entryId && entryId != Guid.Empty
+            && repositoryId is { } repoId && repoId != Guid.Empty
+            && mapped.TableFields.Count > 0)
+        {
+            await ApplyMetadataToAllAttachmentsAsync(
+                args.TenantId,
+                args.WorkflowId,
+                args.InstanceId,
+                formId,
+                entryId,
+                repoId,
+                mapped.TableFields,
+                attachmentRows,
+                args.UserId,
+                cancellationToken);
+        }
+
+        await _moveNextSupport.SaveAgentValidationAsync(
+            args.WorkflowId,
+            args.InstanceId,
+            step,
+            args.UserId,
+            new MoveToNextStepApAgentPayload(
+                TransactionId: null,
+                InstanceId: args.InstanceId,
+                AiAgentResponseJson: storedJson,
+                AiAgentHtml: null,
+                RepositoryItemId: attachment?.ItemId,
+                RepositoryId: repositoryId,
+                FormId: formId,
+                FormEntryId: formEntryId),
+            legacyTransactionId: null,
+            cancellationToken);
+
+        var updated = 0;
+        if (!string.IsNullOrWhiteSpace(formId) && formEntryId is { } writeEntryId && writeEntryId != Guid.Empty)
+        {
+            updated = await _moveNextSupport.ApplyFormDataToEzfbAsync(
+                formId,
+                writeEntryId,
+                mapped.FormDataFields,
+                lineItemsJson,
+                cancellationToken);
+
+            await WriteFormTableColumnsAsync(formId, writeEntryId, mapped.TableColumns, cancellationToken);
+        }
+
+        await SyncLineItemsToMailboxAsync(args.WorkflowId, args.InstanceId, mapped.TableColumns, cancellationToken);
+
+        var mailboxFormDataJson = MoveToNextStepFormDataComposer.FromParsedFields(mapped.FormDataFields, lineItemsJson);
+        if (!string.IsNullOrWhiteSpace(mailboxFormDataJson))
+        {
+            await _mailbox.PropagateInstanceFormDataAsync(
+                args.WorkflowId,
+                args.InstanceId,
+                new MailboxFormSnapshot(formId, formEntryId, mailboxFormDataJson),
+                cancellationToken);
+        }
+
+        _logger.LogInformation(
+            "FTL quote regenerated for instance {InstanceId}: {UpdatedColumns} ezfb column(s) refreshed. Step not moved.",
+            args.InstanceId,
+            updated);
+
+        return new FtlRegenerateFormResult(storedJson, mailboxFormDataJson ?? "{}");
     }
 
     private async Task ExecuteDocumentAsync(FtlAgentJobArgs args, string jobId, CancellationToken cancellationToken)
