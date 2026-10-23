@@ -323,7 +323,8 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
         Guid tenantId,
         Guid? userId,
         CancellationToken cancellationToken = default,
-        bool allowIncompleteFolderMetadata = false)
+        bool allowIncompleteFolderMetadata = false,
+        string? namingFieldFallback = null)
     {
         var connectionString = _connectionProvider.ConnectionString
             ?? throw new InvalidOperationException("Tenant connection string not resolved.");
@@ -394,6 +395,11 @@ public sealed class RepositoryUploadIndexService : IRepositoryUploadIndexService
             fieldValues,
             row.FileName,
             row.FileType);
+
+        RepositoryNamingFieldMetadataInjector.ApplyFallbackIfMissing(
+            repo.Fields,
+            fieldValues,
+            namingFieldFallback);
 
         fieldValues = CollapseFieldValuesToSqlColumns(fieldValues, repo.Fields);
 

@@ -127,7 +127,8 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
         Guid userId,
         CancellationToken cancellationToken = default,
         bool allowIncompleteFolderMetadata = false,
-        string? formJsonId = null)
+        string? formJsonId = null,
+        string? namingFieldFallback = null)
     {
         var promoted = await _uploadIndex.PromoteStageAsync(
             stageId,
@@ -135,7 +136,8 @@ public sealed class WorkflowAttachmentArchiveService : IWorkflowAttachmentArchiv
             tenantId,
             userId,
             cancellationToken,
-            allowIncompleteFolderMetadata);
+            allowIncompleteFolderMetadata,
+            namingFieldFallback);
         if (promoted == null)
             return null;
 

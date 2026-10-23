@@ -20,7 +20,12 @@ public interface IWorkflowAttachmentArchiveService
         CancellationToken cancellationToken = default,
         bool allowIncompleteFolderMetadata = false);
 
-    /// <summary>Promote a pre-ticket staged fileId into archive + WorkflowAttachments + processAddon.</summary>
+    /// <summary>
+    /// Promote a pre-ticket staged fileId into archive + WorkflowAttachments + processAddon.
+    /// <paramref name="namingFieldFallback"/> (typically the ticket's reference number) fills the
+    /// repository's naming field only when it has no value from the stage row/OCR and isn't the
+    /// literal uploaded-file-name field -- see RepositoryNamingFieldMetadataInjector.
+    /// </summary>
     Task<WorkflowAttachmentArchiveResult?> PromoteFromStageAsync(
         Guid tenantId,
         Guid workflowId,
@@ -31,7 +36,8 @@ public interface IWorkflowAttachmentArchiveService
         Guid userId,
         CancellationToken cancellationToken = default,
         bool allowIncompleteFolderMetadata = false,
-        string? formJsonId = null);
+        string? formJsonId = null,
+        string? namingFieldFallback = null);
 
     /// <summary>Link an already-archived repository item to the ticket (WorkflowAttachments + processAddon). No re-upload.</summary>
     Task<WorkflowAttachmentArchiveResult?> AttachExistingArchiveItemAsync(
