@@ -47,7 +47,16 @@ public interface IFtlAgentPipelineService
     /// formData/validation with the new response. Never moves the workflow -- the caller is
     /// responsible for only calling this while the ticket is on the Qualify Agent step.
     /// </summary>
-    Task<FtlQualifierRegenerateResult> RegenerateQualifierAsync(
+    Task<FtlRegenerateFormResult> RegenerateQualifierAsync(
+        FtlAgentJobArgs args,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Re-sends the ticket's already-archived RFQ file (and the stored qualifier result) to the
+    /// Quote Agent and refreshes formData/validation with the new response. Never moves the
+    /// workflow -- the caller is responsible for only calling this while on the Quote Agent step.
+    /// </summary>
+    Task<FtlRegenerateFormResult> RegenerateQuoteAsync(
         FtlAgentJobArgs args,
         CancellationToken cancellationToken = default);
 
@@ -89,7 +98,7 @@ public sealed record FtlDocumentPreviewResult(
     string FormDataJson,
     string QuoteType = "quote_1");
 
-/// <summary>Refreshed qualifier output. FormDataJson is jsonId-keyed, same shape as mailbox formData.</summary>
-public sealed record FtlQualifierRegenerateResult(
+/// <summary>Refreshed qualifier/quote output. FormDataJson is jsonId-keyed, same shape as mailbox formData.</summary>
+public sealed record FtlRegenerateFormResult(
     string AgentResponseJson,
     string FormDataJson);
