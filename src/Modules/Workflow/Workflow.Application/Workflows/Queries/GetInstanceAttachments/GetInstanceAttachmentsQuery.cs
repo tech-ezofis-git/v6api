@@ -27,5 +27,10 @@ public record AttachmentItem(
     Guid? ModifiedBy,
     DateTime? ModifiedAtUtc,
     Guid? RepositoryId,
-    Guid? ItemId
+    Guid? ItemId,
+    /// <summary>
+    /// True for the source .eml (email tickets) and for generated quote PDFs
+    /// (<c>*_quote_N.pdf</c>) so the UI can show those first and treat the rest as supporting files.
+    /// </summary>
+    bool IsOriginal = false
 );

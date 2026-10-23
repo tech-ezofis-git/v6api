@@ -42,15 +42,19 @@ public interface IFormEntryService
         CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// Load form entries by column. <paramref name="columnName"/> is required (physical ezfb
-    /// column, control label, or jsonId). When <paramref name="columnValue"/> is omitted/blank,
-    /// returns every distinct non-empty value for that column in <see cref="FormEntryByColumnResult.Values"/>.
-    /// When a value is supplied, returns matching entry rows in <see cref="FormEntryByColumnResult.Entries"/>.
+    /// Load form entries by column. Target key is <paramref name="columnName"/> and/or
+    /// <paramref name="columnId"/> (physical ezfb column, control label, or jsonId).
+    /// When <paramref name="columnValue"/> is omitted/blank, returns distinct non-empty values for
+    /// that column in <see cref="FormEntryByColumnResult.Values"/> (AND-narrowed by
+    /// <paramref name="filters"/> when provided). When a value is supplied, returns matching entry
+    /// rows in <see cref="FormEntryByColumnResult.Entries"/> (also AND-narrowed by filters).
     /// </summary>
     Task<FormEntryByColumnResult> GetEntriesByColumnAsync(
         string formId,
-        string columnName,
+        string? columnName,
         string? columnValue = null,
+        IReadOnlyList<FormEntryColumnFilter>? filters = null,
+        string? columnId = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>

@@ -43,13 +43,11 @@ internal static class RepositoryNamingFieldMetadataInjector
     }
 
     /// <summary>
-    /// Fills the resolved naming field with <paramref name="fallbackValue"/> when it still has no
-    /// value after stage/OCR/original-filename injection -- e.g. a workflow ticket's reference
-    /// number for a repository whose naming field is a per-ticket request number. Never overrides
-    /// a real caller/OCR value, and never applies to a field that represents the literal uploaded
-    /// file name (that one only ever comes from the upload itself).
-    /// When <paramref name="originalFileName"/> is set, a naming value that is only the upload's
-    /// own file name/stem (left by the old filename-overwrite bug) is treated as missing.
+    /// Fills the ticket-reference target field with <paramref name="fallbackValue"/> when empty.
+    /// Target is usually the archive naming field (e.g. Request No). When the naming field is the
+    /// literal Filename column (Expense Reimbursement: Year→Month→RequestNo→Filename), the target
+    /// is the deepest folder level under Filename (RequestNo) — Filename itself never receives the
+    /// ticket reference. File-name placeholders from the old overwrite bug count as empty.
     /// </summary>
     public static void ApplyFallbackIfMissing(
         IReadOnlyList<RepositoryFieldDto> allFields,
@@ -60,18 +58,47 @@ internal static class RepositoryNamingFieldMetadataInjector
         if (string.IsNullOrWhiteSpace(fallbackValue))
             return;
 
-        var namingField = ResolveNamingField(allFields);
-        if (namingField == null || RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
+        var target = ResolveTicketReferenceTargetField(allFields);
+        if (target == null)
             return;
 
-        var existing = ResolveNamingValue(metadata, namingField);
+        var existing = ResolveNamingValue(metadata, target);
         if (!string.IsNullOrWhiteSpace(existing) && !IsFileNamePlaceholder(existing, originalFileName))
             return;
 
-        if (!string.IsNullOrWhiteSpace(namingField.SqlColumnName))
-            metadata[namingField.SqlColumnName.Trim()] = fallbackValue.Trim();
+        if (!string.IsNullOrWhiteSpace(target.SqlColumnName))
+            metadata[target.SqlColumnName.Trim()] = fallbackValue.Trim();
         else
-            metadata[namingField.Name.Trim()] = fallbackValue.Trim();
+            metadata[target.Name.Trim()] = fallbackValue.Trim();
+    }
+
+    /// <summary>
+    /// Field that should receive the workflow instance reference number on archive.
+    /// Prefer a non-Filename naming field; otherwise the deepest folder-structure field that is
+    /// not Filename (e.g. requestNo under Year/Month/RequestNo/Filename).
+    /// </summary>
+    public static RepositoryFieldDto? ResolveTicketReferenceTargetField(
+        IReadOnlyList<RepositoryFieldDto> allFields)
+    {
+        var folderFields = RepositoryFolderStructureHelper.OrderFolderFields(
+            allFields.Where(f => f.IncludeInFolderStructure));
+        var namingField = RepositoryArchiveFileNameResolver.ResolveNamingField(allFields, folderFields);
+
+        if (namingField != null && !RepositoryArchiveFileNameResolver.IsOriginalFileNameField(namingField))
+            return namingField;
+
+        var pathFolders = RepositoryArchiveFileNameResolver.PathFolderFields(allFields, folderFields);
+        if (pathFolders.Count == 0)
+            return null;
+
+        // Deepest real folder level (RequestNo), never Filename.
+        for (var i = pathFolders.Count - 1; i >= 0; i--)
+        {
+            if (!RepositoryArchiveFileNameResolver.IsOriginalFileNameField(pathFolders[i]))
+                return pathFolders[i];
+        }
+
+        return null;
     }
 
     /// <summary>
