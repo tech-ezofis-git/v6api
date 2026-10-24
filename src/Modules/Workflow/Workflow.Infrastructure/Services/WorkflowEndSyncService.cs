@@ -1,3 +1,4 @@
+using System.Linq;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 using SaaSApp.Workflow.Application.Contracts;
@@ -58,42 +59,59 @@ public sealed class WorkflowEndSyncService : IWorkflowEndSyncService
                 || config.FieldMappings.Count == 0)
                 return;
 
-            var values = await ResolveWorkflowFieldValuesAsync(
-                workflowFormId, formEntryId, submittedFormDataJson, formDataFields, cancellationToken);
-            if (values.Count == 0)
+            // Step 1: the condition field is the mapping marked IsMainField -- it identifies which
+            // master-form row this sync applies to. Without one, there is no row to find; nothing
+            // to do (never fall back to inserting with no match criteria).
+            var mainMapping = config.FieldMappings.FirstOrDefault(m => m.IsMainField);
+            if (mainMapping == null)
             {
                 _logger.LogInformation(
-                    "End-sync: no field values resolved for workflow {WorkflowId} entry {FormEntryId}; skipped.",
+                    "End-sync: no field is marked IsMainField on workflow {WorkflowId} activity {ActivityId}; skipped.",
                     workflowId,
-                    formEntryId);
+                    activityId);
                 return;
             }
 
-            var fields = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
-            string? matchColumnId = null;
-            string? matchValue = null;
+            var values = await ResolveWorkflowFieldValuesAsync(
+                workflowFormId, formEntryId, submittedFormDataJson, formDataFields, cancellationToken);
 
+            // Step 2: the workflow's current value for the condition field.
+            if (!values.TryGetValue(mainMapping.WorkflowFieldId, out var matchValue) || string.IsNullOrWhiteSpace(matchValue))
+            {
+                _logger.LogInformation(
+                    "End-sync: condition field {WorkflowFieldId} has no value on workflow {WorkflowId} instance {InstanceId}; skipped.",
+                    mainMapping.WorkflowFieldId,
+                    workflowId,
+                    instanceId);
+                return;
+            }
+
+            // Steps 3-4: match the master-form row by the condition master field, then update
+            // only the remaining (non-main) mapped fields on that row.
+            var fields = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
             foreach (var mapping in config.FieldMappings)
             {
+                if (mapping.IsMainField)
+                    continue;
                 if (!values.TryGetValue(mapping.WorkflowFieldId, out var value) || string.IsNullOrWhiteSpace(value))
                     continue;
 
                 fields[mapping.MasterFieldId] = JsonSerializer.SerializeToElement(value);
-
-                if (mapping.IsMainField)
-                {
-                    matchColumnId = mapping.MasterFieldId;
-                    matchValue = value;
-                }
             }
 
             if (fields.Count == 0)
+            {
+                _logger.LogInformation(
+                    "End-sync: no non-condition field values resolved for workflow {WorkflowId} instance {InstanceId}; skipped.",
+                    workflowId,
+                    instanceId);
                 return;
+            }
 
             var request = new FormEntryUpsertByColumnsRequest(
                 fields,
                 MatchColumn: null,
-                MatchColumnId: matchColumnId,
+                MatchColumnId: mainMapping.MasterFieldId,
                 MatchValue: matchValue);
 
             var result = await _formEntryService.UpsertEntryByColumnsAsync(
