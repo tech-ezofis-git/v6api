@@ -17,10 +17,15 @@ public sealed class ReportAiPromptRequest
 
 public sealed class ReportAiRunRequest
 {
+    /// <summary>1-based page. 0 or omitted becomes 1.</summary>
     public int Page { get; set; } = 1;
+    /// <summary>Rows per page. 0 or omitted becomes 25.</summary>
     public int PageSize { get; set; } = 25;
+    /// <summary>Optional edited JSON prompt. Omit to use the saved prompt. Do not send the Swagger example "string".</summary>
     public string? ReportPrompt { get; set; }
+    /// <summary>Optional edited spec object. Omit to use the saved spec. Do not send the Swagger example "string".</summary>
     public JsonElement ReportSpec { get; set; }
+    /// <summary>Optional model override. Omit unless you intend to change the catalog model.</summary>
     public string? Model { get; set; }
 }
 

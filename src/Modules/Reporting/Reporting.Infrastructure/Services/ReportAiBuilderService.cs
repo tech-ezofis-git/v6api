@@ -110,10 +110,11 @@ public sealed class ReportAiBuilderService : IReportAiBuilderService
         if (record is null)
             return ReportAiHttpResult.Error(404, "Report not found.");
 
-        var overlayPrompt = request.ReportPrompt;
+        var overlayPrompt = ReportAgentChatMapper.IsUsablePrompt(request.ReportPrompt)
+            ? request.ReportPrompt
+            : null;
         var overlaySpec = request.ReportSpec;
-        if (!string.IsNullOrWhiteSpace(overlayPrompt)
-            || overlaySpec.ValueKind is JsonValueKind.Object or JsonValueKind.Array)
+        if (overlayPrompt is not null || ReportAgentChatMapper.IsUsableSpec(overlaySpec))
         {
             record = await _store.UpdateAsync(
                 tenantId,
@@ -124,6 +125,16 @@ public sealed class ReportAiBuilderService : IReportAiBuilderService
                     ReportSpec = overlaySpec
                 },
                 cancellationToken) ?? record;
+        }
+
+        if (!ReportAgentChatMapper.IsUsablePrompt(record.ReportPrompt)
+            && !ReportAgentChatMapper.IsUsableSpec(ReportAgentChatMapper.ParseObjectOrEmpty(record.ReportSpecJson)))
+        {
+            return ReportAiHttpResult.Error(
+                400,
+                "Saved prompt is empty or invalid. Call POST /api/report-ai-builder/prompt again. "
+                + "Do not send Swagger example values (reportPrompt/reportSpec/model = \"string\"). "
+                + "Run with { \"page\": 1, \"pageSize\": 25 } to use the saved prompt.");
         }
 
         var spec = ReportAgentChatMapper.ParseObjectOrEmpty(record.ReportSpecJson);
@@ -141,11 +152,13 @@ public sealed class ReportAiBuilderService : IReportAiBuilderService
                     ReportType = record.ReportType,
                     WorkflowName = record.WorkflowName,
                     RepositoryName = record.RepositoryName,
-                    ReportPrompt = record.ReportPrompt,
+                    ReportPrompt = ReportAgentChatMapper.IsUsablePrompt(record.ReportPrompt)
+                        ? record.ReportPrompt
+                        : null,
                     ReportSpec = spec,
                     Page = request.Page < 1 ? 1 : request.Page,
                     PageSize = request.PageSize is < 1 or > 500 ? 25 : request.PageSize,
-                    Model = request.Model
+                    Model = ReportAgentChatMapper.UsableModel(request.Model)
                 },
                 cancellationToken);
         }
@@ -257,9 +270,9 @@ public sealed class ReportAiBuilderService : IReportAiBuilderService
         if (proxy.TimedOut)
             return ReportAiHttpResult.Error(504, "Report Agent timed out.");
         if (proxy.StatusCode is >= 500)
-            return ReportAiHttpResult.Error(502, proxy.Reply ?? "Report Agent is unavailable.");
+            return ReportAiHttpResult.Error(502, ReportAgentChatMapper.ErrorMessage(proxy, "Report Agent is unavailable."));
         if (proxy.StatusCode is >= 400 and < 500)
-            return ReportAiHttpResult.Error(proxy.StatusCode, proxy.Reply ?? "Report Agent rejected the request.");
+            return ReportAiHttpResult.Error(proxy.StatusCode, ReportAgentChatMapper.ErrorMessage(proxy, "Report Agent rejected the request."));
         return null;
     }
 

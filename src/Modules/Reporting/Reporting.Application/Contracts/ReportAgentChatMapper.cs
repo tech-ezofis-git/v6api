@@ -24,7 +24,8 @@ public static class ReportAgentChatMapper
         {
             using var doc = JsonDocument.Parse(raw);
             var root = doc.RootElement;
-            var reply = ReadString(root, "reply");
+            var reply = ReadString(root, "reply", "detail", "error", "title")
+                        ?? ReadDetailArray(root);
             var result = ReadProperty(root, "report_result", "reportResult");
             return new ReportAgentProxyResult
             {
@@ -40,6 +41,65 @@ public static class ReportAgentChatMapper
         {
             return new ReportAgentProxyResult { StatusCode = statusCode, RawBody = raw };
         }
+    }
+
+    public static bool IsPlaceholder(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+            return true;
+        var trimmed = value.Trim();
+        return trimmed.Equals("string", StringComparison.OrdinalIgnoreCase)
+               || trimmed.Equals("null", StringComparison.OrdinalIgnoreCase);
+    }
+
+    public static bool IsUsablePrompt(string? prompt)
+    {
+        if (IsPlaceholder(prompt))
+            return false;
+        var trimmed = prompt!.Trim();
+        if (trimmed.StartsWith('{') || trimmed.StartsWith('['))
+        {
+            try
+            {
+                using var doc = JsonDocument.Parse(trimmed);
+                return doc.RootElement.ValueKind is JsonValueKind.Object or JsonValueKind.Array;
+            }
+            catch (JsonException)
+            {
+                return false;
+            }
+        }
+
+        return trimmed.Length > 8;
+    }
+
+    public static bool IsUsableSpec(JsonElement spec) =>
+        spec.ValueKind is JsonValueKind.Object or JsonValueKind.Array;
+
+    public static string? UsableModel(string? model) =>
+        IsPlaceholder(model) ? null : model?.Trim();
+
+    public static string ErrorMessage(ReportAgentProxyResult proxy, string fallback)
+    {
+        if (!string.IsNullOrWhiteSpace(proxy.Reply))
+            return proxy.Reply!;
+        if (string.IsNullOrWhiteSpace(proxy.RawBody))
+            return fallback;
+        try
+        {
+            using var doc = JsonDocument.Parse(proxy.RawBody);
+            var reply = ReadString(doc.RootElement, "reply", "detail", "error", "title")
+                        ?? ReadDetailArray(doc.RootElement);
+            if (!string.IsNullOrWhiteSpace(reply))
+                return reply;
+        }
+        catch (JsonException)
+        {
+            // fall through
+        }
+
+        var raw = proxy.RawBody.Trim();
+        return raw.Length <= 400 ? raw : fallback;
     }
 
     public static bool IsLockFailure(IEnumerable<string>? warnings)
@@ -206,6 +266,31 @@ public static class ReportAgentChatMapper
             CreatedAtUtc = row.CreatedAtUtc,
             ModifiedAtUtc = row.ModifiedAtUtc
         };
+    }
+
+    private static string? ReadDetailArray(JsonElement root)
+    {
+        var detail = ReadProperty(root, "detail");
+        if (detail.ValueKind != JsonValueKind.Array)
+            return null;
+        var parts = new List<string>();
+        foreach (var item in detail.EnumerateArray())
+        {
+            if (item.ValueKind == JsonValueKind.String)
+            {
+                var value = item.GetString();
+                if (!string.IsNullOrWhiteSpace(value))
+                    parts.Add(value);
+            }
+            else if (item.ValueKind == JsonValueKind.Object)
+            {
+                var msg = ReadString(item, "msg", "message");
+                if (!string.IsNullOrWhiteSpace(msg))
+                    parts.Add(msg);
+            }
+        }
+
+        return parts.Count == 0 ? null : string.Join("; ", parts);
     }
 
     private static IReadOnlyList<string> ReadStringList(JsonElement obj, params string[] names)

@@ -88,6 +88,81 @@ public sealed class ReportAiBuilderServiceTests
     }
 
     [Fact]
+    public async Task RunSaved_ignores_swagger_placeholder_overlay()
+    {
+        var store = new MemoryStore();
+        var id = Guid.NewGuid();
+        store.Rows[id] = new ReportAiDefinitionRecord
+        {
+            Id = id,
+            TenantId = TenantId,
+            OwnerUserId = UserId,
+            SessionId = "report-session-1",
+            ReportType = "all_workflows",
+            ReportPrompt = """{"Objective":"Aging"}""",
+            ReportSpecJson = """{"title":"Aging","sourceTable":"workflow_instances_all"}"""
+        };
+        var client = new FakeClient
+        {
+            Run = AgentResult(200, """
+                {"reply":"Report ready.","report_result":{
+                  "title":"Aging",
+                  "columns":[{"key":"Aging_Bucket","label":"Aging Bucket"}],
+                  "rows":[],
+                  "totalCount":0,
+                  "page":1,
+                  "pageSize":25
+                }}
+                """)
+        };
+        using var specDoc = JsonDocument.Parse("\"string\"");
+        var service = new ReportAiBuilderService(client, store);
+
+        var result = await service.RunSavedAsync(
+            TenantId,
+            id,
+            new ReportAiRunRequest
+            {
+                Page = 0,
+                PageSize = 0,
+                ReportPrompt = "string",
+                ReportSpec = specDoc.RootElement.Clone(),
+                Model = "string"
+            });
+
+        Assert.Equal(200, result.StatusCode);
+        Assert.Equal("""{"Objective":"Aging"}""", store.Rows[id].ReportPrompt);
+        Assert.Equal("""{"Objective":"Aging"}""", client.LastRun!.ReportPrompt);
+        Assert.Null(client.LastRun.Model);
+        Assert.Equal(1, client.LastRun.Page);
+        Assert.Equal(25, client.LastRun.PageSize);
+    }
+
+    [Fact]
+    public async Task RunSaved_surfaces_agents_detail_on_4xx()
+    {
+        var store = new MemoryStore();
+        var id = Guid.NewGuid();
+        store.Rows[id] = new ReportAiDefinitionRecord
+        {
+            Id = id,
+            TenantId = TenantId,
+            ReportType = "all_workflows",
+            ReportPrompt = """{"Objective":"Aging"}""",
+            ReportSpecJson = """{"title":"Aging"}"""
+        };
+        var client = new FakeClient
+        {
+            Run = AgentResult(422, """{"detail":"reportPrompt or reportSpec is required for phase=run."}""")
+        };
+        var service = new ReportAiBuilderService(client, store);
+        var result = await service.RunSavedAsync(TenantId, id, new ReportAiRunRequest());
+        Assert.Equal(422, result.StatusCode);
+        var json = JsonSerializer.Serialize(result.Payload);
+        Assert.Contains("reportPrompt or reportSpec is required", json);
+    }
+
+    [Fact]
     public async Task RunSaved_maps_lock_redirect_to_422()
     {
         var store = new MemoryStore();
