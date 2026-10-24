@@ -15,6 +15,13 @@ public static class ReportingInfrastructureServiceCollectionExtensions
         services.AddScoped<IReportExportService, ReportExportService>();
         services.AddScoped<IReportMailService, ReportMailService>();
         services.AddScoped<IReportScheduleService, ReportScheduleService>();
+        services.AddScoped<IReportAiDefinitionService, ReportAiDefinitionService>();
+        services.AddScoped<IReportAiBuilderService, ReportAiBuilderService>();
+        services.AddHttpClient(nameof(ReportAgentPythonClient), client =>
+        {
+            client.Timeout = TimeSpan.FromSeconds(180);
+        });
+        services.AddScoped<IReportAgentPythonClient, ReportAgentPythonClient>();
         services.AddScoped<RunScheduledReportJob>();
         return services;
     }
