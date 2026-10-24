@@ -45,6 +45,23 @@ public sealed class ReportAgentChatMapperTests
         Assert.False(ReportAgentChatMapper.IsLockFailure(["Counted live EZOFIS workflow instances."]));
     }
 
+    [Theory]
+    [InlineData(null, false)]
+    [InlineData("", false)]
+    [InlineData("string", false)]
+    [InlineData("{\"Objective\":\"Aging\"}", true)]
+    public void IsUsablePrompt_rejects_swagger_placeholders(string? prompt, bool expected)
+    {
+        Assert.Equal(expected, ReportAgentChatMapper.IsUsablePrompt(prompt));
+    }
+
+    [Fact]
+    public void Parse_reads_fastapi_detail_as_reply()
+    {
+        var parsed = ReportAgentChatMapper.Parse(422, """{"detail":"workflowName is required."}""");
+        Assert.Equal("workflowName is required.", parsed.Reply);
+    }
+
     [Fact]
     public void BuildChatBody_includes_intent_phase_and_prompt()
     {
