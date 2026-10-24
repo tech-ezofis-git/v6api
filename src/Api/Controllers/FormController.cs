@@ -243,10 +243,13 @@ public sealed class FormController : ControllerBase
     }
 
     /// <summary>
-    /// Add or update a form entry (v5 POST /api/form/{id}/entry/{entryId}).
+    /// Add or update a form entry (v5 POST/PUT /api/form/{id}/entry/{entryId}).
     /// Use <c>entryId=00000000-0000-0000-0000-000000000000</c> to create; existing item id (GUID) to update.
+    /// Body: <c>{ "fields": { "Column": "value", ... } }</c> (label, jsonId, or physical column).
+    /// A flat field map at the root is also accepted for master-form edit.
     /// </summary>
     [HttpPost("{id}/entry/{entryId:guid}")]
+    [HttpPut("{id}/entry/{entryId:guid}")]
     [ProducesResponseType(typeof(FormEntryResult), StatusCodes.Status201Created)]
     [ProducesResponseType(typeof(FormEntryResult), StatusCodes.Status202Accepted)]
     [ProducesResponseType(typeof(FormEntryResult), StatusCodes.Status409Conflict)]
@@ -445,6 +448,43 @@ public sealed class FormController : ControllerBase
                 new FormEntryUpsertRequest { Fields = request.Fields },
                 cancellationToken);
 
+            return result.Status switch
+            {
+                FormEntryByColumnStatus.Found => Ok(result),
+                FormEntryByColumnStatus.InvalidRequest => BadRequest(new { error = result.Message }),
+                _ => NotFound(new { error = result.Message })
+            };
+        }
+        catch (InvalidOperationException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+        catch (ArgumentException ex)
+        {
+            return BadRequest(new { error = ex.Message });
+        }
+    }
+
+    /// <summary>
+    /// Master-form insert/update by column names and values (label, jsonId, or physical column).
+    /// With <c>matchColumn</c> / <c>matchFilters</c>: update the matching row, or insert when none
+    /// matches. Without a match key: always insert. Returns the saved entry row.
+    /// </summary>
+    [HttpPost("{id}/entry/upsert")]
+    [ProducesResponseType(typeof(FormEntryByColumnResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    public async Task<IActionResult> UpsertEntryByColumns(
+        string id,
+        [FromBody] FormEntryUpsertByColumnsRequest request,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(id))
+            return NotFound();
+
+        try
+        {
+            var result = await _formEntryService.UpsertEntryByColumnsAsync(id, request, cancellationToken);
             return result.Status switch
             {
                 FormEntryByColumnStatus.Found => Ok(result),

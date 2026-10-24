@@ -68,4 +68,14 @@ public interface IFormEntryService
         string columnValue,
         FormEntryUpsertRequest request,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Master-form insert/update by column names and values. <paramref name="request"/>.<c>Fields</c>
+    /// keys may be control label, jsonId, or physical ezfb column. Optional match column/filters:
+    /// one matching row → update; none → insert; more than one → invalid. No match key → insert.
+    /// </summary>
+    Task<FormEntryByColumnResult> UpsertEntryByColumnsAsync(
+        string formId,
+        FormEntryUpsertByColumnsRequest request,
+        CancellationToken cancellationToken = default);
 }

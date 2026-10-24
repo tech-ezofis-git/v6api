@@ -126,6 +126,7 @@ public sealed class FormEntryService : IFormEntryService
             resolvedFields,
             now,
             userStamp,
+            ezfbColumns,
             cancellationToken);
         if (!updated)
             return Failed("form entry not found");
@@ -413,6 +414,133 @@ public sealed class FormEntryService : IFormEntryService
             rows);
     }
 
+    public async Task<FormEntryByColumnResult> UpsertEntryByColumnsAsync(
+        string formId,
+        FormEntryUpsertByColumnsRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(formId))
+            return InvalidByColumn(formId, null, "form id is required.");
+
+        var fieldMap = NormalizeFields(request.Fields);
+        if (fieldMap.Count == 0)
+            return InvalidByColumn(formId, null, "fields are required (column name → value).");
+
+        var normalizedFormId = FormIdNaming.NormalizeFormId(formId);
+        var connectionString = _tenantContext.ConnectionString
+            ?? throw new InvalidOperationException("Tenant connection string not resolved.");
+        var userId = _currentUserProvider.GetUserId()
+            ?? throw new InvalidOperationException("Authenticated user is required.");
+
+        await using var connection = new NpgsqlConnection(connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        var formMeta = await LoadFormMetadataAsync(connection, normalizedFormId, cancellationToken);
+        if (formMeta == null)
+            return NotFoundByColumn(normalizedFormId, null, "form not found.");
+
+        var tableSuffix = FormIdNaming.GetEzfbTableSuffix(normalizedFormId);
+        var tableName = $"ezfb_{tableSuffix}_items";
+        if (!await EzfbTableExistsAsync(connection, tableName, cancellationToken))
+            return NotFoundByColumn(normalizedFormId, null, "form entry table not found.");
+
+        var ezfbColumns = await LoadTableColumnsAsync(connection, tableName, cancellationToken);
+        if (ezfbColumns.Count == 0)
+            return NotFoundByColumn(normalizedFormId, null, "form entry table has no columns.");
+
+        var wFormIdValue = await ResolveWFormIdParameterAsync(normalizedFormId);
+        var controls = await LoadFormControlsAsync(connection, wFormIdValue, cancellationToken);
+
+        if (!TryBuildMatchFilters(
+                request,
+                fieldMap,
+                controls,
+                ezfbColumns,
+                out var matchFilters,
+                out var matchKey,
+                out var matchError))
+            return InvalidByColumn(normalizedFormId, matchKey, matchError ?? "invalid match.");
+
+        Guid entryId = Guid.Empty;
+        var isUpdate = false;
+        if (matchFilters.Count > 0)
+        {
+            var matchingIds = await FindEntryIdsByFiltersAsync(
+                connection, tableName, matchFilters, cancellationToken);
+            if (matchingIds.Count > 1)
+            {
+                return InvalidByColumn(
+                    normalizedFormId,
+                    matchKey,
+                    $"{matchingIds.Count} form entries match the given key; expected at most one to update unambiguously.");
+            }
+
+            if (matchingIds.Count == 1)
+            {
+                entryId = matchingIds[0];
+                isUpdate = true;
+            }
+        }
+
+        await EnsureMissingControlColumnsAsync(
+            connection,
+            tableName,
+            tableSuffix,
+            wFormIdValue,
+            controls,
+            ezfbColumns,
+            cancellationToken);
+
+        var resolvedFields = ResolveFieldColumns(fieldMap, controls, ezfbColumns);
+        if (resolvedFields.Count == 0)
+            return InvalidByColumn(normalizedFormId, matchKey, "no matching ezfb columns for submitted fields.");
+
+        var duplicate = await CheckUniqueColumnsAsync(
+            connection,
+            tableName,
+            formMeta.UniqueColumns,
+            resolvedFields,
+            isUpdate ? entryId : null,
+            controls,
+            cancellationToken);
+        if (duplicate != null)
+            return InvalidByColumn(normalizedFormId, matchKey, duplicate.Output ?? "duplicate value for a unique column.");
+
+        var userStamp = userId.ToString("D");
+        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
+
+        if (isUpdate)
+        {
+            var updated = await UpdateEntryAsync(
+                connection, tableName, entryId, resolvedFields, now, userStamp, ezfbColumns, cancellationToken);
+            if (!updated)
+                return NotFoundByColumn(normalizedFormId, matchKey, "form entry not found.");
+        }
+        else
+        {
+            entryId = await InsertEntryAsync(
+                connection, tableName, resolvedFields, now, userStamp, cancellationToken);
+            if (entryId == Guid.Empty)
+                return NotFoundByColumn(normalizedFormId, matchKey, "form entry not found.");
+        }
+
+        var row = await LoadEntryRowAsync(connection, tableName, ezfbColumns, entryId, cancellationToken);
+        var rows = row != null
+            ? new List<Dictionary<string, object?>> { row }
+            : new List<Dictionary<string, object?>>();
+        if (rows.Count > 0)
+            await MergeFormDataJsonAsync(rows, normalizedFormId, cancellationToken);
+
+        return new FormEntryByColumnResult(
+            FormEntryByColumnStatus.Found,
+            isUpdate ? "updated form entry" : "created form entry",
+            normalizedFormId,
+            matchKey,
+            ResolvedColumn: null,
+            rows,
+            UpdatedCount: isUpdate ? 1 : 0);
+    }
+
     public async Task<FormEntryByColumnResult> UpdateEntriesByColumnAsync(
         string formId,
         string columnName,
@@ -499,7 +627,8 @@ public sealed class FormEntryService : IFormEntryService
         var userStamp = userId.ToString("D");
         var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", CultureInfo.InvariantCulture);
 
-        var updated = await UpdateEntryAsync(connection, tableName, entryId, resolvedFields, now, userStamp, cancellationToken);
+        var updated = await UpdateEntryAsync(
+            connection, tableName, entryId, resolvedFields, now, userStamp, ezfbColumns, cancellationToken);
         if (!updated)
             return NotFoundByColumn(normalizedFormId, columnName, "form entry not found.", resolvedColumn);
 
@@ -555,20 +684,112 @@ public sealed class FormEntryService : IFormEntryService
         string columnValue,
         CancellationToken cancellationToken)
     {
-        var escapedCol = EscapeColumn(resolvedColumn);
+        return await FindEntryIdsByFiltersAsync(
+            connection,
+            tableName,
+            [(resolvedColumn, columnValue)],
+            cancellationToken);
+    }
+
+    private static async Task<List<Guid>> FindEntryIdsByFiltersAsync(
+        NpgsqlConnection connection,
+        string tableName,
+        IReadOnlyList<(string Column, string Value)> filters,
+        CancellationToken cancellationToken)
+    {
+        var ids = new List<Guid>();
+        if (filters.Count == 0)
+            return ids;
+
+        var whereParts = new List<string> { "(is_deleted = false OR is_deleted IS NULL)" };
+        AppendFilterPredicates(whereParts, filters);
+
         var sql = $"""
             SELECT item_id
             FROM dbo.{tableName}
-            WHERE "{escapedCol}" = @Value AND (is_deleted = false OR is_deleted IS NULL);
+            WHERE {string.Join(" AND ", whereParts)};
             """;
 
-        var ids = new List<Guid>();
         await using var cmd = new NpgsqlCommand(sql, connection);
-        cmd.Parameters.AddWithValue("@Value", columnValue);
+        AddFilterParameters(cmd, filters);
         await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
         while (await reader.ReadAsync(cancellationToken))
             ids.Add(reader.GetGuid(0));
         return ids;
+    }
+
+    /// <summary>
+    /// Builds AND match predicates from matchColumn/matchValue and/or matchFilters.
+    /// When matchColumn is set but matchValue is blank, uses the value from <paramref name="fieldMap"/>.
+    /// </summary>
+    private static bool TryBuildMatchFilters(
+        FormEntryUpsertByColumnsRequest request,
+        IReadOnlyDictionary<string, string> fieldMap,
+        IReadOnlyList<FormControlRow> controls,
+        IReadOnlySet<string> ezfbColumns,
+        out List<(string Column, string Value)> matchFilters,
+        out string? matchKey,
+        out string? error)
+    {
+        matchFilters = [];
+        matchKey = null;
+        error = null;
+
+        var matchColumnKey = FirstNonBlank(request.MatchColumn, request.MatchColumnId);
+        if (!string.IsNullOrWhiteSpace(matchColumnKey))
+        {
+            matchKey = matchColumnKey;
+            if (!TryResolveLookupColumn(matchColumnKey, controls, ezfbColumns, out var resolvedColumn))
+            {
+                error = $"match column '{matchColumnKey}' was not found on this form.";
+                return false;
+            }
+
+            var matchValue = FirstNonBlank(request.MatchValue);
+            if (string.IsNullOrWhiteSpace(matchValue))
+            {
+                // Prefer the submitted field keyed the same way the caller named the match column.
+                if (!fieldMap.TryGetValue(matchColumnKey, out matchValue))
+                {
+                    foreach (var (key, value) in fieldMap)
+                    {
+                        if (TryResolveLookupColumn(key, controls, ezfbColumns, out var fieldCol)
+                            && string.Equals(fieldCol, resolvedColumn, StringComparison.OrdinalIgnoreCase))
+                        {
+                            matchValue = value;
+                            break;
+                        }
+                    }
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(matchValue))
+            {
+                error = "matchValue is required (or include the match column in fields).";
+                return false;
+            }
+
+            matchFilters.Add((resolvedColumn, matchValue.Trim()));
+        }
+
+        if (!TryResolveColumnFilters(request.MatchFilters, controls, ezfbColumns, out var extra, out var filterError))
+        {
+            error = filterError;
+            return false;
+        }
+
+        foreach (var filter in extra)
+        {
+            if (matchFilters.Any(m =>
+                    string.Equals(m.Column, filter.Column, StringComparison.OrdinalIgnoreCase)))
+                continue;
+            matchFilters.Add(filter);
+        }
+
+        if (matchFilters.Count > 0 && string.IsNullOrWhiteSpace(matchKey))
+            matchKey = matchFilters[0].Column;
+
+        return true;
     }
 
     private static async Task<List<Dictionary<string, object?>>> LoadEntriesByColumnValueAsync(
@@ -800,19 +1021,74 @@ public sealed class FormEntryService : IFormEntryService
         return false;
     }
 
+    private static readonly HashSet<string> UpsertBodyReservedKeys = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "fields", "field", "data", "entry", "entryId", "formEntryId", "item_id", "itemId",
+        "id", "formId", "wFormId", "created_at", "modified_at", "created_by", "modified_by",
+        "is_deleted", "EncryptOutput", "creditconsumed", "output"
+    };
+
+    /// <summary>
+    /// Accepts <c>{ "fields": { ... } }</c> (any casing), or a flat column→value map at the root
+    /// (master-form edit often posts the row without a <c>fields</c> wrapper).
+    /// </summary>
     private static FormEntryUpsertRequest ParseUpsertRequest(JsonElement body)
     {
         if (body.ValueKind != JsonValueKind.Object)
             return new FormEntryUpsertRequest();
 
-        if (!body.TryGetProperty("fields", out var fields) || fields.ValueKind != JsonValueKind.Object)
-            return new FormEntryUpsertRequest();
+        if (TryGetObjectPropertyIgnoreCase(body, "fields", out var fields)
+            || TryGetObjectPropertyIgnoreCase(body, "field", out fields)
+            || TryGetObjectPropertyIgnoreCase(body, "data", out fields))
+        {
+            return new FormEntryUpsertRequest { Fields = EnumerateFieldsObject(fields) };
+        }
 
+        // Flat map: treat non-reserved root properties as fields.
+        var flat = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
+        foreach (var prop in body.EnumerateObject())
+        {
+            if (UpsertBodyReservedKeys.Contains(prop.Name))
+                continue;
+            if (IsSystemColumn(prop.Name))
+                continue;
+            flat[prop.Name] = prop.Value;
+        }
+
+        return new FormEntryUpsertRequest { Fields = flat.Count > 0 ? flat : null };
+    }
+
+    private static bool TryGetObjectPropertyIgnoreCase(JsonElement body, string name, out JsonElement value)
+    {
+        foreach (var prop in body.EnumerateObject())
+        {
+            if (!string.Equals(prop.Name, name, StringComparison.OrdinalIgnoreCase))
+                continue;
+            if (prop.Value.ValueKind != JsonValueKind.Object)
+            {
+                value = default;
+                return false;
+            }
+
+            value = prop.Value;
+            return true;
+        }
+
+        value = default;
+        return false;
+    }
+
+    private static Dictionary<string, JsonElement> EnumerateFieldsObject(JsonElement fields)
+    {
         var dict = new Dictionary<string, JsonElement>(StringComparer.OrdinalIgnoreCase);
         foreach (var prop in fields.EnumerateObject())
+        {
+            if (IsSystemColumn(prop.Name) || UpsertBodyReservedKeys.Contains(prop.Name))
+                continue;
             dict[prop.Name] = prop.Value;
+        }
 
-        return new FormEntryUpsertRequest { Fields = dict };
+        return dict;
     }
 
     private static Dictionary<string, string> NormalizeFields(Dictionary<string, JsonElement>? fields)
@@ -823,9 +1099,18 @@ public sealed class FormEntryService : IFormEntryService
 
         foreach (var (key, value) in fields)
         {
-            var text = JsonElementToStorageString(value);
-            if (!string.IsNullOrWhiteSpace(text))
-                map[key.Trim()] = text;
+            if (string.IsNullOrWhiteSpace(key) || IsSystemColumn(key))
+                continue;
+
+            // Keep empty strings so master-form edit can clear a column; drop only null/undefined.
+            if (value.ValueKind is JsonValueKind.Null or JsonValueKind.Undefined)
+            {
+                map[key.Trim()] = string.Empty;
+                continue;
+            }
+
+            var text = JsonElementToStorageString(value) ?? string.Empty;
+            map[key.Trim()] = text;
         }
 
         return map;
@@ -898,20 +1183,33 @@ public sealed class FormEntryService : IFormEntryService
         IReadOnlySet<string> ezfbColumns)
     {
         var resolved = new List<KeyValuePair<string, string>>();
+        var seenColumns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (key, value) in fields)
         {
+            if (string.IsNullOrWhiteSpace(key) || IsSystemColumn(key))
+                continue;
+
+            string? column = null;
             if (TryResolveControlForField(key, controls, out var control) && control is not null)
             {
                 if (EzfbColumnNaming.TryResolveEzfbColumn(
                         control.ColumnName, control.Name, control.JsonId, ezfbColumns, out var col))
-                    resolved.Add(new KeyValuePair<string, string>(col, value));
-                continue;
+                    column = col;
             }
 
-            // No wFormControl match: the incoming key could itself be a Label (new forms) or a
-            // jsonId (old forms) -- try it both ways.
-            if (EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out var colFromKey))
-                resolved.Add(new KeyValuePair<string, string>(colFromKey, value));
+            // Control matched but had no physical column yet, or key is a bare label/jsonId/physical name.
+            if (column is null
+                && EzfbColumnNaming.TryResolveEzfbColumn(key, key, ezfbColumns, out var colFromKey))
+                column = colFromKey;
+
+            if (column is null
+                && EzfbColumnNaming.TryResolveEzfbColumn(null, key, ezfbColumns, out var colFromJson))
+                column = colFromJson;
+
+            if (column is null || !seenColumns.Add(column))
+                continue;
+
+            resolved.Add(new KeyValuePair<string, string>(column, value));
         }
 
         return resolved;
@@ -1079,13 +1377,21 @@ public sealed class FormEntryService : IFormEntryService
         IReadOnlyList<KeyValuePair<string, string>> resolvedFields,
         string modifiedAt,
         string modifiedBy,
+        IReadOnlySet<string> ezfbColumns,
         CancellationToken cancellationToken)
     {
+        if (resolvedFields.Count == 0)
+            return false;
+
         var sets = resolvedFields
             .Select((f, i) => $"\"{EscapeColumn(f.Key)}\" = @V{i}")
             .ToList();
-        sets.Add("modified_at = @ModifiedAt");
-        sets.Add("modified_by = @ModifiedBy");
+        var hasModifiedAt = ezfbColumns.Contains("modified_at");
+        var hasModifiedBy = ezfbColumns.Contains("modified_by");
+        if (hasModifiedAt)
+            sets.Add("modified_at = @ModifiedAt");
+        if (hasModifiedBy)
+            sets.Add("modified_by = @ModifiedBy");
 
         var sql = $"""
             UPDATE dbo.{tableName}
@@ -1095,9 +1401,11 @@ public sealed class FormEntryService : IFormEntryService
 
         await using var cmd = new NpgsqlCommand(sql, connection);
         for (var i = 0; i < resolvedFields.Count; i++)
-            cmd.Parameters.AddWithValue($"@V{i}", resolvedFields[i].Value);
-        cmd.Parameters.AddWithValue("@ModifiedAt", modifiedAt);
-        cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
+            cmd.Parameters.AddWithValue($"@V{i}", (object?)resolvedFields[i].Value ?? DBNull.Value);
+        if (hasModifiedAt)
+            cmd.Parameters.AddWithValue("@ModifiedAt", modifiedAt);
+        if (hasModifiedBy)
+            cmd.Parameters.AddWithValue("@ModifiedBy", modifiedBy);
         cmd.Parameters.AddWithValue("@ItemId", entryId);
 
         return await cmd.ExecuteNonQueryAsync(cancellationToken) > 0;

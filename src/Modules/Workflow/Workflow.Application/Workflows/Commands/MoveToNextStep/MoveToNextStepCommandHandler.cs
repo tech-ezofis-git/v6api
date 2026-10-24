@@ -25,6 +25,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
     private readonly IFtlAgentJobClient _ftlAgentJobClient;
     private readonly IApAgentJobProgressService _apAgentJobProgress;
     private readonly IQuanticsFormSyncJobClient _quanticsFormSync;
+    private readonly IWorkflowEndSyncService _endSync;
     private readonly ILogger<MoveToNextStepCommandHandler> _logger;
 
     public MoveToNextStepCommandHandler(
@@ -44,6 +45,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         IFtlAgentJobClient ftlAgentJobClient,
         IApAgentJobProgressService apAgentJobProgress,
         IQuanticsFormSyncJobClient quanticsFormSync,
+        IWorkflowEndSyncService endSync,
         ILogger<MoveToNextStepCommandHandler> logger)
     {
         _repository = repository;
@@ -62,6 +64,7 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         _ftlAgentJobClient = ftlAgentJobClient;
         _apAgentJobProgress = apAgentJobProgress;
         _quanticsFormSync = quanticsFormSync;
+        _endSync = endSync;
         _logger = logger;
     }
 
@@ -490,6 +493,21 @@ public sealed class MoveToNextStepCommandHandler : IRequestHandler<MoveToNextSte
         string? ftlJobId = null;
         if (!isCompleted && nextDefinitionStep != null)
             ftlJobId = await TryEnqueueFtlAgentAsync(instance, workflow, nextDefinitionStep, userId, formId, cancellationToken);
+
+        // Designer "endSync" (settings.endSync on the step just completed): copy mapped field
+        // values onto a master form, any workflow. Generic, additive, never fails the move.
+        if (!string.IsNullOrWhiteSpace(targetDefinitionStep.ActivityId) && !string.IsNullOrWhiteSpace(formId))
+        {
+            await _endSync.TrySyncOnStepCompleteAsync(
+                instance.WorkflowId,
+                instance.Id,
+                targetDefinitionStep.ActivityId!,
+                formId,
+                formEntryId,
+                submittedFormDataJson: null,
+                formDataFields: request.FormDataFields,
+                cancellationToken);
+        }
 
         // Quantics packaging: on completion, sync the ticket form to the master form
         // via the Python form_sync chat intent (background job; never fails the move).
